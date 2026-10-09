@@ -250,7 +250,20 @@ function setupTtsTest(){
   $('#stopTts').onclick=()=>$('#liveStop').click();
 }
 
-function setupSttTest(){$('#recordStt').onclick=toggleLiveSttTest;$('#clearStt').onclick=()=>{$('#sttResult').textContent='O texto transcrito aparecerá aqui.';$('#sttStatus').textContent=''}}
+function setupSttTest(){$('#recordStt').onclick=toggleLiveSttTest;$('#copySttDiagnostics').onclick=copySttDiagnostics;$('#clearStt').onclick=()=>{$('#sttResult').textContent='O texto transcrito aparecerá aqui.';$('#sttStatus').textContent=''}}
+async function copySttDiagnostics(){
+ const button=$('#copySttDiagnostics'),status=$('#sttDiagnosticsStatus');if(button.disabled)return;button.disabled=true;status.textContent='Consultando diagnóstico STT…';
+ try{
+  const diagnostics=LiveSttDiagnostics.clean(await LiveSttDiagnostics.get());
+  if(!diagnostics.jobs.length){status.textContent='Nenhum diagnóstico STT nesta sessão. Faça um ditado após recarregar a extensão.';return;}
+  if(!navigator.clipboard?.writeText)throw Error('Clipboard indisponível');
+  await navigator.clipboard.writeText(JSON.stringify(diagnostics,null,2));
+  const job=diagnostics.jobs[0],capture=job.capture||{},transport=job.transport||{},result=job.result||{};
+  const yesNo=value=>value===undefined?'não registrado':value?'sim':'não';
+  status.textContent='Diagnóstico STT copiado. Último ditado: microfone aberto '+yesNo(capture.microphoneOpened)+'; sinal no PCM '+yesNo(capture.pcmSamples===undefined?undefined:capture.pcmSignalSamples>0)+'; PCM enviado '+yesNo(transport.sentBytes===undefined?undefined:transport.sentBytes>0)+'; Gemini pronto '+yesNo(transport.setupComplete)+'; transcrição '+yesNo(transport.inputEvents===undefined?undefined:transport.inputEvents>0)+'; captura liberada '+yesNo(capture.released)+'; resultado '+(result.outcome||transport.outcome||'não registrado')+'. Sinal de áudio não comprova fala.';
+ }catch{status.textContent='Não foi possível copiar o diagnóstico STT. Mantenha as opções abertas e focadas e tente novamente. Se persistir, recarregue a extensão e reabra as opções.';}
+ finally{button.disabled=false;}
+}
 
 function shortcutLabel(id){return {toggleHud:'Mostrar/ocultar HUD',readSelection:'Ler seleção (TTS)',startDictation:'Iniciar/parar ditado (STT)',togglePause:'Play/Pause',lensSelection:'Seleção Gemini Lens'}[id]||id}
 function renderShortcuts(){const box=$('#shortcutList');box.innerHTML='';for(const [id,v] of Object.entries(state.ui.shortcuts)){const row=document.createElement('div');row.className='shortcut';row.innerHTML='<div><strong>'+esc(shortcutLabel(id))+'</strong><div class="muted">Clique em Gravar e pressione a combinação desejada.</div></div><div class="row"><input data-shortcut-input="'+esc(id)+'" value="'+esc(v||'')+'" style="flex:1"><button class="btn" data-record-shortcut="'+esc(id)+'">Gravar</button></div>';box.append(row)}box.querySelectorAll('[data-shortcut-input]').forEach(i=>i.onchange=async()=>{state.ui.shortcuts[i.dataset.shortcutInput]=i.value.trim();await chrome.storage.local.set({ui:state.ui});notice('Atalho salvo.')});box.querySelectorAll('[data-record-shortcut]').forEach(b=>b.onclick=()=>{recordingShortcut=b.dataset.recordShortcut;b.textContent='Pressione…'})}
@@ -373,17 +386,21 @@ async function releaseLiveSttTest(mic=liveMic){
  mic.closed=true;mic.stream?.getTracks().forEach(track=>track.stop());
  if(mic.releasing)return mic.releasing;
  mic.node?.disconnect();mic.source?.disconnect();mic.mute?.disconnect();
+ if(mic.node)mic.node.port.onmessage=null;
  if(liveMic===mic){liveMic=null;$('#recordStt').textContent='Iniciar gravação';}
- mic.releasing=mic.context?.close().catch(()=>{})||Promise.resolve();return mic.releasing;
+ mic.released=true;mic.releasing=Promise.resolve().then(()=>mic.context?.close()).catch(error=>console.error('[STT cleanup]',error)).then(()=>globalThis.LiveSttDiagnostics?.capture(mic,'capture-released',{flushAcknowledged:mic.flushAcknowledged===true}));return mic.releasing;
 }
 async function toggleLiveSttTest(){
  if(liveMic){
   const mic=liveMic;if(mic.stopping)return;
   if(mic.starting){liveSttJobId=null;await releaseLiveSttTest(mic);void chrome.runtime.sendMessage({type:'STT_LIVE_CANCEL',payload:{jobId:mic.jobId,playerId:mic.jobId}}).catch(()=>{});$('#sttStatus').textContent='Parado.';return;}
   mic.stopping=true;
+  globalThis.LiveSttDiagnostics?.capture(mic,'capture-stopping');
   const flushed=new Promise(resolve=>{const timer=setTimeout(resolve,180);mic.flushed=()=>{clearTimeout(timer);resolve();};mic.node.port.postMessage({type:'flush'});});
   mic.stream.getTracks().forEach(track=>track.stop());await flushed;await releaseLiveSttTest(mic);await mic.pending;
   if(liveSttJobId!==mic.jobId)return;
+  globalThis.LiveSttDiagnostics?.capture(mic,'capture-released',{flushAcknowledged:mic.flushAcknowledged===true});
+  if(mic.metrics&&!mic.metrics.capturedBytes){liveSttJobId=null;void globalThis.LiveSttDiagnostics?.emit({jobId:mic.jobId,scope:'result',stage:'error',outcome:'NO_CAPTURE'});void chrome.runtime.sendMessage({type:'STT_LIVE_CANCEL',payload:{jobId:mic.jobId,playerId:mic.jobId}}).catch(()=>{});$('#sttStatus').textContent='Nenhum PCM capturado: verifique o microfone e AudioContext.';return;}
   $('#sttStatus').textContent='Finalizando STT Live…';
   try{const response=await chrome.runtime.sendMessage({type:'STT_LIVE_STOP',payload:{jobId:mic.jobId,playerId:mic.jobId}});if(!response?.success)throw new Error(response?.error||'Falha ao finalizar STT.');}
   catch(error){liveSttJobId=null;void chrome.runtime.sendMessage({type:'STT_LIVE_CANCEL',payload:{jobId:mic.jobId,playerId:mic.jobId}}).catch(()=>{});$('#sttStatus').textContent='❌ '+error.message;}
@@ -391,21 +408,24 @@ async function toggleLiveSttTest(){
  }
  if(liveSttJobId)return;
  const jobId='options-stt-'+crypto.randomUUID(),mic={jobId,starting:true,pending:Promise.resolve()};liveMic=mic;liveSttJobId=jobId;liveSttCommitted='';
+ globalThis.LiveSttDiagnostics?.capture(mic,'starting');$('#sttStatus').textContent='Conectando ditado… Aguarde “Gravando” antes de falar.';
  const current=()=>liveMic===mic&&liveSttJobId===jobId&&!mic.closed;
  try{
   pullAgentFromFields();const stt=liveDraft().stt;stt.preferredModel=$('#liveSttModel').value;stt.customVocabulary=$('#liveSttVocabulary').value.split('\n').map(x=>x.trim()).filter(Boolean).slice(0,1000);stt.smartTranscription=$('#liveSttSmart').checked;stt.transform=$('#liveSttTransform').checked;
-  mic.stream=await navigator.mediaDevices.getUserMedia({audio:true});if(!current()){mic.stream.getTracks().forEach(track=>track.stop());return;}
+  mic.stream=await navigator.mediaDevices.getUserMedia({audio:{channelCount:1}});if(!current()){mic.stream.getTracks().forEach(track=>track.stop());return;}
+  globalThis.LiveSttDiagnostics?.capture(mic,'microphone-open');
   const started=await chrome.runtime.sendMessage({type:'STT_LIVE_START',payload:{jobId,playerId:jobId,agentId:currentAgent.metadata.id,previewAgent:clone(currentAgent)}});
   if(!current()){void chrome.runtime.sendMessage({type:'STT_LIVE_CANCEL',payload:{jobId,playerId:jobId}}).catch(()=>{});return;}
   if(!started?.success)throw new Error(started?.error||'Falha no STT Live.');
   const context=new AudioContext({latencyHint:'interactive'});mic.context=context;await context.audioWorklet.addModule(chrome.runtime.getURL('mic-capture-worklet.js'));if(!current())return;
-  const source=context.createMediaStreamSource(mic.stream),node=new AudioWorkletNode(context,'gemini-mic-capture'),mute=context.createGain(),resampler={cursor:0,previous:0};mic.source=source;mic.node=node;mic.mute=mute;mute.gain.value=0;source.connect(node).connect(mute).connect(context.destination);
+  const source=context.createMediaStreamSource(mic.stream),node=new AudioWorkletNode(context,'gemini-mic-capture',{channelCount:1,channelCountMode:'explicit',outputChannelCount:[1]}),mute=context.createGain(),resampler={cursor:0,previous:0};mic.source=source;mic.node=node;mic.mute=mute;mute.gain.value=0;source.connect(node).connect(mute).connect(context.destination);
+  globalThis.LiveSttDiagnostics?.capture(mic,'worklet-ready');
   node.port.onmessage=event=>{
-   if(event.data?.type==='flushed'){mic.flushed?.();return;}if(!current())return;
-   const bytes=resampleLiveTest(new Float32Array(event.data),context.sampleRate,resampler);let raw='';for(let i=0;i<bytes.length;i+=0x8000)raw+=String.fromCharCode(...bytes.subarray(i,i+0x8000));const audioBase64=btoa(raw);
-   mic.pending=mic.pending.then(async()=>{if(liveSttJobId!==jobId)return;const response=await chrome.runtime.sendMessage({type:'STT_LIVE_AUDIO',payload:{jobId,playerId:jobId,audioBase64,sampleRate:16000}});if(!response?.success)throw new Error(response?.error||'Falha ao enviar áudio Live.');}).catch(error=>{if(liveSttJobId!==jobId)return;liveSttJobId=null;void releaseLiveSttTest(mic);void chrome.runtime.sendMessage({type:'STT_LIVE_CANCEL',payload:{jobId,playerId:jobId}}).catch(()=>{});$('#sttStatus').textContent='❌ '+error.message;});
+   if(event.data?.type==='flushed'){mic.flushAcknowledged=true;mic.flushed?.();return;}if(!current())return;
+   const input=new Float32Array(event.data),bytes=resampleLiveTest(input,context.sampleRate,resampler);if(!bytes.length)return;globalThis.LiveSttDiagnostics?.observe(mic,input,bytes);let raw='';for(let i=0;i<bytes.length;i+=0x8000)raw+=String.fromCharCode(...bytes.subarray(i,i+0x8000));const audioBase64=btoa(raw);
+   mic.pending=mic.pending.then(async()=>{if(liveSttJobId!==jobId)return;const response=await chrome.runtime.sendMessage({type:'STT_LIVE_AUDIO',payload:{jobId,playerId:jobId,audioBase64,sampleRate:16000}});if(!response?.success)throw new Error(response?.error||'Falha ao enviar áudio Live.');if(mic.metrics){mic.metrics.ackChunks++;mic.metrics.ackBytes+=bytes.byteLength;}if(!mic.lastDiagnosticAt||Date.now()-mic.lastDiagnosticAt>=1000){mic.lastDiagnosticAt=Date.now();globalThis.LiveSttDiagnostics?.capture(mic,'capture-progress');}}).catch(async error=>{if(liveSttJobId!==jobId)return;liveSttJobId=null;await releaseLiveSttTest(mic);try{await chrome.runtime.sendMessage({type:'STT_LIVE_CANCEL',payload:{jobId,playerId:jobId}});}catch{}$('#sttStatus').textContent='❌ '+error.message;}).catch(error=>console.error('[STT capture]',error));
   };
-  await context.resume();if(!current())return;mic.starting=false;$('#recordStt').textContent='⏹ Parar e transcrever';$('#sttStatus').textContent='Gravando via Live…';$('#sttResult').textContent='';
+  await context.resume();if(!current())return;if(context.state!=='running')throw Error('AudioContext do microfone não está running: '+context.state);globalThis.LiveSttDiagnostics?.capture(mic,'capture-running');mic.starting=false;$('#recordStt').textContent='⏹ Parar e transcrever';$('#sttStatus').textContent='Gravando via Live…';$('#sttResult').textContent='';
  }catch(error){if(liveSttJobId===jobId){liveSttJobId=null;await releaseLiveSttTest(mic);void chrome.runtime.sendMessage({type:'STT_LIVE_CANCEL',payload:{jobId,playerId:jobId}}).catch(()=>{});$('#sttStatus').textContent='❌ '+(error.message||String(error));}}
 }
 async function main(){initTabs();initVoiceControls();await loadState();selectedAgentId=state.agents.activeAgentId||'narrator';currentAgent=clone(getAgent(selectedAgentId));isCustom=!currentAgent.metadata.isBuiltIn;renderAgentSelect();bindCurrentAgentToFields();setupAgentBindings();setupAgentNavigation();setupApi();setupTtsTest();setupTtsRanking();setupSttTest();setupShortcuts();setupHistory();setupMisc();setupLiveOptions();$('#storageBadge').textContent='Storage OK • '+state.agents.customAgents.length+' custom'}

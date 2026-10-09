@@ -1,13 +1,14 @@
 const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm'),crypto=require('node:crypto');
 const config=require('../live-config.js'),source=fs.readFileSync(require.resolve('../options.js'),'utf8'),flush=()=>new Promise(r=>setImmediate(r));
 function deferred(){let resolve;const promise=new Promise(r=>resolve=r);return{promise,resolve};}
-function optionsEnv({slowMic=false,slowSetup=false}={}){
+function optionsEnv({slowMic=false,slowSetup=false,diagnostics=false}={}){
  const elements=new Map(),messages=[],streams=[],contexts=[],nodes=[],micReady=deferred(),setupReady=deferred();
  const element=id=>{if(!elements.has(id))elements.set(id,{value:id==='#liveSttModel'?'gemini-3.8-live':'',checked:false,textContent:''});return elements.get(id);};
  function stream(){const track={stopped:false,stop(){this.stopped=true;}};const s={track,getTracks:()=>[track]};streams.push(s);return s;}
  class AudioContext{constructor(){this.sampleRate=48000;this.destination={};this.state='suspended';this.audioWorklet={addModule:async()=>{}};contexts.push(this);}createMediaStreamSource(){return{connect:x=>x,disconnect(){}};}createGain(){return{gain:{value:1},connect:x=>x,disconnect(){}};}async resume(){this.state='running';}async close(){this.state='closed';}}
  class Node{constructor(){nodes.push(this);this.port={postMessage:m=>{if(m.type==='flush')this.port.onmessage({data:{type:'flushed'}});}};}connect(x){return x;}disconnect(){this.disconnected=true;}}
  const context=vm.createContext({console,structuredClone,crypto:crypto.webcrypto,setTimeout,clearTimeout,btoa,Float32Array,Int16Array,Uint8Array,AudioContext,AudioWorkletNode:Node,navigator:{mediaDevices:{getUserMedia:async()=>slowMic?micReady.promise:stream()}},LiveConfig:config,$:element,currentAgent:{metadata:{id:'custom'},live:{stt:{}}},pullAgentFromFields(){},clone:structuredClone,liveDraft(){return context.currentAgent.live;},chrome:{runtime:{getURL:x=>x,async sendMessage(m){messages.push(m);if(m.type==='STT_LIVE_START'&&slowSetup)return setupReady.promise;return{success:true};}}}});
+ if(diagnostics)vm.runInContext(fs.readFileSync(require.resolve('../live-stt-diagnostics.js'),'utf8'),context);
  vm.runInContext("let livePreview=null,liveMic=null,liveSttJobId=null,liveSttCommitted='';"+source.slice(source.indexOf('function resampleLiveTest('),source.indexOf('async function main('))+";globalThis.testApi={toggleLiveSttTest,releaseLiveSttTest,getMic:()=>liveMic,getJob:()=>liveSttJobId};",context);
  const line=source.split('\n').find(line=>line.startsWith(' chrome.runtime.onMessage.addListener(message=>'));
  vm.runInContext('globalThis.eventHandler='+line.slice(line.indexOf('(message=>')+1,-2)+';',context);
@@ -20,6 +21,28 @@ test('opções STT: falha do contexto no início encerra trilhas e cancela sess�
 test('opções STT: parada envia PCM antes de STOP e aguarda final sem nova gravação',async()=>{
  const e=optionsEnv();await e.toggleLiveSttTest();const mic=e.getMic();e.nodes[0].port.onmessage({data:new Float32Array([.1,.2,.3]).buffer});await e.toggleLiveSttTest();await e.toggleLiveSttTest();assert.equal(e.streams[0].track.stopped,true);assert.equal(e.contexts[0].state,'closed');assert.equal(e.getMic(),null);assert.equal(e.getJob(),mic.jobId);assert.deepEqual(e.messages.map(m=>m.type),['STT_LIVE_START','STT_LIVE_AUDIO','STT_LIVE_STOP']);
 });
+test('opções STT: diagnóstico registra sinal, envio, flush e liberação sem conteúdo privado',async()=>{
+ const e=optionsEnv({diagnostics:true});await e.toggleLiveSttTest();e.nodes[0].port.onmessage({data:new Float32Array([.1,.2,.3]).buffer});await e.toggleLiveSttTest();await flush();
+ const packets=e.messages.filter(m=>m.type==='LIVE_STT_DIAGNOSTIC').map(m=>m.payload),released=packets.filter(p=>p.stage==='capture-released').at(-1);
+ assert.equal(released.contextState,'closed');assert.equal(released.released,true);assert.equal(released.flushAcknowledged,true);assert.equal(released.capturedFrames,3);assert.equal(released.ackBytes,2);assert.ok(released.maxRms>0);assert.ok(packets.some(p=>p.stage==='capture-running'));
+ assert.ok(packets.every(p=>!('text'in p)&&!('audioBase64'in p)&&!('apiKey'in p)));assert.equal(e.streams[0].track.stopped,true);
+});
+function diagnosticsButtonEnv({jobs=[],failRead=false,failCopy=false,noClipboard=false,pending}={}){
+ const elements=new Map(),copied=[];let reads=0;const element=id=>{if(!elements.has(id))elements.set(id,{textContent:'',disabled:false});return elements.get(id);};
+ const context=vm.createContext({console,$:element,toggleLiveSttTest(){},navigator:noClipboard?{}:{clipboard:{writeText:async text=>{if(failCopy)throw Error('cópia negada');copied.push(text);}}},chrome:{runtime:{sendMessage:async m=>{assert.equal(m.type,'LIVE_STT_DIAGNOSTICS_GET');reads++;if(failRead)throw Error('contexto inválido');if(pending)await pending.promise;return{success:true,diagnostics:{version:1,jobs,apiKey:'fixture-private-key',url:'https://private.invalid/'}};}}}});
+ vm.runInContext(fs.readFileSync(require.resolve('../live-stt-diagnostics.js'),'utf8'),context);
+ vm.runInContext(source.slice(source.indexOf('function setupSttTest('),source.indexOf('function shortcutLabel(')),context);context.setupSttTest();return{copied,element,click:()=>element('#copySttDiagnostics').onclick(),reads:()=>reads};
+}
+test('botão Copiar diagnóstico STT consulta registros, sanitiza JSON e informa sucesso',async()=>{
+ const jobId='00000000-0000-4000-8000-000000000000',e=diagnosticsButtonEnv({jobs:[{jobId,updatedAt:Date.now(),events:[{jobId,stage:'error',scope:'transport',outcome:'NO_TRANSCRIPTION',text:'fixture-private-transcript',apiKey:'fixture-private-key',audioBase64:'fixture-private-audio',url:'https://private.invalid/'}],capture:{stage:'capture-released',microphoneOpened:true,released:true,pcmSamples:80,pcmSignalSamples:10,deviceId:'fixture-private-device'},transport:{stage:'error',outcome:'NO_TRANSCRIPTION',sentBytes:160,setupComplete:true,inputEvents:0,instructions:'fixture-private-agent'}}]});
+ await e.click();assert.equal(e.reads(),1);assert.equal(e.copied.length,1);assert.ok(!e.copied[0].includes('private'));const output=JSON.parse(e.copied[0]);assert.equal(output.jobs[0].transport.sentBytes,160);assert.equal(output.apiKey,undefined);assert.match(e.element('#sttDiagnosticsStatus').textContent,/copiado/);assert.match(e.element('#sttDiagnosticsStatus').textContent,/sinal no PCM sim/);assert.match(e.element('#sttDiagnosticsStatus').textContent,/NO_TRANSCRIPTION/);assert.equal(e.element('#copySttDiagnostics').disabled,false);
+ const html=fs.readFileSync(require.resolve('../options.html'),'utf8');assert.match(html,/id="copySttDiagnostics"[^>]*>Copiar diagnóstico STT/);assert.match(html,/id="sttDiagnosticsStatus"[^>]*aria-live="polite"/);
+});
+test('botão de diagnóstico informa ausência, leitura/cópia falhas e não deixa rejeição sem tratamento',async()=>{
+ const jobId='00000000-0000-4000-8000-000000000000',jobs=[{updatedAt:Date.now(),events:[{jobId,stage:'starting',scope:'capture'}]}];
+ for(const options of [{jobs:[]},{jobs,failRead:true},{jobs,failCopy:true},{jobs,noClipboard:true}]){const e=diagnosticsButtonEnv(options);await assert.doesNotReject(e.click());assert.equal(e.copied.length,0);assert.equal(e.element('#copySttDiagnostics').disabled,false);assert.match(e.element('#sttDiagnosticsStatus').textContent,options.jobs.length?/Não foi possível copiar/:/Nenhum diagnóstico/);}
+ const pending=deferred(),e=diagnosticsButtonEnv({jobs,pending}),copy=e.click();assert.equal(e.element('#copySttDiagnostics').disabled,true);await e.click();assert.equal(e.reads(),1);pending.resolve();await copy;assert.equal(e.copied.length,1);assert.equal(e.element('#copySttDiagnostics').disabled,false);
+});
 test('opções STT: cancelar início pendente impede gravação e encerra stream tardio',async()=>{
  for(const phase of ['microphone','setup']){const e=optionsEnv({slowMic:phase==='microphone',slowSetup:phase==='setup'}),started=e.toggleLiveSttTest();await flush();await e.toggleLiveSttTest();if(phase==='microphone')e.micReady.resolve(e.stream());else e.setupReady.resolve({success:true});await started;assert.equal(e.getJob(),null);assert.equal(e.getMic(),null);assert.equal(e.streams[0].track.stopped,true);assert.equal(e.nodes.length,0);assert.ok(e.messages.some(m=>m.type==='STT_LIVE_CANCEL'));}
 });
@@ -30,8 +53,8 @@ test('opções mantêm vocabulário/SMART legados desativados entre modelos gera
  e.element('#liveSttModel').value='gemini-3.8-live-extended-thinking';e.context.updateLiveSttCapabilities();assert.equal(e.element('#liveSttVocabulary').disabled,true);assert.equal(e.element('#liveSttSmart').disabled,true);assert.equal(e.element('#liveSttVocabulary').value,'termo preservado');assert.equal(e.element('#liveSttSmart').checked,true);
 });
 function backgroundEnv(agent,models={sttModelId:'gemini-3.8-live'}){
- const forwarded=[],stored=[],sent=[];
- const context=vm.createContext({structuredClone,AbortController,console,setTimeout,clearTimeout,chrome:{runtime:{getURL:x=>'chrome-extension://test/'+x,sendMessage:async m=>{sent.push(m);return{success:true};}},tabs:{sendMessage:async(...args)=>sent.push(args)}}});
+ const forwarded=[],stored=[],sent=[],sessionStore={};
+ const context=vm.createContext({structuredClone,AbortController,console,setTimeout,clearTimeout,chrome:{runtime:{getURL:x=>'chrome-extension://test/'+x,sendMessage:async m=>{sent.push(m);return{success:true};}},storage:{session:{get:async key=>({[key]:sessionStore[key]}),set:async values=>Object.assign(sessionStore,values)}},tabs:{sendMessage:async(...args)=>sent.push(args)}}});
  vm.runInContext(require('./load-background.cjs')(require.resolve('../background.js')).replace('__require("extension/src/background/index.ts");','globalThis.modules=__modules;'),context);
  const cache={},overrides={
   'extension/src/services/storage/chromeStorageAdapter.ts':{chromeStorage:{get:async key=>key==='audio'?{legacyUnaryAudio:true}: {},getMany:async()=>({api:{apiKey:'fake-only',apiKeys:['fake-only','fake-two']},agents:{customAgents:[agent]},models,audio:{}}),update:async()=>{},setMultiple:async v=>stored.push(v)}},
@@ -56,6 +79,12 @@ test('TTS global/agente/editor encaminham modelo efetivo Live sem execução leg
 });
 test('diagnóstico TTS unary não pode acionar serviço antigo',async()=>{
  const e=backgroundEnv({metadata:{id:'narrator'}}),result=await e.run('TTS_DIAGNOSTIC_REQUEST',{request:{modelId:'gemini-3.8-flash-tts'}},{url:'chrome-extension://test/options.html'});assert.equal(result.success,false);assert.match(result.error,/unary desativado/);assert.equal(e.forwarded.length,0);
+});
+test('leitura dos diagnósticos STT é restrita às opções, sem páginas comuns/offscreen',async()=>{
+ const e=backgroundEnv({metadata:{id:'narrator'}}),jobId='00000000-0000-4000-8000-000000000000',options={url:'chrome-extension://test/options.html?tab=stt'};
+ assert.equal((await e.run('LIVE_STT_DIAGNOSTIC',{jobId,stage:'capture-progress',scope:'capture',pcmSamples:80,text:'fixture-private',audioBase64:'fixture-private',apiKey:'fixture-private'})).success,true);
+ for(const sender of [{url:'https://example.test/',tab:{id:5}},{url:'chrome-extension://test/offscreen.html'}])assert.equal((await e.run('LIVE_STT_DIAGNOSTICS_GET',{},sender)).success,false);
+ const res=await e.run('LIVE_STT_DIAGNOSTICS_GET',{},options);assert.equal(res.success,true);assert.equal(res.diagnostics.jobs[0].capture.pcmSamples,80);assert.ok(!JSON.stringify(res.diagnostics).includes('private'));assert.equal(e.stored.length,0);
 });
 test('background substitui escolha inelegível sem apagar legado/fallback/instruções',async()=>{
  const agent={metadata:{id:'custom'},instructions:{sttFormattingInstruction:'Formate.'},live:{preferredModel:'gemini-3.8-live',stt:{preferredModel:'gemini-3.5-transcribe-live',fallbackModels:['gemini-3.5-transcribe-live','gemini-3.8-live'],smartTranscription:false,customVocabulary:['termo'],transform:false}}},before=structuredClone(agent),e=backgroundEnv(agent);await e.run('STT_LIVE_START');const p=e.forwarded[0].payload;assert.equal(p.modelId,'gemini-3.8-live');assert.deepEqual(Array.from(p.models),config.LIVE_STT_MODELS);assert.equal(p.smartTranscription,false);assert.deepEqual(Array.from(p.customVocabulary),['termo']);assert.equal(p.transformInstruction,null);assert.equal(e.stored.length,0);assert.deepEqual(agent,before);

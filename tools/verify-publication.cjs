@@ -8,11 +8,11 @@ const runtimeFiles = [
     'popup.html', 'popup.js', 'options.html', 'options.js',
     'offscreen.html', 'offscreen.js', 'lens-permission.html', 'lens-permission.js',
     'tts-config.js', 'tts-adaptive.js', 'live-config.js', 'live-session-manager.js',
-    'live-tts-diagnostics.js', 'mic-capture-worklet.js', 'pcm-player-worklet.js',
+    'live-tts-diagnostics.js', 'live-stt-diagnostics.js', 'mic-capture-worklet.js', 'pcm-player-worklet.js',
     'icons/icon16.png', 'icons/icon48.png', 'icons/icon128.png',
 ];
 function publicFiles() {
-    return [...runtimeFiles, 'README.md', '.gitignore', 'docs/RELEASE-v1.0.0.md',
+    return [...runtimeFiles, 'README.md', '.gitignore', 'docs/RELEASE-v1.0.0.md', 'docs/RELEASE-v1.0.1.md',
         'tools/verify-publication.cjs', 'tools/package-release.cjs',
         ...fs.readdirSync(path.join(root, 'tests')).filter(name =>
             name.endsWith('.test.cjs') || name === 'load-background.cjs').map(name => 'tests/' + name)].sort();

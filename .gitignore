@@ -23,6 +23,7 @@ coverage/
 # Relatórios de trabalho, capturas e diagnósticos históricos ficam somente locais.
 docs/*
 !docs/RELEASE-v1.0.0.md
+!docs/RELEASE-v1.0.1.md
 LEIA-ME.txt
 VERIFICACAO.txt
 tools/*

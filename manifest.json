@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "FalaMermo",
-  "version": "2.0.1",
+  "version": "2.0.2",
   "description": "Narração e ditado Gemini Live, Lens, HUD e agentes personalizados com configurações avançadas.",
   "permissions": [
     "storage",
@@ -36,6 +36,7 @@
       ],
       "js": [
         "tts-config.js",
+        "live-stt-diagnostics.js",
         "content.js"
       ],
       "css": [

@@ -9,6 +9,10 @@ test('prioridade única, capacidade por rota e descontinuação sem modelos conv
  assert.deepEqual(live.modelChain('tts',expected[0],[expected[3],expected[1],expected[2]]),expected);
 });
 test('setup por modelo respeita thinking level/budget e separa STT da narração',()=>{
+ assert.deepEqual(live.buildLiveSttSessionConfig({modelId:'gemini-3.8-live'}).setup.realtimeInputConfig.automaticActivityDetection,{disabled:true});
+ assert.deepEqual(live.buildLiveSttSessionConfig({modelId:'gemini-3.8-live',vad:{disabled:false}}).setup.realtimeInputConfig.automaticActivityDetection,{disabled:false});
+ assert.equal(live.buildLiveSessionConfig({modelId:'gemini-3.8-live'}).setup.realtimeInputConfig,undefined);
+ for(const id of ['gemini-3.1-flash-live-preview','gemini-2.5-flash-native-audio-preview-12-2025'])assert.equal(live.buildLiveSttSessionConfig({modelId:id}).setup.realtimeInputConfig,undefined);
  assert.deepEqual(live.buildLiveSttSessionConfig({modelId:'gemini-3.8-live-extended-thinking'}).setup.realtimeInputConfig.automaticActivityDetection,{disabled:true});
  assert.deepEqual(live.buildLiveSttSessionConfig({modelId:'gemini-3.8-live-extended-thinking',vad:{disabled:false,prefixPaddingMs:200}}).setup.realtimeInputConfig.automaticActivityDetection,{disabled:false,prefixPaddingMs:200});
  assert.deepEqual(live.buildLiveSessionConfig({modelId:'gemini-3.8-live-extended-thinking'}).setup.generationConfig.thinkingConfig,{thinkingLevel:'LOW'});

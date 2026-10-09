@@ -1,7 +1,7 @@
 const test=require('node:test'),assert=require('node:assert/strict');
 const config=require('../live-config.js'),sessions=require('../live-session-manager.js');
 const flush=()=>new Promise(resolve=>setImmediate(resolve));
-function transport(t){
+function transport(t,override={}){
  const original=globalThis.WebSocket,instances=[];
  class Socket{
   constructor(url){this.url=url;this.readyState=0;this.sent=[];instances.push(this);}
@@ -12,7 +12,7 @@ function transport(t){
   close(code,reason){if(this.readyState===3)return;this.serverClose(code,reason);}
  }
  globalThis.WebSocket=Socket;t.after(()=>{globalThis.WebSocket=original;});
- const options={modelId:'gemini-3.8-live',voiceName:'Kore',apiKey:'secret-test-key',keyIndex:1,jobId:'job-1',blockId:0};
+ const options={modelId:'gemini-3.8-live',voiceName:'Kore',apiKey:'secret-test-key',keyIndex:1,jobId:'job-1',blockId:0,...override};
  const session=new sessions.LiveSession({retire(s){s.close();}},options);
  return{session,options,instances};
 }
@@ -70,17 +70,39 @@ test('sessão warm atualiza job/bloco sem reconstruir setup',async t=>{
  const reused=await manager.acquire({...options,jobId:'job-2',blockId:2});assert.equal(reused,session);assert.equal(reused.diagnosticSnapshot().jobId,'job-2');assert.equal(reused.diagnosticSnapshot().blockId,2);assert.equal(instances[0].sent.length,1);
 });
 test('STT aceita setupComplete Blob e transcrições ArrayBuffer sem timeout',async t=>{
- const {session,instances}=transport(t);session.options.mode='dictation';const opening=session.open(),socket=instances[0];void opening.catch(()=>{});t.after(()=>session.close());socket.open();await flush();socket.message(new Blob([JSON.stringify({setupComplete:{}})]));await flush();assert.equal(session.ready,true);await opening;
+ const {session,instances}=transport(t,{mode:'dictation'});const opening=session.open(),socket=instances[0];void opening.catch(()=>{});t.after(()=>session.close());socket.open();await flush();socket.message(new Blob([JSON.stringify({setupComplete:{}})]));await flush();assert.equal(session.ready,true);await opening;
  const received=[];session.handler=msg=>received.push(msg.serverContent);socket.message(new TextEncoder().encode(JSON.stringify({serverContent:{interimInputTranscription:{text:'Teste'}}})).buffer);socket.message(new Blob([JSON.stringify({serverContent:{inputTranscription:{text:'Teste final'},turnComplete:true}})]));await flush();assert.equal(received[0].interimInputTranscription.text,'Teste');assert.equal(received[1].inputTranscription.text,'Teste final');
 });
 test('roteamento dictation real envia setup STT geral, PCM e fim sem turno TTS',async t=>{
- const {session,instances}=transport(t);session.options={...session.options,mode:'dictation',outputTranscription:true,systemInstruction:'instrução TTS privada'};t.after(()=>session.close());
+ const {session,instances}=transport(t,{mode:'dictation',vad:{disabled:false},outputTranscription:true,systemInstruction:'instrução TTS privada'});t.after(()=>session.close());
  const opening=session.open(),socket=instances[0];socket.open();await flush();const setup=JSON.parse(socket.sent[0]).setup;assert.deepEqual(setup.generationConfig,{responseModalities:['AUDIO']});assert.deepEqual(setup.inputAudioTranscription,{});assert.equal(setup.outputAudioTranscription,undefined);assert.ok(!JSON.stringify(setup).includes('privada'));
  socket.message(JSON.stringify({setupComplete:{}}));await opening;session.sendAudio(new Uint8Array([0,0]),16000);session.endAudio();assert.deepEqual(JSON.parse(socket.sent[1]),{realtimeInput:{audio:{data:'AAA=',mimeType:'audio/pcm;rate=16000'}}});assert.deepEqual(JSON.parse(socket.sent[2]),{realtimeInput:{audioStreamEnd:true}});assert.equal(sessions.getTtsDiagnostics().some(s=>s.sessionId===session.id),false);
 });
 test('VAD manual delimita áudio com activityStart/activityEnd, sem audioStreamEnd',async t=>{
  const {session,instances}=transport(t);session.options={...session.options,mode:'dictation',vad:{disabled:true}};t.after(()=>session.close());const opening=session.open(),socket=instances[0];socket.open();await flush();socket.message(JSON.stringify({setupComplete:{}}));await opening;
  session.sendAudio(new Uint8Array([0,0]));session.sendAudio(new Uint8Array([0,0]));session.endAudio();assert.deepEqual(socket.sent.slice(1).map(w=>Object.keys(JSON.parse(w).realtimeInput)[0]),['activityStart','audio','audio','activityEnd']);assert.equal(socket.sent.some(w=>w.includes('audioStreamEnd')),false);
+});
+test('quatro modelos STT respeitam setupComplete e VAD efetivo sem misturar finais',async t=>{
+ const {instances,options}=transport(t);
+ for(const modelId of config.LIVE_MODEL_PRIORITY)for(const vad of [undefined,{disabled:true},{disabled:false}]){
+  const session=new sessions.LiveSession({retire(s){s.close();}},{...options,modelId,mode:'dictation',vad}),opening=session.open(),socket=instances.at(-1);assert.throws(()=>session.sendAudio(new Uint8Array([0,0])),/não está pronta/);socket.open();await flush();const setup=JSON.parse(socket.sent[0]).setup;assert.deepEqual(setup.inputAudioTranscription,{});assert.deepEqual(setup.generationConfig.responseModalities,['AUDIO']);socket.message(JSON.stringify({setupComplete:{}}));await opening;
+  assert.throws(()=>session.sendAudio(new Uint8Array([0])),/Int16/);assert.throws(()=>session.sendAudio(new Uint8Array([0,0]),48000),/16000/);session.sendAudio(new Uint8Array([0,64]));session.endAudio();const manual=session.options.vad.disabled===true;assert.deepEqual(socket.sent.slice(1).map(w=>Object.keys(JSON.parse(w).realtimeInput)[0]),manual?['activityStart','audio','activityEnd']:['audio','audioStreamEnd']);const snapshot=session.sttSnapshot();assert.equal(snapshot.inputTranscriptionConfigured,true);assert.equal(snapshot.sentBytes,2);assert.equal(snapshot.activityEnds,manual?1:0);assert.equal(snapshot.streamEnds,manual?0:1);session.close();
+ }
+});
+test('diagnóstico STT conta mensagens/VAD/geração sem confundir output com input nem guardar texto',async t=>{
+ const {session,instances}=transport(t,{mode:'dictation'});const opening=session.open(),socket=instances[0];socket.open();await flush();socket.message(JSON.stringify({setupComplete:{}}));await opening;
+ const received=[];session.handler=msg=>received.push(msg);socket.message('invalid JSON fixture');socket.message(JSON.stringify({voiceActivity:{type:'ACTIVITY_START'}}));socket.message(JSON.stringify({serverContent:{outputTranscription:{text:'fixture-private-output'},modelTurn:{parts:[{text:'fixture-private-output'}]}}}));socket.message(JSON.stringify({serverContent:{interimInputTranscription:{text:'fixture-private-interim'}}}));socket.message(JSON.stringify({serverContent:{inputTranscription:{text:'fixture-private-input',finished:true},turnComplete:true}}));await flush();session.sendAudio(new Uint8Array([0,64]));
+ const snapshot=session.sttSnapshot();assert.equal(snapshot.serverMessages,5);assert.equal(snapshot.voiceActivityEvents,1);assert.equal(snapshot.modelTurnEvents,1);assert.equal(snapshot.outputEvents,1);assert.equal(snapshot.inputEvents,1);assert.equal(snapshot.interimEvents,1);assert.equal(snapshot.inputFinished,true);assert.equal(snapshot.parseErrors,1);assert.equal(snapshot.sentChunks,1);assert.equal(received[0].voiceActivity.type,'ACTIVITY_START');assert.ok(!JSON.stringify(snapshot).includes('private'));session.close();
+});
+test('STT 3.8 padrão delimita PCM sem silêncio e persiste tipos/tempos após fim sem dados privados',async t=>{
+ const diag=require('../live-stt-diagnostics.js'),original=globalThis.LiveSttDiagnostics,packets=[];globalThis.LiveSttDiagnostics={emit:p=>{const safe=diag.sanitize(p);if(safe)packets.push(safe);}};t.after(()=>globalThis.LiveSttDiagnostics=original);
+ const {session,instances}=transport(t,{mode:'dictation',jobId:'00000000-0000-4000-8000-000000000000'}),opening=session.open(),socket=instances[0];socket.open();await flush();assert.equal(JSON.parse(socket.sent[0]).setup.realtimeInputConfig.automaticActivityDetection.disabled,true);socket.message(JSON.stringify({setupComplete:{}}));socket.message(JSON.stringify({sessionResumptionUpdate:{resumable:true,newHandle:'fixture-private-handle'}}));await opening;
+ socket.message(JSON.stringify({voiceActivity:{type:'ACTIVITY_START'}}));await flush();session.sendAudio(new Uint8Array([0,64]));session.sendAudio(new Uint8Array([0,192]));session.endAudio();assert.deepEqual(socket.sent.slice(1).map(w=>Object.keys(JSON.parse(w).realtimeInput)[0]),['activityStart','audio','audio','activityEnd']);
+ socket.message(JSON.stringify({voiceActivity:{type:'ACTIVITY_END'}}));socket.message(JSON.stringify({serverContent:{inputTranscription:{text:'fixture-private-transcript'},turnComplete:true,waitingForInput:false},usageMetadata:{private:'fixture-private'},private:'fixture-private'}));await flush();const state=session.sttSnapshot();assert.equal(state.voiceStarts,1);assert.equal(state.voiceEnds,1);assert.equal(state.messagesAfterEnd,2);assert.equal(state.setupMessages,1);assert.equal(state.resumptionMessages,1);assert.equal(state.serverContentMessages,1);assert.equal(state.usageMessages,1);assert.equal(state.pcmDurationMs,.125);assert.ok(state.audioEndMs>=state.lastAudioMs);assert.ok(state.firstServerAfterEndMs>=state.audioEndMs);assert.ok(state.sendIntervalMaxMs>=state.sendIntervalMinMs);
+ const event=packets.filter(p=>p.stage==='server-message').at(-1);assert.deepEqual(event.serverEventTypes,['serverContent','usageMetadata']);assert.equal(event.afterAudioEnd,true);assert.equal(event.turnComplete,true);assert.ok(!JSON.stringify(packets).includes('private'));session.close();assert.equal(packets.at(-1).stage,'socket-close');assert.equal(packets.at(-1).localClose,true);
+});
+test('mensagem recebida antes de endAudio, mas parseada depois, não conta como resposta ao fim',async t=>{
+ const {session,instances}=transport(t,{mode:'dictation'}),opening=session.open(),socket=instances[0];socket.open();await flush();socket.message(JSON.stringify({setupComplete:{}}));await opening;session.sendAudio(new Uint8Array([0,64]));socket.message(new Blob([JSON.stringify({voiceActivity:{type:'ACTIVITY_START'}})]));session.endAudio();await flush();assert.equal(session.sttSnapshot().messagesAfterEnd,0);socket.message(JSON.stringify({voiceActivity:{type:'ACTIVITY_END'}}));await flush();assert.equal(session.sttSnapshot().messagesAfterEnd,1);session.close();
 });
 test('pool separa modelo, voz, instrução e JSON; retire remove sessão',async t=>{
  const {options,instances}=transport(t),manager=new sessions.LiveSessionManager();t.after(()=>manager.closeAll());

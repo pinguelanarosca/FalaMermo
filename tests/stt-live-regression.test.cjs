@@ -1,7 +1,7 @@
 const test=require('node:test'),assert=require('node:assert/strict'),vm=require('node:vm'),fs=require('node:fs');
 const config=require('../live-config.js'),sessions=require('../live-session-manager.js'),source=fs.readFileSync(require.resolve('../content.js'),'utf8'),flush=()=>new Promise(r=>setImmediate(r));
 function deferred(){let resolve;const promise=new Promise(r=>resolve=r);return{promise,resolve};}
-function contentEnv({slowMic=false,slowModule=false,slowStart=false}={}){
+function contentEnv({slowMic=false,slowModule=false,slowStart=false,diagnostics=false}={}){
  const events={},states=[],messages=[],streams=[],contexts=[],nodes=[],timers=new Map(),errors=[];const micReady=deferred(),startReady=deferred(),moduleReady=deferred();
  class Input{constructor(value='original'){this._value=value;this.selectionStart=0;this.selectionEnd=0;this.isConnected=true;this.events=[];}get value(){return this._value;}set value(v){this._value=v;this.nativeWrites=(this.nativeWrites||0)+1;}focus(){doc.activeElement=this;}dispatchEvent(e){this.events.push(e.type);}getRootNode(){return{};}}
  class Textarea extends Input{get value(){return super.value;}set value(v){super.value=v;}}
@@ -12,6 +12,7 @@ function contentEnv({slowMic=false,slowModule=false,slowStart=false}={}){
  class Node{constructor(){nodes.push(this);this.port={postMessage:msg=>{if(msg.type==='flush')this.port.onmessage({data:{type:'flushed'}});}};}connect(x){return x;}disconnect(){this.disconnected=true;}}
  const runtime={id:'test-extension',invalid:false,getManifest(){if(this.invalid)throw Error('Extension context invalidated.');return{manifest_version:3};},getURL(x){if(this.invalid)throw Error('Extension context invalidated.');return x;},sendMessage(msg){messages.push(msg);if(this.invalid||this.throwOn===msg.type)throw Error('Extension context invalidated.');if(this.rejectOn===msg.type)return Promise.reject(Error('Extension context invalidated.'));if(msg.type==='STT_LIVE_START'&&slowStart)return startReady.promise;return Promise.resolve({success:true});}};
  const context=vm.createContext({console:{...console,error:(...args)=>errors.push(args)},Event,HTMLInputElement:Input,HTMLTextAreaElement:Textarea,document:doc,window:{getSelection:()=>null,addEventListener(name,fn){events[name]=fn;}},navigator:{mediaDevices:{getUserMedia:async()=>slowMic?micReady.promise:stream()}},AudioContext,AudioWorkletNode:Node,Float32Array,Int16Array,Uint8Array,setTimeout,clearTimeout,setInterval:fn=>{const id=Symbol();timers.set(id,fn);return id;},clearInterval:id=>timers.delete(id),btoa,crypto:require('node:crypto').webcrypto,chrome:{runtime}});
+ if(diagnostics)vm.runInContext(fs.readFileSync(require.resolve('../live-stt-diagnostics.js'),'utf8'),context);
  vm.runInContext(source.replace('__require("extension/src/content/entrypoint.ts");','globalThis.modules=__modules;'),context);
  const cache={'extension/src/content/ui/hudController.ts':{exports:{hud}},'extension/src/services/diagnosticLogger.ts':{exports:{logDiagnostic:async()=>{}}}};
  function load(id){if(cache[id])return cache[id].exports;const m=cache[id]={exports:{}};context.modules[id](m,m.exports,load);return m.exports;}
@@ -141,6 +142,52 @@ function offscreenEnv(acquire){const events=[],attempts=[],timers=new Map();let 
  return{events,attempts,retired,timers,command:p=>new Promise(r=>listener({type:'LIVE_OFFSCREEN_COMMAND',target:'offscreen',payload:p},{},r)),expire(){for(const [id,t]of [...timers]){timers.delete(id);t.fn();}}};
 }
 const base={jobId:'test',modelId:'gemini-3.8-live',operation:'STT_LIVE_START',apiKeys:['fake-only']};
+test('turnComplete sem transcript não fecha antes de inputTranscription independente',async()=>{
+ const session={sendAudio(){},endAudio(){}},e=offscreenEnv(async()=>session);await e.command(base);await e.command({...base,operation:'STT_LIVE_AUDIO',audioBase64:'AAA=',sampleRate:16000});await e.command({...base,operation:'STT_LIVE_STOP'});
+ session.handler({serverContent:{turnComplete:true}});
+ for(const [id,timer]of [...e.timers])if(timer.ms<=900){e.timers.delete(id);timer.fn();}await flush();assert.equal(e.retired.length,0);assert.equal(e.events.some(x=>x.event==='stt-error'),false);
+ session.handler({serverContent:{inputTranscription:{text:'Teste de ditado.'}}});e.expire();await flush();assert.equal(e.events.find(x=>x.event==='stt-final')?.text,'Teste de ditado.');
+});
+test('inputTranscription independente de turnComplete aguarda conclusão sem fechar em 900 ms',async()=>{
+ const session={sendAudio(){},endAudio(){}},e=offscreenEnv(async()=>session);await e.command(base);await e.command({...base,operation:'STT_LIVE_AUDIO',audioBase64:'AAA='});await e.command({...base,operation:'STT_LIVE_STOP'});
+ session.handler({serverContent:{inputTranscription:{text:'Teste'}}});assert.ok([...e.timers.values()].every(t=>t.ms===15000));session.handler({serverContent:{inputTranscription:{text:' de ditado.'},turnComplete:true}});e.expire();await flush();assert.equal(e.events.find(x=>x.event==='stt-final').text,'Teste de ditado.');
+});
+test('interim isolado não é promovido a final e timeout não anuncia ausência de PCM',async()=>{
+ const session={sendAudio(){},endAudio(){}},e=offscreenEnv(async()=>session);await e.command(base);await e.command({...base,operation:'STT_LIVE_AUDIO',audioBase64:'AAA='});session.handler({serverContent:{interimInputTranscription:{text:'provisório'}}});await e.command({...base,operation:'STT_LIVE_STOP'});e.expire();await flush();assert.equal(e.events.some(x=>x.event==='stt-final'),false);assert.match(e.events.find(x=>x.event==='stt-error').error,/provisória|parcial/i);
+});
+test('PCM ausente e PCM enviado sem texto têm mensagens diferentes',async()=>{
+ for(const audio of [false,true]){const session={sendAudio(){},endAudio(){}},e=offscreenEnv(async()=>session);await e.command(base);if(audio)await e.command({...base,operation:'STT_LIVE_AUDIO',audioBase64:'AAA='});await e.command({...base,operation:'STT_LIVE_STOP'});e.expire();await flush();assert.match(e.events.find(x=>x.event==='stt-error').error,audio?/PCM enviado ao Gemini/:/Nenhum PCM chegou/);}
+});
+test('diagnóstico HUD diferencia ausência de frames e PCM com sinal, sem áudio/texto privado',async()=>{
+ for(const audio of [false,true]){const e=contentEnv({diagnostics:true});await e.stt.startLiveRecording('narrator');const capture=e.stt.liveCapture;if(audio)e.nodes[0].port.onmessage({data:new Float32Array([.1,.2,.3]).buffer});await e.stt.stopLiveRecording();await flush();
+ const packets=e.messages.filter(m=>m.type==='LIVE_STT_DIAGNOSTIC').map(m=>m.payload),released=packets.filter(p=>p.stage==='capture-released').at(-1);
+ assert.equal(released.released,true);assert.equal(released.flushAcknowledged,true);assert.equal(released.contextState,'closed');assert.equal(released.capturedFrames,audio?3:0);assert.equal(released.ackBytes,audio?2:0);assert.equal(e.streams[0].track.stopped,true);assert.equal(e.messages.some(m=>m.type==='STT_LIVE_STOP'),audio);
+ if(audio){assert.ok(released.peak>0);assert.ok(released.maxRms>0);assert.ok(released.signalSamples>0);e.stt.cancelRecording();}else assert.equal(e.states.at(-1)[1],'Nenhum PCM capturado');
+ assert.ok(packets.every(p=>!('audioBase64'in p)&&!('text'in p)&&!('apiKey'in p)));await flush();}
+});
+test('diagnóstico persistido é limitado, expira e descarta campos privados arbitrários',async()=>{
+ const sent=[],store={},context=vm.createContext({console,chrome:{runtime:{sendMessage:async m=>sent.push(m)},storage:{session:{get:async key=>({[key]:store[key]}),set:async value=>Object.assign(store,value)}}}});vm.runInContext(fs.readFileSync(require.resolve('../live-stt-diagnostics.js'),'utf8'),context);const diag=context.LiveSttDiagnostics;
+ for(let n=0;n<10;n++){const jobId='00000000-0000-4000-8000-'+String(n).padStart(12,'0');for(let i=0;i<45;i++)await diag.record({jobId,scope:'capture',stage:'capture-progress',capturedFrames:i,apiKey:'private-credential',audioBase64:'private-audio',text:'private-transcript',instructions:'private-instructions'});}
+ const snapshot=await diag.read();assert.equal(snapshot.jobs.length,8);assert.ok(snapshot.jobs.every(j=>j.events.length===40));assert.ok(!JSON.stringify(snapshot).includes('private-'));assert.equal(diag.sanitize({jobId:'malicious text',scope:'capture',stage:'capture-progress'}),null);
+ const stale=structuredClone(snapshot);stale.jobs.forEach(j=>j.updatedAt=Date.now()-86400001);assert.equal(diag.clean(stale).jobs.length,0);
+ await diag.emit({jobId:'00000000-0000-4000-8000-000000000000',scope:'transport',stage:'audio-sent',sentBytes:3200,audioBase64:'private-audio'});assert.equal(sent[0].payload.sentBytes,3200);assert.equal(sent[0].payload.audioBase64,undefined);
+ const event=diag.sanitize({jobId:'00000000-0000-4000-8000-000000000000',scope:'transport',stage:'server-message',serverEventTypes:['serverContent','private-text','serverContent'],serverContentTypes:['inputTranscription','private-instructions'],messagesAfterEnd:2,elapsedMs:900});assert.deepEqual(Array.from(event.serverEventTypes),['serverContent']);assert.deepEqual(Array.from(event.serverContentTypes),['inputTranscription']);assert.equal(event.messagesAfterEnd,2);assert.ok(!JSON.stringify(event).includes('private'));
+});
+test('PCM do HUD e opções preserva sinal e taxa em chunks a 44,1/48 kHz e Int16 LE',()=>{
+ const optionsSource=fs.readFileSync(require.resolve('../options.js'),'utf8'),ctx=vm.createContext({Int16Array,Uint8Array});vm.runInContext(optionsSource.slice(optionsSource.indexOf('function resampleLiveTest('),optionsSource.indexOf('async function releaseLiveSttTest(')),ctx);
+ for(const rate of [16000,44100,48000]){const e=contentEnv(),state={cursor:0,previous:0};e.stt.resampleCursor=0;e.stt.resamplePrevious=0;let samples=0,peak=0,total=0;for(let offset=0;offset<rate;){const length=Math.min(128,rate-offset),input=Float32Array.from({length},(_,i)=>.5*Math.sin(2*Math.PI*440*(offset+i)/rate)),hud=e.stt.resamplePcm16(input,rate,16000),options=ctx.resampleLiveTest(input,rate,state);assert.deepEqual([...hud],[...options]);const view=new DataView(hud.buffer,hud.byteOffset,hud.byteLength);for(let i=0;i<hud.length;i+=2){const value=view.getInt16(i,true)/32768;peak=Math.max(peak,Math.abs(value));total+=value*value;samples++;}offset+=length;}
+ // A fronteira fracionária de 44,1 kHz pode arredondar uma amostra; não aceitar deriva maior.
+ assert.ok(Math.abs(samples-16000)<=1);assert.ok(peak>.49&&peak<=.501);assert.ok(Math.sqrt(total/samples)>.34);}
+ const e=contentEnv();e.stt.resampleCursor=0;e.stt.resamplePrevious=0;assert.deepEqual([...e.stt.resamplePcm16(new Float32Array([-1,0,1]),16000,16000)],[0,128,0,0,255,127]);
+});
+test('diagnóstico separa sinal do worklet, PCM convertido e silêncio, sem identificadores do dispositivo',()=>{
+ const diag=require('../live-stt-diagnostics.js'),capture={jobId:'00000000-0000-4000-8000-000000000000',stream:{getTracks:()=>[{readyState:'live',enabled:true,muted:false,getSettings:()=>({channelCount:1,sampleRate:48000,deviceId:'fixture-private-id',groupId:'fixture-private-group'})}]},context:{state:'running',sampleRate:48000}};
+ diag.observe(capture,new Float32Array([.5,-.5]),new Uint8Array([0,64,0,192]));let packet=diag.captureSnapshot(capture,'capture-progress');assert.equal(packet.trackSampleRate,48000);assert.equal(packet.trackChannels,1);assert.equal(packet.pcmSamples,2);assert.equal(packet.pcmSignalSamples,2);assert.equal(packet.pcmPeak,.5);assert.equal(packet.pcmMaxRms,.5);assert.equal(packet.deviceId,undefined);assert.ok(!JSON.stringify(packet).includes('private'));
+ const silent={jobId:capture.jobId};diag.observe(silent,new Float32Array([.5,.5]),new Uint8Array(4));packet=diag.captureSnapshot(silent,'capture-progress');assert.equal(packet.signalSamples,2);assert.equal(packet.pcmSignalSamples,0);assert.equal(packet.pcmPeak,0);assert.equal(packet.pcmMaxRms,0);
+});
+test('worklet mistura todos os canais e mantém cauda antes de flushed',()=>{
+ let Processor;const packets=[],context=vm.createContext({sampleRate:48000,Float32Array,AudioWorkletProcessor:class{constructor(){this.port={postMessage:p=>packets.push(p)};}},registerProcessor:(_id,p)=>Processor=p});vm.runInContext(fs.readFileSync(require.resolve('../mic-capture-worklet.js'),'utf8'),context);const worklet=new Processor();worklet.process([[new Float32Array([0,0]),new Float32Array([.4,.6])]]);worklet.port.onmessage({data:{type:'flush'}});assert.ok(Math.abs(new Float32Array(packets[0])[0]-.2)<1e-6);assert.ok(Math.abs(new Float32Array(packets[0])[1]-.3)<1e-6);assert.equal(packets[1].type,'flushed');
+});
 test('Extended STT aguarda IDLE sem fechar durante IN_PROGRESS',async()=>{
  const session={endAudio(){}},e=offscreenEnv(async()=>session),payload={...base,modelId:'gemini-3.8-live-extended-thinking'};await e.command(payload);
  session.handler({serverContent:{inputTranscription:{text:'Teste de ditado.'},interactionStatus:'IN_PROGRESS'}});await e.command({...payload,operation:'STT_LIVE_STOP'});

@@ -2,6 +2,7 @@ import './tts-config.js';
 import './tts-adaptive.js';
 import './live-config.js';
 import './live-tts-diagnostics.js';
+import './live-stt-diagnostics.js';
 (()=>{
 const __modules={
 "extension/src/background/index.ts":function(module,exports,__require){
@@ -179,6 +180,14 @@ async function addHistoryLog(type, previewText, agentId, status = 'success', err
 async function handleExtensionMessage(message, sender) {
     try {
         switch (message.type) {
+            case 'LIVE_STT_DIAGNOSTIC': {
+                if(!sender.tab&&![chrome.runtime.getURL('options.html'),chrome.runtime.getURL('offscreen.html')].includes(sender.url?.split(/[?#]/)[0]))return{success:false};
+                return globalThis.LiveSttDiagnostics.record(message.payload);
+            }
+            case 'LIVE_STT_DIAGNOSTICS_GET': {
+                if(sender.url?.split(/[?#]/)[0]!==chrome.runtime.getURL('options.html'))return{success:false};
+                return{success:true,diagnostics:await globalThis.LiveSttDiagnostics.read()};
+            }
             case 'LIVE_TTS_DIAGNOSTIC': {
                 if (sender.url !== chrome.runtime.getURL('offscreen.html')) return { success: false };
                 return globalThis.LiveTtsDiagnostics.record(message.payload);

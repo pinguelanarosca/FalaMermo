@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="pt-BR">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Autorizar captura — Gemini Lens</title>
+<style>body{font:16px/1.6 system-ui,sans-serif;background:#111827;color:#e5e7eb;max-width:680px;margin:60px auto;padding:24px}h1{font-size:26px}button{font:inherit;padding:10px 16px;margin:8px 8px 8px 0;cursor:pointer;border-radius:8px;border:1px solid #6b7280;background:#2563eb;color:white}button:disabled{opacity:.5;cursor:default}#back{background:#374151}a{color:#93c5fd}#status{min-height:48px}</style></head>
+<body>
+<h1>Autorizar captura para o Lens</h1>
+<p>Para usar o Lens diretamente pelo HUD, o Chrome exige a permissão de acesso a todos os sites para a API de captura. A autorização é opcional e pode ser revogada nas configurações da extensão.</p>
+<p><strong>Isso permite acesso amplo às páginas.</strong> A extensão só solicita a captura após sua ação no Lens e envia ao Gemini a região escolhida, mantendo o fluxo de análise existente. Autorizar aqui não captura nem envia nenhuma imagem.</p>
+<p>Você também pode deixar essa permissão desativada e usar a autorização temporária do Chrome ao invocar a extensão pelo ícone da barra de ferramentas na página desejada.</p>
+<button id="grant" disabled>Permitir captura pelo HUD</button><button id="back">Voltar sem alterar permissão</button>
+<p id="status" role="status" aria-live="polite">Verificando autorização…</p>
+<p><a href="https://developer.chrome.com/docs/extensions/reference/api/tabs#method-captureVisibleTab" target="_blank" rel="noopener">Por que o Chrome exige essa permissão?</a></p>
+<script src="lens-permission.js"></script>
+</body></html>

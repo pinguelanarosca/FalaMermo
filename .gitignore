@@ -1,0 +1,31 @@
+# Estado local, credenciais e arquivos de ambiente
+.agents/
+.aws/
+.codex/
+.env
+.env.*
+*.env
+.envrc
+*.pem
+*.key
+*credentials*
+*keys.env
+node_modules/
+.DS_Store
+*.log
+*.tmp
+*.bak
+*.zip
+*.sha256
+dist/
+release/
+coverage/
+# Relatórios de trabalho, capturas e diagnósticos históricos ficam somente locais.
+docs/*
+!docs/RELEASE-v1.0.0.md
+LEIA-ME.txt
+VERIFICACAO.txt
+tools/*
+!tools/package-release.cjs
+!tools/verify-publication.cjs
+tests/chrome-integration.cjs

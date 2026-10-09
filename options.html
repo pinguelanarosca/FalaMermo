@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>EXT TTS STT • Configurações</title>
+<style>
+:root{font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#e5e7eb;background:#060a12;color-scheme:dark}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at top,#111c34 0,#070b13 38%,#05070c 100%);min-height:100vh}button,input,select,textarea{font:inherit}button{cursor:pointer}.shell{max-width:1100px;margin:0 auto;padding:26px 18px 48px}.top{display:flex;align-items:center;justify-content:space-between;gap:18px;padding-bottom:18px;border-bottom:1px solid #1f2937}.brand{display:flex;gap:12px;align-items:center}.logo{width:44px;height:44px;border-radius:13px;display:grid;place-items:center;background:linear-gradient(135deg,#2563eb,#7c3aed);font-size:22px;box-shadow:0 8px 28px #2563eb35}.brand h1{font-size:19px;margin:0}.brand p{font-size:12px;color:#94a3b8;margin:3px 0 0}.badge{font-size:11px;border:1px solid #334155;background:#0f172a;color:#93c5fd;padding:5px 9px;border-radius:999px}.tabs{display:flex;gap:7px;flex-wrap:wrap;margin:18px 0}.tab{width:auto;border:1px solid transparent;background:transparent;color:#94a3b8;padding:9px 13px;border-radius:9px}.tab.active{color:#fff;background:#111827;border-color:#334155}.panel{display:none}.panel.active{display:block}.card{background:#0d1422dd;border:1px solid #1f2a3b;border-radius:15px;padding:20px;margin:14px 0;box-shadow:0 10px 34px #0004}.card h2,.card h3{margin-top:0}.card h2{font-size:17px}.card h3{font-size:15px}.muted{color:#94a3b8;font-size:12px;line-height:1.55}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:13px}.grid3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:13px}.field{display:grid;gap:6px}.field>span,.field>label{font-size:12px;color:#aab7ca;font-weight:600}.input,input,select,textarea{width:100%;background:#131d2e;border:1px solid #334155;border-radius:9px;color:#f8fafc;padding:10px 11px;outline:none}input:focus,select:focus,textarea:focus{border-color:#3b82f6;box-shadow:0 0 0 3px #3b82f622}textarea{resize:vertical;line-height:1.45}.row{display:flex;align-items:center;gap:9px;flex-wrap:wrap}.row.spread{justify-content:space-between}.btn{width:auto;border:1px solid #334155;background:#152033;color:#f8fafc;padding:9px 14px;border-radius:9px;font-weight:650}.btn.primary{background:#2563eb;border-color:#2563eb}.btn.good{background:#059669;border-color:#059669}.btn.danger{background:#7f1d1d;border-color:#b91c1c;color:#fecaca}.btn.ghost{background:transparent}.btn:disabled{opacity:.55;cursor:wait}.status{min-height:24px;font-size:12px;color:#93c5fd;padding-top:8px}.agent-head{display:flex;gap:12px;align-items:center}.avatar{width:42px;height:42px;border-radius:11px;display:grid;place-items:center;color:white;font-weight:800}.pill{display:inline-flex;padding:4px 9px;border-radius:999px;font-size:11px;background:#182235;color:#a5b4fc;border:1px solid #303a52}.range-line{display:flex;justify-content:space-between;gap:10px;font-size:12px;color:#aab7ca}.range-value{font:600 12px ui-monospace,monospace;color:#60a5fa}.eq{background:#111a29;border:1px solid #2a364a;border-radius:12px;padding:14px}.color-row{display:flex;gap:7px;flex-wrap:wrap}.color-dot{width:26px;height:26px;border-radius:50%;border:2px solid transparent}.color-dot.selected{border-color:white;box-shadow:0 0 0 2px #334155}.result-box{min-height:78px;background:#111a29;border:1px solid #334155;border-radius:9px;padding:11px;white-space:pre-wrap;font-size:13px;line-height:1.45}.shortcut{display:grid;grid-template-columns:1fr minmax(180px,280px);gap:12px;align-items:center;padding:12px 0;border-bottom:1px solid #1f2937}.list{display:grid;gap:8px}.list-item{background:#101827;border:1px solid #273449;border-radius:10px;padding:11px;font-size:12px}.log-meta{display:flex;gap:8px;flex-wrap:wrap;color:#7dd3fc;font-size:11px;margin-bottom:6px}.hidden{display:none!important}.notice{position:fixed;right:18px;bottom:18px;background:#0f766e;color:#ecfeff;border:1px solid #2dd4bf;border-radius:10px;padding:10px 14px;box-shadow:0 12px 32px #0008;z-index:99;font-size:13px}.warn{color:#fbbf24}.bad{color:#fca5a5}.good-text{color:#6ee7b7}.code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}.separator{height:1px;background:#1f2937;margin:16px 0}@media(max-width:760px){.grid,.grid3{grid-template-columns:1fr}.shortcut{grid-template-columns:1fr}.top{align-items:flex-start;flex-direction:column}}
+
+.shell{max-width:1440px;padding-top:22px}.agent-toolbar{display:flex;align-items:center;justify-content:space-between;gap:24px;margin:22px 0}.agent-toolbar h2{font-size:21px;margin:0 0 6px}.agent-toolbar p{margin:0}.agent-head{min-width:440px}.agent-head .field{flex:1}.modality-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:18px}.modality-card{display:flex;flex-direction:column;text-align:left;border:1px solid #28364c;border-radius:18px;background:linear-gradient(155deg,#152238,#0c1421 75%);color:#e5e7eb;padding:24px;min-width:0;min-height:326px;transition:border-color .15s,transform .15s}.modality-card:hover{border-color:#60a5fa;transform:translateY(-2px)}.modality-card:focus-visible{outline:2px solid #60a5fa;outline-offset:4px}.modality-top{display:flex;align-items:center;justify-content:space-between}.modality-icon{display:grid;place-items:center;background:#243752;border-radius:12px;width:44px;height:44px;color:#93c5fd;font-size:24px}.modality-card[data-open-mode=stt] .modality-icon{background:#163c38;color:#6ee7b7}.modality-card[data-open-mode=lens] .modality-icon{background:#36284c;color:#c4b5fd}.modality-card h3{font-size:28px;letter-spacing:-.8px;margin:18px 0 0}.modality-subtitle{font-size:13px;color:#94a3b8;margin:3px 0 22px}.modality-card strong{font-size:17px}.modality-card [data-card-description]{min-height:38px;margin:7px 0 14px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}.modality-details{display:grid;gap:5px;font-size:12px;color:#b5c6df}.instruction-preview{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;min-height:37px;margin:14px 0 20px}.modality-cta{display:flex;justify-content:space-between;gap:12px;border-top:1px solid #2a364a;padding-top:17px;margin-top:auto;font-size:13px;color:#93c5fd;font-weight:650}.editor-top{display:flex;align-items:center;gap:18px;margin:20px 0 10px}.editor-top h2{flex:1;font-size:20px;margin:0}.editor-top [aria-pressed=true]{background:#263e63;border-color:#60a5fa}.editor-columns{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;align-items:start}.editor-columns[data-editor-mode=tts]>.card:nth-child(-n+3){grid-column:1/-1}.compact{padding:18px;margin:0}.compact h3{margin-bottom:14px}.editor-top+.card{margin-bottom:14px}.prompt-details{border-top:1px solid #263449;margin-top:14px;padding-top:12px}.prompt-details summary{font-size:13px;font-weight:650;cursor:pointer;color:#b8cceb}.prompt-details[open] summary{margin-bottom:12px}.wide2{grid-column:span 2}.editor-footer{position:sticky;bottom:0;display:flex;align-items:center;justify-content:space-between;gap:20px;padding:16px 20px;margin-top:18px;border:1px solid #334155;border-radius:14px;background:#101b2cf5;backdrop-filter:blur(12px);z-index:2}.editor-footer p{margin:5px 0 0}.editor-footer .status{min-height:0;padding-top:0}.sr-only{position:absolute;width:1px;height:1px;padding:0;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}a{color:#93c5fd}input[type=color]{height:40px;padding:4px}.field>p{margin:0}.field .range-line{gap:5px}.range-line label{font-size:12px}.color-row{min-height:40px;align-items:center}@media(max-width:1000px){.agent-toolbar{align-items:flex-start;flex-direction:column}.agent-head{min-width:0;width:100%}.editor-columns{grid-template-columns:1fr}.editor-footer{position:static;align-items:flex-start;flex-direction:column}}@media(max-width:760px){.modality-grid,.grid3{grid-template-columns:1fr}.modality-card{min-height:300px}.wide2{grid-column:auto}.editor-top{flex-wrap:wrap}.editor-top h2{flex-basis:50%}.agent-head{flex-wrap:wrap}.agent-head .field{min-width:190px}}
+/* Densidade dos controles e larguras proporcionais ao conteúdo. */
+body{font-size:13px}
+.shell{padding:16px 16px 28px}
+.top{gap:12px;padding-bottom:10px}
+.brand{gap:9px}.logo{width:34px;height:34px;border-radius:10px;font-size:19px}
+.brand h1{font-size:17px}.brand p{font-size:11px}
+.tabs{gap:5px;margin:10px 0}.tab{padding:6px 10px;font-size:12px}
+.card{padding:12px;margin:10px 0;border-radius:11px}
+.card h2{font-size:16px;margin-bottom:8px}.card h3{font-size:14px;margin-bottom:8px}
+.card>.muted{margin:5px 0 9px}
+.grid,.grid3{gap:8px}.field{min-width:0;gap:4px;align-content:start}
+input,select,textarea{font-size:13px;padding:6px 8px;border-radius:6px;min-width:0}
+input:not([type=range]),select{height:32px}
+textarea{line-height:1.4}
+input[type=range]{height:20px;padding:0;margin:2px 0}
+input[type=color]{width:44px;height:32px;padding:3px}
+button.btn{font-size:12px;padding:6px 10px;border-radius:7px}
+.row{gap:7px}.badge,.pill{padding:3px 7px;font-size:10px}
+.avatar{width:32px;height:32px;flex-shrink:0;border-radius:8px;font-size:12px}
+.muted{font-size:12px;line-height:1.4}
+.agent-toolbar{gap:14px;margin:12px 0}
+.agent-toolbar h2{font-size:18px;margin-bottom:4px}
+.agent-head{min-width:0;gap:8px}.agent-head .field{flex:0 1 auto;width:32ch;max-width:100%}
+.editor-top{gap:10px;margin:12px 0 8px}.editor-top h2{font-size:17px}
+.editor-columns{gap:10px}.compact{padding:12px;margin:0}
+.compact h3{margin-bottom:8px}.editor-top+.card{margin-bottom:10px}
+.editor-columns[data-editor-mode=tts]>.card:nth-child(-n+3){grid-column:auto}
+.editor-columns[data-editor-mode=tts]>.card.voice-card,
+.editor-columns[data-editor-mode=tts]>.card.direction-card,
+.editor-columns[data-editor-mode=tts]>.card.test-card{grid-column:1/-1}
+.identity-fields,.voice-fields{display:flex;flex-wrap:wrap;gap:8px 12px;align-items:flex-start}
+.identity-fields>.field,.voice-fields>.field{flex:0 1 auto;max-width:100%}
+.identity-fields>.field:nth-child(1){width:22ch}
+.identity-fields>.field:nth-child(2){width:27ch}
+.identity-fields>.field:nth-child(3){width:46ch}
+.identity-fields>.field:nth-child(4){width:12ch}
+.identity-fields>.field:nth-child(5){width:44px}
+.identity-fields>.field:nth-child(6){width:auto}
+.color-row{gap:5px;min-height:32px}.color-dot{width:22px;height:22px}
+.voice-fields>.field:nth-child(1){width:30ch}
+.voice-fields>.field:nth-child(2){width:16ch}
+.voice-fields>.field:nth-child(3){width:25ch}
+.voice-fields>.field:nth-child(4){width:36ch}
+.voice-fields>.field:nth-child(5){width:26ch}
+.voice-fields>.field:nth-child(4)>.muted{font-weight:400}
+.direction-fields{display:flex;flex-wrap:wrap;gap:8px 12px;align-items:flex-start}
+.direction-fields>.field{width:32ch;max-width:100%;flex:0 1 auto}
+.direction-fields>.field:nth-child(1),.direction-fields>.field:nth-child(2){width:36ch}
+.direction-fields>.field:nth-child(4){width:26ch}
+.direction-fields>.field:nth-child(6),.direction-fields>.field:nth-child(8){width:35ch}
+.direction-fields>.field:last-child{width:40ch}
+.direction-fields textarea{min-height:32px;max-height:112px;field-sizing:content}
+.output-fields{grid-template-columns:minmax(0,24ch) minmax(0,24ch) minmax(0,21ch)}
+.generation-fields{grid-template-columns:repeat(auto-fit,minmax(110px,1fr))}
+.prompt-details{margin-top:8px;padding-top:8px}.prompt-details[open] summary{margin-bottom:8px}
+.prompt-details p{margin:6px 0 8px}
+.separator{margin:10px 0}
+#agentEditor .field[style]{margin-top:8px!important}
+#agentEditor .prompt-details .grid3[style]{margin-top:8px!important}
+#ttsTestText{min-height:48px;max-height:180px;field-sizing:content}
+#ttsStatus:empty,#sttStatus:empty,#apiStatus:empty{min-height:0;padding:0}
+.editor-footer{gap:12px;padding:10px 12px;margin-top:10px;border-radius:9px}
+.editor-footer p{font-size:11px;margin:3px 0 0}.editor-footer strong{font-size:12px}
+.editor-footer .btn{white-space:normal}
+.range-line label{min-width:0;line-height:1.3}.range-value{flex-shrink:0}
+.modality-grid{gap:12px}
+.modality-card{min-height:0;padding:16px;border-radius:13px}
+.modality-icon{width:34px;height:34px;border-radius:9px;font-size:20px}
+.modality-card h3{font-size:24px;margin-top:12px}
+.modality-subtitle{margin:3px 0 13px}
+.modality-card strong{font-size:15px}
+.modality-card [data-card-description]{margin:6px 0 10px;min-height:34px}
+.instruction-preview{margin:10px 0 12px;min-height:34px}
+.modality-cta{padding-top:11px;font-size:12px}
+#apiKey{max-width:52ch}#apiKeys{max-width:90ch}#apiKeysFile{max-width:48ch;height:auto}
+[data-panel=api] .grid{display:flex;flex-wrap:wrap;gap:8px 12px}
+[data-panel=api] .grid>.field{width:31ch;max-width:100%}
+[data-panel=history] .grid{max-width:44ch}
+.shortcut{gap:10px;padding:8px 0}.list{gap:6px}.list-item{padding:9px}
+@media(max-width:1100px){
+  .agent-toolbar{align-items:center;flex-direction:row}
+  .agent-head{width:auto}
+}
+@media(max-width:760px){
+  .shell{padding:12px}
+  .top{gap:8px}.brand h1{font-size:16px}
+  .agent-toolbar{align-items:flex-start;flex-direction:column;gap:10px}
+  .agent-head{width:100%;flex-wrap:wrap}.agent-head .field{flex:1;min-width:0}
+  .editor-top{gap:8px}.editor-top h2{font-size:16px;flex-basis:auto}
+  .identity-fields>.field:nth-child(3){width:100%}
+  .voice-fields>.field:nth-child(4){width:100%}
+  .direction-fields>.field{flex:0 1 calc(50% - 6px)}
+  .direction-fields>.field:last-child{flex-basis:100%;width:100%}
+  .output-fields{grid-template-columns:repeat(2,minmax(0,1fr))}
+  #dialogueSettings .grid3{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}
+  #dialogueSettings .grid3>.field:nth-child(n){width:auto}
+  #dialogueSettings .grid3>.field:nth-child(3n){grid-column:1/-1}
+  .modality-card{min-height:0}
+  .editor-footer{gap:8px;padding:10px}
+}
+@media(max-width:420px){
+  .direction-fields>.field{flex-basis:100%}
+  .output-fields{grid-template-columns:1fr}
+}
+
+
+/* Editor TTS: painéis densos, capacidades laterais e controles proporcionais. */
+.tts-workspace{display:grid;grid-template-columns:minmax(0,1fr) 290px;gap:12px}
+.tts-main,.tts-side{min-width:0;display:grid;gap:9px;align-content:start}
+.tts-json-editor{font:12px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;tab-size:2;min-height:190px;max-height:460px;resize:vertical;white-space:pre;overflow:auto}
+.tts-json-code{position:relative;background:#131d2e;border-radius:6px;min-width:0}
+.tts-json-highlight{position:absolute;inset:0;margin:0;border:1px solid transparent;padding:6px 8px;font:12px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;tab-size:2;white-space:pre;overflow:hidden;pointer-events:none;color:#dbeafe}
+.tts-json-code .tts-json-editor{position:relative;display:block;background:transparent;color:transparent;caret-color:#f8fafc}
+.tts-json-editor::selection{background:#3b82f666}
+.json-key{color:#93c5fd}.json-string{color:#6ee7b7}.json-number{color:#fbbf24}.json-literal{color:#c4b5fd}
+@media(forced-colors:active){.tts-json-code .tts-json-editor{color:CanvasText;caret-color:CanvasText}.tts-json-highlight{visibility:hidden}}
+.tts-json-tools{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0}
+.tts-json-toggle{display:flex;align-items:center;gap:7px;margin:9px 0;font-size:12px}
+.tts-json-toggle input{width:auto;margin:0}
+#ttsJsonStatus{overflow-wrap:anywhere;font-size:12px;min-height:18px}
+#ttsJsonStatus[data-valid="true"]{color:#34d399}
+#ttsJsonStatus[data-valid="false"]{color:#fb7185}
+.tts-side{position:sticky;top:12px}
+.tts-model-tabs{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:5px}
+.tts-model-tabs button{padding:9px 7px;font-size:11px;line-height:1.35;border:1px solid #293a53;border-radius:7px;background:#101a2b;color:#a6bedc;min-width:0}
+.tts-model-tabs [aria-pressed=true]{border-color:#3b82f6;background:#12315a;color:#dbeafe;box-shadow:inset 0 0 0 1px #3b82f64d}
+.tts-workspace .card{margin:0;padding:11px;border-radius:9px;box-shadow:none}
+.tts-workspace input:not([type=range]),.tts-workspace select{height:29px;font-size:12px}
+.tts-voice-grid{display:grid;grid-template-columns:minmax(0,1.6fr) minmax(0,.8fr) minmax(0,1fr) minmax(0,1.2fr);gap:8px}
+.tts-custom-voice{grid-column:1/-1;max-width:58ch}
+.tts-direction-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+.tts-direction-bottom{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:10px;border-top:1px solid #25344a;padding-top:8px}
+.tts-workspace h4{font-size:12px;margin:0 0 6px;color:#b6cee8}
+.tts-code{font:11px/1.5 ui-monospace,monospace;white-space:pre-wrap;overflow-wrap:anywhere;background:#091220;border:1px solid #25364f;border-radius:6px;padding:8px;margin:0;max-height:260px;overflow:auto}
+#ttsStylePreview{max-height:105px;min-height:66px}
+.tts-events{display:flex;gap:4px;flex-wrap:wrap}
+.tts-events button{font:10px ui-monospace,monospace;padding:4px 5px;border:1px solid #31455f;background:#142238;color:#a5c8f5;border-radius:5px}
+.tts-output-grid{display:flex;flex-wrap:wrap;gap:8px}.tts-output-grid>.field{width:20ch;max-width:100%}
+.tts-narrators-grid{display:grid;grid-template-columns:1fr .8fr 1.4fr;gap:8px;margin-top:8px}
+.tts-test-actions{margin-top:8px}.tts-test-actions .muted{font-size:11px}
+.tts-side .grid3{grid-template-columns:1fr}.tts-side details>summary{cursor:pointer;font-weight:650;font-size:13px;color:#bae6fd}
+.tts-cap-list{display:flex;gap:5px;flex-wrap:wrap;margin:6px 0 10px}.tts-cap-list .pill{white-space:normal;background:#07372f;color:#86efac;border-color:#155e4b}
+.tts-cap-list.unavailable .pill{background:#172132;color:#94a3b8;border-color:#334155}
+.tts-workspace .field>label{font-size:11px}.tts-workspace .muted{font-size:11px}
+@media(max-width:1120px){.tts-workspace{grid-template-columns:minmax(0,1fr) 240px}.tts-direction-grid{grid-template-columns:repeat(3,minmax(0,1fr))}.tts-voice-grid{grid-template-columns:1fr 1fr}}
+@media(max-width:850px){.tts-workspace{grid-template-columns:1fr}.tts-side{position:static;grid-template-columns:1fr 1fr}.tts-direction-grid{grid-template-columns:repeat(3,minmax(0,1fr))}}
+@media(max-width:540px){.tts-model-tabs{grid-template-columns:1fr 1fr}.tts-direction-grid,.tts-voice-grid{grid-template-columns:1fr 1fr}.tts-side,.tts-direction-bottom{grid-template-columns:1fr}.tts-narrators-grid{grid-template-columns:1fr}.tts-workspace .grid3{grid-template-columns:1fr}.tts-code{max-height:200px}}
+.tts-ranking-scroll{max-height:240px;overflow:auto;margin-top:6px}.tts-ranking-table{width:100%;border-collapse:collapse;font-size:11px;white-space:nowrap}.tts-ranking-table th,.tts-ranking-table td{padding:5px 7px;border-bottom:1px solid #263449;text-align:left}.tts-ranking-table th{position:sticky;top:0;background:#111a29;color:#aab7ca}
+#ttsModelTabs,#legacyTtsVoice,#legacyTtsOutput,#legacyTtsAdvanced{display:none}
+#liveEditor .grid{margin-bottom:12px}
+#liveEditor pre{white-space:pre-wrap;overflow-wrap:anywhere}
+</style>
+</head>
+<body>
+<div class="shell">
+  <header class="top"><div class="brand"><div class="logo">🔊</div><div><h1>EXT TTS STT <span class="badge">Gemini Multimodal</span></h1><p>Agentes, instruções de sistema, TTS, STT, Lens, atalhos e diagnóstico</p></div></div><span id="storageBadge" class="badge">Storage OK</span></header>
+  <nav class="tabs">
+    <button class="tab" data-tab="api">🔑 Chaves Gemini</button>
+    <button class="tab active" data-tab="agents">🤖 Agentes & Personas</button>
+    <button class="tab" data-tab="shortcuts">⌨️ Atalhos</button>
+    <button class="tab" data-tab="history">🧾 Histórico & Logs</button>
+    <button class="tab" data-tab="chatgpt">💬 ChatGPT</button>
+  </nav>
+
+  <section class="panel" data-panel="api">
+    <div class="card"><h2>Chaves de API do Google AI Studio</h2><p class="muted">As chaves são salvas localmente nesta extensão.</p>
+      <div class="field"><label for="apiKey">Chave principal (STT, Lens e conexão)</label><input id="apiKey" type="password" autocomplete="off" placeholder="AIza…"></div>
+      <div class="field" style="margin-top:12px"><label for="apiKeys">Chaves para fallback TTS (até 9)</label><textarea id="apiKeys" class="code" rows="4" autocomplete="off" spellcheck="false" autocapitalize="off" aria-describedby="apiKeysHelp" placeholder="chave1;chave2;chave3;"></textarea><div id="apiKeysHelp" class="muted">Cole o bloco de notas com as chaves separadas por ponto e vírgula. Cada modelo tenta as chaves nesta ordem antes de passar ao próximo. Lista vazia: usa a chave principal. Sem chave principal, a primeira da lista também será usada para STT e Lens.</div></div>
+      <div class="field" style="margin-top:12px"><label for="apiKeysFile">Ou importe um bloco de notas (.txt)</label><input id="apiKeysFile" type="file" accept=".txt,text/plain"></div>
+      <div class="row" style="margin-top:12px"><button id="saveApi" class="btn primary">Salvar chaves</button><button id="testApi" class="btn">Testar chave principal</button><button id="discoverModels" class="btn">Descobrir modelos</button><button id="openAiStudio" class="btn ghost">Abrir Google AI Studio ↗</button></div>
+      <div id="apiStatus" class="status"></div>
+    </div>
+    <div class="card"><h3>Modelos globais</h3><p class="muted">São usados como fallback quando o agente não define um modelo próprio.</p><div class="grid"><div class="field"><span>TTS</span><select id="globalTts"></select></div><div class="field"><span>STT</span><select id="globalStt"></select></div><div class="field"><span>Vision / Lens</span><select id="globalVision"></select></div><div class="field"><span>Geral</span><select id="globalGeneral"></select></div></div><div class="row" style="margin-top:12px"><button id="saveGlobals" class="btn good">Salvar modelos globais</button></div></div>
+  </section>
+
+  <section class="panel active" data-panel="agents">
+    <div class="agent-toolbar">
+      <div><h2>Agentes e personas</h2><p class="muted">Escolha o agente ativo e personalize cada modalidade.</p></div>
+      <div class="agent-head"><div id="agentAvatar" class="avatar">NA</div><div class="field"><label for="agentSelect">Agente ativo no navegador</label><select id="agentSelect"></select></div><span id="agentKind" class="pill">De fábrica</span></div>
+    </div>
+    <div id="agentDashboard" class="modality-grid">
+      <button class="modality-card" data-open-mode="tts"><span class="modality-top"><span class="modality-icon">◖))</span><span class="pill">LEITURA</span></span><h3>TTS</h3><p class="modality-subtitle">Texto em voz</p><strong data-card-agent></strong><p data-card-description class="muted"></p><div class="modality-details"><span data-card-model></span><span data-card-detail></span></div><p data-card-instruction class="instruction-preview muted"></p><span class="modality-cta">Personalizar voz e narração <span>↗</span></span></button>
+      <button class="modality-card" data-open-mode="stt"><span class="modality-top"><span class="modality-icon">♩</span><span class="pill">DITADO</span></span><h3>STT</h3><p class="modality-subtitle">Voz em texto</p><strong data-card-agent></strong><p data-card-description class="muted"></p><div class="modality-details"><span data-card-model></span><span data-card-detail></span></div><p data-card-instruction class="instruction-preview muted"></p><span class="modality-cta">Personalizar transcrição <span>↗</span></span></button>
+      <button class="modality-card" data-open-mode="lens"><span class="modality-top"><span class="modality-icon">◎</span><span class="pill">VISÃO</span></span><h3>Lens</h3><p class="modality-subtitle">Tela em contexto</p><strong data-card-agent></strong><p data-card-description class="muted"></p><div class="modality-details"><span data-card-model></span><span data-card-detail></span></div><p data-card-instruction class="instruction-preview muted"></p><span class="modality-cta">Personalizar interpretação <span>↗</span></span></button>
+    </div>
+    <div id="agentEditor" class="hidden">
+      <div class="editor-top"><button id="backToAgents" class="btn ghost">← Agentes</button><h2 id="editorTitle">Personalizar TTS</h2><div class="row"><button class="btn" data-switch-mode="tts">TTS</button><button class="btn" data-switch-mode="stt">STT</button><button class="btn" data-switch-mode="lens">Lens</button></div></div>
+      <div class="card compact"><h3>Identidade do agente</h3><div class="grid3 identity-fields"><div class="field"><label for="agentName">Nome da persona</label><input id="agentName"></div><div class="field"><label for="agentCategory">Categoria</label><select id="agentCategory"><option value="productivity">Produtividade & Trabalho</option><option value="translation">Tradução & Idiomas</option><option value="accessibility">Acessibilidade & Leitura</option><option value="editorial">Editorial & Redação</option><option value="custom">Personalizado</option></select></div><div class="field"><label for="agentDescription">Descrição da atuação</label><input id="agentDescription"></div><div class="field"><label for="agentIcon">Ícone</label><input id="agentIcon"></div><div class="field"><label for="agentColor">Cor</label><input id="agentColor" type="color"></div><div class="field"><span>Paleta</span><div class="color-row" id="colorPresets"></div></div></div></div>
+      <div data-editor-mode="tts" class="editor-columns tts-workspace">
+        <div class="tts-main">
+          <section id="liveEditor" class="card compact"><h3>Narração Gemini Live</h3>
+            <div class="grid">
+              <div class="field"><label for="liveModel">Modelo Live</label><select id="liveModel"></select></div>
+              <div class="field"><label for="liveVoice">Voz</label><select id="liveVoice"></select></div>
+              <div class="field"><label for="liveChunkSize">Caracteres por bloco</label><input id="liveChunkSize" type="number" min="120" max="10000" step="10"></div>
+              <div class="field"><label for="liveParallelism">Sessões paralelas</label><input id="liveParallelism" type="number" min="1" max="9"></div>
+              <div class="field" id="liveThinkingField"><label for="liveThinking">Thinking</label><select id="liveThinking"><option value="">Padrão</option></select></div>
+              <label class="field" id="liveTranscriptionField"><span>Transcrição da narração</span><input id="liveOutputTranscription" type="checkbox"></label>
+            </div>
+            <div class="field"><label for="liveJsonMode">Configuração enviada</label><select id="liveJsonMode"><option value="panel">Painel</option><option value="override">Painel + JSON Override</option><option value="complete">JSON Completo</option></select></div>
+            <div class="field" style="margin-top:12px"><label for="liveJson">JSON Live (somente setup)</label><textarea id="liveJson" rows="9" class="code" spellcheck="false"></textarea></div>
+            <div class="row" style="margin-top:10px"><button id="liveJsonExample" class="btn" type="button">Carregar exemplo</button><button id="liveJsonFormat" class="btn" type="button">Formatar</button><button id="liveJsonValidate" class="btn" type="button">Validar setup</button></div>
+            <div id="liveJsonStatus" class="status" role="status"></div>
+            <div class="field"><label for="liveTestText">Texto de teste</label><textarea id="liveTestText" rows="2">Olá! Esta é uma prévia da minha narração.</textarea></div>
+            <div class="row" style="margin-top:10px"><button id="liveTest" class="btn primary" type="button">▶ Ouvir via Live</button><button id="liveStop" class="btn danger" type="button">■ Parar</button><span id="liveTestStatus" class="muted"></span></div>
+            <details style="margin-top:12px"><summary>Mensagens WebSocket (prévia readonly)</summary><p class="muted">Setup e turno usam os mesmos builders da execução.</p><strong>LIVE SESSION SETUP</strong><pre id="liveSetupPreview" class="tts-code"></pre><strong>TURN MESSAGE</strong><pre id="liveTurnPreview" class="tts-code"></pre></details>
+          </section>
+          <div id="ttsModelTabs" class="tts-model-tabs" role="group" aria-label="Modelo de narração"></div>
+          <section id="legacyTtsVoice" class="card compact"><h3>Modelo e voz</h3><div class="tts-voice-grid">
+            <div class="field"><label for="agentTtsModel">Modelo TTS</label><select id="agentTtsModel"></select></div>
+            <div class="field"><label for="voice">Voz de catálogo</label><select id="voice"></select></div>
+            <div class="field" data-tts-cap="languageCode"><label for="ttsLanguage">Idioma / languageCode</label><select id="ttsLanguage"><option value="">Automático</option></select></div>
+            <div class="field"><label for="ttsMode">Narradores / vozes no texto</label><select id="ttsMode"><option value="single">Uma voz</option><option value="multi">Duas vozes de catálogo</option></select></div>
+            <div class="field tts-custom-voice" data-tts-cap="customVoiceId"><label for="ttsVoiceId">Voz / Voice Design / Replication ID</label><input id="ttsVoiceId" placeholder="voice_… ou voicekey_…"><span class="muted">Substitui o catálogo. <a href="https://aistudio.google.com/generate-speech" target="_blank" rel="noopener">Biblioteca de vozes ↗</a></span></div>
+          </div><p id="ttsVoiceNote" class="muted"></p>
+          <div id="narratorsSettings" class="hidden"><div class="tts-narrators-grid"><div class="field"><label for="speaker1Name">Narrador 1</label><input id="speaker1Name" placeholder="Nome no texto"></div><div class="field"><label for="speaker1Voice">Voz 1</label><select id="speaker1Voice"></select></div><div class="field"><label for="speaker1Style">Direção 1</label><input id="speaker1Style" placeholder="Interpretação opcional"></div><div class="field"><label for="speaker2Name">Narrador 2</label><input id="speaker2Name" placeholder="Nome no texto"></div><div class="field"><label for="speaker2Voice">Voz 2</label><select id="speaker2Voice"></select></div><div class="field"><label for="speaker2Style">Direção 2</label><input id="speaker2Style" placeholder="Interpretação opcional"></div></div><p class="muted">Identifique cada trecho com Nome: texto. Toda a narração permanece em uma única requisição por tentativa.</p></div></section>
+          <section class="card compact"><h3>Direção da narração</h3><div class="tts-direction-grid"><div class="field"><label for="ttsAudioProfile">Perfil vocal / persona</label><input id="ttsAudioProfile" placeholder="Voz suave e acolhedora"></div><div class="field"><label for="ttsScene">Contexto da narração</label><input id="ttsScene" placeholder="Leitura de um artigo"></div><div class="field"><label for="ttsDelivery">Estilo de interpretação</label><input id="ttsDelivery" placeholder="Natural, expressivo"></div><div class="field"><label for="ttsEmotion">Emoção e tom</label><input id="ttsEmotion" placeholder="Sereno, confiante"></div><div class="field"><label for="ttsAccent">Sotaque</label><input id="ttsAccent" placeholder="Português brasileiro"></div><div class="field"><label for="ttsPace">Ritmo</label><input id="ttsPace" placeholder="Moderado"></div><div class="field"><label for="ttsPauses">Pausas</label><input id="ttsPauses" placeholder="Naturais entre parágrafos"></div><div class="field"><label for="ttsArticulation">Articulação</label><input id="ttsArticulation" placeholder="Dicção clara"></div><div class="field"><label for="ttsPronunciation">Pronúncia</label><input id="ttsPronunciation" placeholder="Precisão em termos técnicos"></div><div class="field"><label for="ttsProsody">Entonação</label><input id="ttsProsody" placeholder="Variação suave"></div><div class="field"><label for="ttsIntensity">Intensidade</label><input id="ttsIntensity" placeholder="Ênfase nas conclusões"></div><div class="field"><label for="ttsDirectorNotes">Direção adicional</label><input id="ttsDirectorNotes" placeholder="Orientações opcionais"></div></div>
+            <div class="tts-direction-bottom"><div><h4>Eventos no texto</h4><div id="ttsEvents" class="tts-events" aria-label="Inserir evento no texto de teste"></div><p class="muted">Insere no cursor do texto de teste. Sintaxe adaptada ao modelo.</p></div><div><h4>Prévia da instrução gerada</h4><pre id="ttsStylePreview" class="tts-code" aria-live="polite"></pre></div></div>
+            <details class="prompt-details"><summary>Instrução completa da persona</summary><label class="sr-only" for="ttsInstruction">Instrução adicional da narração</label><textarea id="ttsInstruction" rows="2"></textarea></details>
+          </section>
+          <section id="legacyTtsOutput" class="card compact"><h3>Saída da API e teste de narração</h3><div id="ttsApiOutput" class="tts-output-grid" data-tts-cap="audioFormat"><div class="field"><label for="ttsOutputFormat">Formato</label><select id="ttsOutputFormat"></select></div><div class="field" data-tts-cap="sampleRate"><label for="ttsSampleRate">Amostragem (Hz)</label><select id="ttsSampleRate"></select></div></div><p id="ttsOutputNote" class="muted"></p>
+            <div class="field"><label for="ttsTestText">Texto de teste</label><textarea id="ttsTestText" rows="2">Olá! Esta é uma prévia da minha narração.</textarea></div>
+            <div class="row tts-test-actions"><button id="testTts" class="btn primary">▶ Ouvir prévia</button><button id="stopTts" class="btn danger">■ Parar</button><span class="muted">Cada tentativa consome uma requisição TTS.</span></div><div id="ttsStatus" class="status" aria-live="polite"></div><audio id="ttsAudio" controls class="hidden"></audio>
+            <details id="ttsTimingDetails"><summary>Diagnóstico de latência</summary><label class="tts-json-toggle"><input id="ttsDebugEnabled" type="checkbox"> Modo debug TTS</label><div class="row"><label for="ttsDiagnosticKey">Índice da chave</label><input id="ttsDiagnosticKey" type="number" min="1" max="9" value="1" style="width:6ch"><button id="ttsDiagnosticTest" type="button" class="btn">Testar “Olá mundo” · 1 modelo / 1 chave</button></div><p class="muted">Teste isolado via background, sem fallback, retry ou backoff. Usa o modelo selecionado e a chave indicada, sem alterar o fluxo normal. A prévia normal chama a API diretamente.</p><div class="row"><strong>Ranking aprendido</strong><button id="ttsRankingRefresh" type="button" class="btn">Atualizar</button><button id="ttsRankingReset" type="button" class="btn">Resetar aprendizado TTS</button></div><p class="muted">Aprendizado passivo; nenhuma chamada preventiva. Pares em cooldown são pulados, sem espera.</p><div class="tts-ranking-scroll"><table class="tts-ranking-table"><thead><tr><th>#</th><th>Modelo</th><th>Chave</th><th>Estado</th><th>EMA API</th><th>Último uso</th><th>Cooldown</th></tr></thead><tbody id="ttsRankingRows"></tbody></table></div><p id="ttsRankingStatus" class="muted" aria-live="polite"></p><pre id="ttsTimingReport" class="tts-code" aria-live="polite"></pre></details>
+          </section>
+          <section id="legacyTtsAdvanced" class="card compact"><details id="ttsAdvancedDetails"><summary>Configuração avançada (JSON)</summary>
+            <label class="tts-json-toggle"><input id="ttsAdvancedEnabled" type="checkbox"> Usar configuração JSON avançada</label>
+            <p id="ttsJsonModeNote" class="muted"></p><p class="muted">Corpo oficial de generateContent. Use {{TEXT}} uma vez em text; o texto da narração é inserido somente ao gerar o payload.</p>
+            <label class="sr-only" for="ttsAdvancedJson">Configuração JSON do modelo selecionado</label><div class="tts-json-code"><pre id="ttsJsonHighlight" class="tts-json-highlight" aria-hidden="true"></pre><textarea id="ttsAdvancedJson" class="tts-json-editor" rows="12" spellcheck="false" autocapitalize="off" autocomplete="off" aria-describedby="ttsJsonStatus"></textarea></div>
+            <div class="tts-json-tools"><button id="ttsJsonExample" type="button" class="btn">Carregar exemplo</button><button id="ttsJsonFormat" type="button" class="btn">Formatar JSON</button><button id="ttsJsonValidate" type="button" class="btn">Validar</button><button id="ttsJsonApply" type="button" class="btn primary">Aplicar</button><button id="ttsJsonReset" type="button" class="btn">Restaurar padrão</button></div>
+            <div id="ttsJsonStatus" role="status" aria-live="polite"></div><p class="muted">Aplicar ativa este JSON no editor. Salve ou crie o agente para usar a configuração nas próximas narrações.</p>
+          </details></section>
+        </div>
+        <aside class="tts-side"><section class="card compact"><h3>Compatibilidade do modelo</h3><div id="ttsCompatibility" aria-live="polite"></div><p class="muted">Controles e payload usam as mesmas capacidades verificadas.</p><a class="muted" href="https://ai.google.dev/gemini-api/docs/live-api/capabilities" target="_blank" rel="noopener">Documentação Gemini Live ↗</a></section>
+          <section class="card compact"><details id="ttsPayloadDetails"><summary>Ver payload</summary><p id="ttsPayloadModel" class="muted"></p><pre id="ttsPayload" class="tts-code"></pre></details><p class="muted">JSON usado na requisição. Autenticação permanece nos cabeçalhos.</p></section>        <div class="card compact"><h3>Reprodução local</h3><p class="muted">Velocidade, pitch, volume, EQ e ambiente alteram somente o player. Não são enviados ao Gemini.</p><div class="grid3"><div class="field"><div class="range-line"><label for="rate">Velocidade de reprodução</label><span id="rateValue" class="range-value"></span></div><input id="rate" type="range" min="0.5" max="2" step="0.05"></div><div class="field"><div class="range-line"><label for="pitch">Pitch local</label><span id="pitchValue" class="range-value"></span></div><input id="pitch" type="range" min="0.5" max="2" step="0.05"></div><div class="field"><div class="range-line"><label for="volume">Volume de reprodução</label><span id="volumeValue" class="range-value"></span></div><input id="volume" type="range" min="0" max="1" step="0.05"></div></div><details class="prompt-details"><summary>Equalizador e ambiente do teste</summary><p class="muted">Estes efeitos são aplicados localmente ao teste desta tela.</p><div class="grid3"><div class="field"><div class="range-line"><label for="bass">Graves</label><span id="bassValue" class="range-value"></span></div><input id="bass" type="range" min="-10" max="10" step="1"></div><div class="field"><div class="range-line"><label for="mid">Médios</label><span id="midValue" class="range-value"></span></div><input id="mid" type="range" min="-10" max="10" step="1"></div><div class="field"><div class="range-line"><label for="treble">Agudos</label><span id="trebleValue" class="range-value"></span></div><input id="treble" type="range" min="-10" max="10" step="1"></div><div class="field"><label for="ambience">Ambiente</label><select id="ambience"><option value="none">Nenhum / voz seca</option><option value="studio">Estúdio fechado</option><option value="room">Sala acústica</option><option value="warm">Vocal quente</option><option value="hall">Auditório</option></select></div><div class="field wide2"><div class="range-line"><label for="ambienceIntensity">Intensidade do ambiente</label><span id="ambienceValue" class="range-value"></span></div><input id="ambienceIntensity" type="range" min="0" max="100" step="5"></div></div></details></div>
+
+        </aside>
+      </div>
+      <div data-editor-mode="stt" class="editor-columns hidden"><div class="card compact"><h3>Ditado e transcrição Live</h3><div class="field"><label for="liveSttModel">Modelo STT Live</label><select id="liveSttModel"></select></div><div class="field"><label for="liveSttVocabulary">Vocabulário personalizado (uma expressão por linha)</label><textarea id="liveSttVocabulary" rows="3"></textarea></div><label class="field"><input id="liveSttSmart" type="checkbox"> Transcrição inteligente</label><label class="field"><input id="liveSttTransform" type="checkbox"> Transformar texto com este agente após STT</label><div class="field hidden"><label for="agentSttModel">Modelo STT legado</label><select id="agentSttModel"></select></div><div class="field" style="margin-top:14px"><label for="sttInstruction">Instrução da persona</label><textarea id="sttInstruction" rows="5"></textarea><p class="muted">Aplicada à transformação Live após a transcrição.</p></div></div><div class="card compact"><h3>Testar ditado Live</h3><p class="muted">O microfone envia PCM em tempo real.</p><div class="row"><button id="recordStt" class="btn">Iniciar gravação</button><button id="clearStt" class="btn ghost">Limpar resultado</button></div><div id="sttStatus" class="status"></div><div id="sttResult" class="result-box">O texto transcrito aparecerá aqui.</div></div></div>
+      <div data-editor-mode="lens" class="editor-columns hidden"><div class="card compact"><h3>Interpretação visual</h3><div class="grid"><div class="field"><label for="agentVisionModel">Modelo Lens</label><select id="agentVisionModel"></select></div><div class="field"><label for="agentGeneralModel">Modelo geral</label><select id="agentGeneralModel"></select></div></div><div class="field" style="margin-top:14px"><label for="lensInstruction">Instrução da persona</label><textarea id="lensInstruction" rows="5"></textarea><p class="muted">Defina como descrever, extrair, traduzir ou explicar a região selecionada na página.</p></div></div></div>
+      <div class="editor-footer"><div><strong id="agentSaveHint">Agente de fábrica protegido.</strong><p class="muted">Criar agente salva uma cópia completa das três modalidades e ativa a nova persona.</p><div id="agentStatus" class="status" aria-live="polite"></div></div><div class="row"><button id="saveAgent" class="btn good hidden">Salvar alterações</button><button id="deleteAgent" class="btn danger hidden">Excluir agente</button><button id="createAgent" class="btn primary">＋ Criar agente com estas personalizações</button></div></div>
+    </div>
+  </section>
+
+  <section class="panel" data-panel="shortcuts"><div class="card"><div class="row spread"><div><h2>Atalhos internos editáveis</h2><p class="muted">São os atalhos reconhecidos pelo content script da extensão.</p></div><button id="resetShortcuts" class="btn">Restaurar padrões</button></div><div id="shortcutList"></div></div><div class="card"><div class="row spread"><div><h3>Atalhos globais do Chrome</h3><p class="muted">Esses atalhos são gerenciados pelo próprio navegador.</p></div><button id="openChromeShortcuts" class="btn">Abrir chrome://extensions/shortcuts</button></div><div id="globalCommands" class="list"></div></div></section>
+
+  <section class="panel" data-panel="history"><div class="card"><div class="row spread"><div><h2>Histórico de atividades</h2><p class="muted">TTS, STT e Lens registrados pela extensão.</p></div><button id="clearHistory" class="btn danger">Limpar histórico</button></div><div id="historyList" class="list"></div></div><div class="card"><div class="row spread"><div><h2>Logs técnicos</h2><p class="muted">Diagnóstico por modelo, status HTTP e operação.</p></div><button id="clearLogs" class="btn danger">Limpar logs</button></div><div class="grid" style="margin-bottom:12px"><div class="field"><span>Nível</span><select id="logLevel"><option value="all">Todos</option><option>debug</option><option>info</option><option>warn</option><option>error</option></select></div><div class="field"><span>Fonte</span><select id="logSource"><option value="all">Todas</option><option>TTS</option><option>STT</option><option>LENS</option><option>ROUTER</option><option>API</option><option>SHORTCUT</option><option>SYSTEM</option></select></div></div><div id="logsList" class="list"></div></div></section>
+
+  <section class="panel" data-panel="chatgpt"><div class="card"><h2>ChatGPT & integração</h2><p class="muted">A extensão funciona sobre páginas web comuns. No ChatGPT, você pode ditar para o campo focado, ler a seleção, usar o HUD e executar Lens sobre uma região da tela.</p><div class="list"><div class="list-item"><strong>Ctrl+B</strong><br><span class="muted">Ler texto selecionado com o agente ativo.</span></div><div class="list-item"><strong>Ctrl+Shift+Space</strong><br><span class="muted">Iniciar/parar ditado no campo de texto focado.</span></div><div class="list-item"><strong>Ctrl+Shift+L</strong><br><span class="muted">Ativar seleção visual do Gemini Lens.</span></div></div><div class="row" style="margin-top:14px"><button id="openChatGPT" class="btn primary">Abrir ChatGPT ↗</button></div></div></section>
+</div>
+<div id="notice" class="notice hidden"></div>
+<script src="tts-config.js"></script>
+<script src="tts-adaptive.js"></script>
+<script src="live-config.js"></script>
+<script src="live-tts-diagnostics.js"></script>
+<script src="options.js"></script>
+</body></html>

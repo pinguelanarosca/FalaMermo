@@ -164,6 +164,8 @@ button.btn{font-size:12px;padding:6px 10px;border-radius:7px}
 <body>
 <div class="shell">
   <header class="top"><div class="brand"><div class="logo">🔊</div><div><h1>EXT TTS STT <span class="badge">Gemini Multimodal</span></h1><p>Agentes, instruções de sistema, TTS, STT, Lens, atalhos e diagnóstico</p></div></div><span id="storageBadge" class="badge">Storage OK</span></header>
+  <section class="card"><h2>Tarefas globais</h2><p class="muted">Consulte e controle cada tarefa, inclusive quando a página não permite mostrar o HUD.</p><div id="globalHudPanel"></div></section>
+  <section class="card"><div class="field"><label for="dictationInsertion">Inserção do ditado</label><select id="dictationInsertion"><option value="final">Ao finalizar (padrão)</option><option value="realtime">Em tempo real</option></select><p class="muted">Usa exclusivamente o campo original. Resultados provisórios podem mudar; edições manuais interrompem a inserção automática para proteger seu texto. Agentes com transformação inserem o resultado transformado ao finalizar.</p><span id="dictationInsertionStatus" role="status" class="muted"></span></div></section>
   <nav class="tabs">
     <button class="tab" data-tab="api">🔑 Chaves Gemini</button>
     <button class="tab active" data-tab="agents">🤖 Agentes & Personas</button>
@@ -264,5 +266,8 @@ button.btn{font-size:12px;padding:6px 10px;border-radius:7px}
 <script src="live-config.js"></script>
 <script src="live-tts-diagnostics.js"></script>
 <script src="live-stt-diagnostics.js"></script>
+<script src="dictation-runtime.js"></script>
+<script src="stt-realtime.js"></script>
+<script src="global-hud.js"></script>
 <script src="options.js"></script>
 </body></html>

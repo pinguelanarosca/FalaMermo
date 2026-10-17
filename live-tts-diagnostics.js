@@ -2,9 +2,9 @@
 'use strict';
 const STORAGE_KEY='liveTtsDiagnosticsV1',MAX_JOBS=8,MAX_EVENTS=120,MAX_SESSIONS=12,TTL_MS=24*60*60*1000;
 const stages=new Set(['offscreen-command-received','socket-created','socket-open','setup-sent','setup-complete','turn-sent','first-pcm','turn-complete','turn-error','interaction-status','socket-error','socket-close','server-error','message-parse-error','worklet-ready','destination-connected','context-running','pcm-received','player-enqueue','first-frame-consumed','first-playback','generation-complete','ended','paused','resumed','settings-applied','stopped','error','protocol-diagnostic']);
-const enums={model:['gemini-3.8-live','gemini-3.8-live-extended-thinking'],phase:['created','connecting','socket-open','awaiting-setup-complete','ready','awaiting-first-pcm','streaming'],contextState:['suspended','running','closed','interrupted'],interactionStatus:['IN_PROGRESS','IDLE'],encoding:['PCM signed Int16'],endianness:['little']};
-const numberFields=['blockId','bytes','frames','sampleRate','channels','bitDepth','contextSampleRate','sourceBytes','volume','playbackRate','elapsedMs','readyState','code','blocks','socketOpenMs','setupCompleteMs'];
-const booleanFields=['muted','paused','local','socketOpen','setupCompleteReceived'];
+const enums={model:['gemini-3.8-live','gemini-3.8-live-extended-thinking','gemini-3.1-flash-live-preview','gemini-2.5-flash-native-audio-preview-12-2025'],schema:['BidiGenerateContentSetup'],family:['native-audio','level','budget'],phase:['created','connecting','socket-open','awaiting-setup-complete','ready','awaiting-first-pcm','streaming'],contextState:['suspended','running','closed','interrupted'],interactionStatus:['IN_PROGRESS','IDLE'],encoding:['PCM signed Int16'],endianness:['little']};
+const numberFields=['blockId','bytes','frames','sampleRate','channels','bitDepth','contextSampleRate','sourceBytes','volume','playbackRate','elapsedMs','readyState','code','blocks','socketOpenMs','setupCompleteMs','systemInstructionCharacters','textCharacters','wireTextCharacters'];
+const booleanFields=['muted','paused','local','socketOpen','setupCompleteReceived','systemInstructionPresent'];
 const validJob=id=>typeof id==='string'&&/^job-\d{13}-[a-z0-9]{1,20}$/.test(id);
 const validSession=id=>typeof id==='string'&&/^live-\d{13}-[a-z0-9]{1,20}$/.test(id);
 function fields(input={}){
@@ -12,6 +12,9 @@ function fields(input={}){
  for(const key of numberFields)if(typeof input[key]==='number'&&Number.isFinite(input[key])&&input[key]>=0&&input[key]<=1e15)out[key]=input[key];
  for(const key of booleanFields)if(typeof input[key]==='boolean')out[key]=input[key];
  if(/^key#[1-9]$/.test(input.keyId||''))out.keyId=input.keyId;
+ if(root.LiveConfig?.VOICES.includes(input.voiceName))out.voiceName=input.voiceName;
+ if(typeof input.agentId==='string'&&/^[a-zA-Z0-9_.-]{1,160}$/.test(input.agentId))out.agentId=input.agentId;
+ for(const [key,allowed]of [['setupFields',['model','generationConfig','systemInstruction','inputAudioTranscription','outputAudioTranscription','realtimeInputConfig','sessionResumption']],['generationFields',['responseModalities','speechConfig','thinkingConfig','translationConfig','temperature','topP','topK','maxOutputTokens','candidateCount','presencePenalty','frequencyPenalty']]])if(Array.isArray(input[key]))out[key]=[...new Set(input[key].filter(field=>allowed.includes(field)))];
  if(typeof input.mimeType==='string'&&/^audio\/pcm(?:;rate=\d{1,6})?(?:;channels=1)?$/i.test(input.mimeType))out.mimeType=input.mimeType;
  return out;
 }
@@ -25,7 +28,7 @@ function sanitize(packet){
 function emit(packet){const safe=sanitize(packet);if(!safe||!root.chrome?.runtime?.sendMessage)return;try{Promise.resolve(root.chrome.runtime.sendMessage({type:'LIVE_TTS_DIAGNOSTIC',payload:safe})).catch(()=>{});}catch{/* Diagnóstico nunca interrompe áudio. */}}
 function captureProtocol(snapshot){
  if(!snapshot)return;const event=snapshot.events?.at(-1);if(!event||!stages.has(event.event))return;
- const protocol={...fields(snapshot),sessionId:snapshot.sessionId,milestones:Object.fromEntries((snapshot.events||[]).map(e=>[e.event,true]))};
+ const protocol={...fields(snapshot),...fields(snapshot.setup||{}),...fields(snapshot.turn||{}),sessionId:snapshot.sessionId,milestones:Object.fromEntries((snapshot.events||[]).map(e=>[e.event,true]))};
  emit({jobId:snapshot.jobId,sessionId:snapshot.sessionId,blockId:snapshot.blockId,stage:event.event,model:snapshot.model,keyId:snapshot.keyId,...fields(event),protocol});
 }
 function capturePlayback(snapshot){const event=snapshot?.events?.at(-1);if(event)emit({...event,stage:event.stage,jobId:snapshot.jobId});}

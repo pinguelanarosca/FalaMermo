@@ -21,6 +21,20 @@ test('runtime rejeita modelo convencional/Translate/Transcribe e JSON antes do s
  for(const modelId of ['gemini-3.8-flash-tts','gemini-3.5-live-translate-preview','gemini-3.5-transcribe-live']){session.options.modelId=modelId;await assert.rejects(session.open(),error=>error.httpStatus===400);assert.equal(instances.length,0);}
  session.options.modelId='gemini-3.8-live';session.options.jsonMode='override';session.options.advancedJson={setup:{model:'models/gemini-3.8-flash-tts'}};await assert.rejects(session.open(),/corresponder/);assert.equal(instances.length,0);
 });
+test('trocar credencial no mesmo slot nunca reutiliza socket ou handle de outra chave',async t=>{
+ const {instances,options}=transport(t),manager=new sessions.LiveSessionManager();t.after(()=>manager.closeAll());
+ const first=manager.acquire(options);instances[0].open();await flush();instances[0].message(JSON.stringify({setupComplete:{}}));const a=await first;manager.release(a);a.resumeHandle='opaque-resumption-A';
+ const nextOptions={...options,apiKey:'different-unit-test-credential',jobId:'new-job'};
+ const second=manager.acquire(nextOptions);assert.equal(instances.length,2);instances[1].open();await flush();assert.equal(JSON.parse(instances[1].sent[0]).setup.sessionResumption?.handle,undefined);instances[1].message(JSON.stringify({setupComplete:{}}));const b=await second;
+ assert.notEqual(a,b);assert.equal(b.options.apiKey,nextOptions.apiKey);manager.retire(a);manager.retire(b);
+ const third=manager.acquire({...nextOptions,jobId:'next-job'});instances[2].open();await flush();assert.equal(JSON.parse(instances[2].sent[0]).setup.sessionResumption?.handle,undefined);instances[2].message(JSON.stringify({setupComplete:{}}));await third;
+ assert.ok([...manager.pool.keys()].every(key=>!key.includes(options.apiKey)&&!key.includes(nextOptions.apiKey)));manager.closeAll();assert.equal(manager.resumeHandles.size,0);assert.equal(manager.credentials.size,0);
+});
+test('ditado novo tem sessão independente, sem retomar conversa de job concluído/cancelado',async t=>{
+ const {instances,options}=transport(t),manager=new sessions.LiveSessionManager();t.after(()=>manager.closeAll());const dictation={...options,mode:'dictation'};
+ const opening=manager.acquire(dictation);instances[0].open();await flush();instances[0].message(JSON.stringify({setupComplete:{}}));const first=await opening;first.resumeHandle='previous-dictation-handle';manager.retire(first);assert.equal(manager.resumeHandles.size,0);
+ const next=manager.acquire({...dictation,jobId:'next-dictation'});instances[1].open();await flush();assert.equal(JSON.parse(instances[1].sent[0]).setup.sessionResumption?.handle,undefined);instances[1].message(JSON.stringify({setupComplete:{}}));assert.notEqual(await next,first);
+});
 test('os quatro modelos gerais usam exatamente o setup central no socket',async t=>{
  const {instances,options}=transport(t);for(const modelId of config.LIVE_MODEL_PRIORITY){const session=new sessions.LiveSession({retire(s){s.close();}},{...options,modelId,thinkingLevel:'low'}),open=session.open(),socket=instances.at(-1);socket.open();await flush();assert.deepEqual(JSON.parse(socket.sent[0]),config.buildLiveSessionConfig(session.options));socket.message(JSON.stringify({setupComplete:{}}));await open;session.close();}
 });
@@ -37,12 +51,18 @@ test('setup → confirmação binária → turno; captura exatamente os corpos e
  assert.equal(socket.sent.length,2);assert.deepEqual(JSON.parse(socket.sent[1]),config.buildLiveTurnMessage('Teste de áudio.'));
  socket.message(new TextEncoder().encode(JSON.stringify({serverContent:{modelTurn:{parts:[{inlineData:{mimeType:'audio/pcm;rate=24000',data:'AAA='}}]},turnComplete:true}})).buffer);
  const result=await turn;assert.equal(result.chunks[0].byteLength,2);
- const trace=sessions.getTtsDiagnostics().find(x=>x.sessionId===session.id);assert.ok(trace,'conclusão bem-sucedida deve ficar disponível no snapshot público');assert.equal(trace.setupCompleteReceived,true);assert.deepEqual(trace.setup,JSON.parse(socket.sent[0]));assert.deepEqual(trace.turn,JSON.parse(socket.sent[1]));assert.ok(trace.events.some(e=>e.event==='first-pcm'));assert.ok(trace.events.some(e=>e.event==='turn-complete'));assert.ok(!JSON.stringify(trace).includes(options.apiKey));session.close();
+ const trace=sessions.getTtsDiagnostics().find(x=>x.sessionId===session.id);assert.ok(trace,'conclusão bem-sucedida deve ficar disponível no snapshot público');assert.equal(trace.setupCompleteReceived,true);assert.deepEqual(trace.setup,config.describeSetup(JSON.parse(socket.sent[0]),options));assert.deepEqual(trace.turn,config.describeTurn(JSON.parse(socket.sent[1])));assert.ok(!JSON.stringify(trace).includes('Teste de áudio.'));assert.ok(trace.events.some(e=>e.event==='first-pcm'));assert.ok(trace.events.some(e=>e.event==='turn-complete'));assert.ok(!JSON.stringify(trace).includes(options.apiKey));session.close();
 });
 test('1007 antes de setupComplete preserva motivo, fase e última mensagem; REQUEST só com evidência',async t=>{
  const {session,instances}=transport(t),opening=session.open(),socket=instances[0];
  socket.open();await flush();socket.serverClose(1007,'Request contains an invalid argument.');
  await assert.rejects(opening,error=>{assert.equal(error.closeCode,1007);assert.equal(error.closeReason,'Request contains an invalid argument.');assert.equal(error.protocolPhase,'awaiting-setup-complete');assert.equal(error.lastSentType,'setup');assert.equal(error.protocol.setupCompleteReceived,false);assert.equal(error.protocol.turn,null);assert.equal(error.protocol.close.readyState,3);assert.equal(sessions.classifyLiveError(error),'REQUEST');return true;});
+});
+test('pensamentos nunca entram no resultado; transcrição de áudio não duplica texto modelTurn',async t=>{
+ const {session,instances}=transport(t,{outputTranscription:true}),opening=session.open(),socket=instances[0];socket.open();await flush();socket.message(JSON.stringify({setupComplete:{}}));await opening;const streamed=[],turn=session.sendTurn('Fonte pública.',message=>streamed.push(message));await flush();socket.message(JSON.stringify({serverContent:{modelTurn:{parts:[{text:'Pensamento privado de fixture',thought:true},{text:'Texto alternativo'}]},outputTranscription:{text:'Fonte pública.'},turnComplete:true}}));const result=await turn;assert.equal(result.text,'Fonte pública.');assert.ok(!JSON.stringify(streamed).includes('Pensamento privado'));assert.ok(!JSON.stringify(session.diagnosticSnapshot()).includes('Pensamento privado'));session.close();
+});
+test('diagnóstico de protocolo conserva código/fase, mas não erros/reasons textuais arbitrários',t=>{
+ const {session}=transport(t);session.trace('server-error',{code:400,error:'private-error-body',reason:'private-close-body'});session.closeDetails={code:1007,reason:'private-close-body',readyState:3,phase:'ready',local:false};const snapshot=session.diagnosticSnapshot();assert.equal(snapshot.events[0].code,400);assert.equal(snapshot.close.code,1007);assert.ok(!JSON.stringify(snapshot).includes('private-'));assert.equal(snapshot.close.reason,undefined);
 });
 test('preview readonly coincide com setup/turn enviados nos três modos Live',async t=>{
  const fs=require('node:fs'),vm=require('node:vm'),{instances,options}=transport(t),source=fs.readFileSync(require.resolve('../options.js'),'utf8'),html=fs.readFileSync(require.resolve('../options.html'),'utf8');

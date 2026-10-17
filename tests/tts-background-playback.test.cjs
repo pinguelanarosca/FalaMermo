@@ -12,7 +12,7 @@ function createController() {
     const hud = { show() { state.visible = true; }, hide() { state.visible = false; state.hides++; },
         setTextPreview(text) { state.preview = text; }, setStatus(_type, label) { state.label = label; },
         setPlayingState(playing) { state.playing = playing; } };
-    let pending;
+    let pending;const pendingCallbacks=[];
     function event(eventName) {
         const packet = { type: 'TTS_PLAYBACK_EVENT', payload: { playerId: state.engine.playerId, event: eventName, status: { ...state.engine, seq: ++state.engine.seq } } };
         for (const handler of events) handler(packet, {}, () => {});
@@ -21,7 +21,7 @@ function createController() {
         URL: { revokeObjectURL() {} }, console: { error() {}, warn() {} },
         chrome: { runtime: { getURL: file => 'chrome-extension://test/' + file, onMessage: { addListener(handler) { events.push(handler); } },
             sendMessage(message, callback) {
-                if (message.type === 'TTS_REQUEST') { requests.push(message); pending = { message, callback }; return; }
+                if (message.type === 'TTS_REQUEST') { requests.push(message); pending = { message, callback }; pendingCallbacks.push(callback);return; }
                 commands.push(message);
                 if (message.type === 'TTS_STOP') return Promise.resolve({ success: true });
                 const payload = message.payload;
@@ -42,12 +42,17 @@ function createController() {
     const cache = { 'extension/src/content/ui/hudController.ts': { exports: { hud } } };
     function load(id) { if (cache[id]) return cache[id].exports; const module = cache[id] = { exports: {} }; context.modules[id](module, module.exports, load); return module.exports; }
     const tts = load('extension/src/content/controllers/ttsController.ts').tts;
-    return { tts, requests, commands, state,
+    return { tts, requests, commands, state,context,replyAll(){for(const callback of pendingCallbacks)callback({success:true,data:{live:true}});},
         ready() { state.engine = { ...pending.message.payload.playback, duration: 1, currentTime: 0, paused: false, ended: false, seq: 0 }; event('play'); },
         reply() { pending.callback({ success: true, data: { audioBase64: base64, mimeType: 'audio/wav', playback: { ...state.engine, seq: ++state.engine.seq, started: true } } }); },
         end() { state.engine.ended = true; state.engine.paused = true; state.engine.currentTime = 1; event('ended'); },
     };
 }
+test('HUD global inicia duas narrações independentes na mesma página e controla somente a escolhida',async()=>{
+ const env=createController();env.context.GlobalHud={};env.context.crypto=require('node:crypto').webcrypto;
+ const first=env.tts.speakText('Primeira narração.','narrator'),second=env.tts.speakText('Segunda narração.','translator');assert.equal(env.requests.length,2);
+ const a=env.requests[0].payload.playback,b=env.requests[1].payload.playback;assert.notEqual(a.playerId,b.playerId);assert.notEqual(a.requestId,b.requestId);assert.equal(env.commands.length,0);env.replyAll();await Promise.all([first,second]);env.tts.togglePlayPause();env.tts.stop();await flush();assert.ok(env.commands.every(message=>message.payload.playerId===b.playerId&&message.payload.requestId===b.requestId));assert.ok(env.commands.some(message=>message.payload.operation==='STOP'));assert.ok(!env.commands.some(message=>message.type==='TTS_STOP'));
+});
 test('áudio pronto inicia antes da resposta à página e não toca duas vezes ao receber o callback', async () => {
     const env = createController();
     await env.tts.speakText('Texto completo.', 'narrator');

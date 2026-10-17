@@ -1,7 +1,7 @@
 const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm');
 function environment(sampleRate=24000){
  const events=[],contexts=[],nodes=[];let listener;
- class AudioContext{constructor(){this.sampleRate=sampleRate;this.state='suspended';this.audioWorklet={addModule:async()=>{}};this.destination={};contexts.push(this);}createGain(){return{gain:{value:1},connect(target){this.target=target;return target;}};}async resume(){this.state='running';}async suspend(){this.state='suspended';}async close(){this.state='closed';}}
+ class AudioContext{constructor(){this.sampleRate=sampleRate;this.state='suspended';this.audioWorklet={addModule:async()=>{}};this.destination={};this.gains=[];contexts.push(this);}createGain(){const node={gain:{value:1},connect(target){this.target=target;return target;}};this.gains.push(node);return node;}createBiquadFilter(){return{frequency:{value:0},gain:{value:0},Q:{value:0},connect(target){this.target=target;return target;}};}createConvolver(){return{connect(target){this.target=target;return target;}};}createBuffer(channels,length,sampleRate){const data=Array.from({length:channels},()=>new Float32Array(length));return{numberOfChannels:channels,length,sampleRate,getChannelData:channel=>data[channel]};}async resume(){this.state='running';}async suspend(){this.state='suspended';}async close(){this.state='closed';}}
  class AudioWorkletNode{constructor(){this.sent=[];this.port={postMessage:(data,transfer)=>{this.sent.push(structuredClone(data,{transfer}));}};nodes.push(this);}connect(target){return target;}}
  const context=vm.createContext({console,performance,AudioContext,AudioWorkletNode,structuredClone,DataView,Float32Array,Uint8Array,AbortController,setTimeout,clearTimeout,setInterval(){},clearInterval(){},chrome:{runtime:{getURL:x=>x,onMessage:{addListener(fn){listener=fn;}},sendMessage(msg){events.push(msg.payload);return Promise.resolve();}}},LiveSessions:{LiveSessionManager:class{}},LiveConfig:require('../live-config.js')});
  const source=fs.readFileSync(require.resolve('../offscreen.js'),'utf8');
@@ -20,11 +20,28 @@ test('fila usa sampleRate real, transfere Float32 sem perder fonte, play só ap�
  const bytes=new Uint8Array([0,128,255,127]);p.add(0,bytes,false,'audio/pcm;rate=24000');
  assert.equal(e.nodes[0].sent.find(x=>x.type==='enqueue').buffer.byteLength,16);assert.equal(bytes.byteLength,4);assert.equal(p.pending,1);
  assert.equal(e.events.some(x=>x.event==='play'),false);
- e.nodes[0].port.onmessage({data:{type:'first-played',blockId:0,frames:4}});assert.equal(e.events.filter(x=>x.event==='play').length,1);
+ e.nodes[0].port.onmessage({data:{type:'first-played',blockId:0,frames:4}});await new Promise(r=>setImmediate(r));assert.equal(e.events.filter(x=>x.event==='play').length,1);
  assert.equal(e.events.find(x=>x.stage==='destination-connected').volume,.4);
  await p.pause(true);assert.equal(p.ctx.state,'suspended');p.add(1,bytes);assert.equal(e.nodes[0].sent.filter(x=>x.type==='enqueue').length,1);
  await p.pause(false);assert.equal(p.ctx.state,'running');p.stop();assert.equal(p.ctx.state,'closed');assert.equal(p.pending,0);
- const count=e.events.length;e.nodes[0].port.onmessage({data:{type:'first-played'}});assert.equal(e.events.length,count);
+ await new Promise(r=>setImmediate(r));const count=e.events.length;e.nodes[0].port.onmessage({data:{type:'first-played'}});await new Promise(r=>setImmediate(r));assert.equal(e.events.length,count);
+});
+test('alterar volume/rate emite status público para sincronizar os outros HUDs',async()=>{
+ const e=environment(),p=new e.OrderedPlaybackBuffer({jobId:'settings',playerId:'player'});await p.init();p.set(.35,1.4);await new Promise(r=>setImmediate(r));const event=e.events.find(x=>x.event==='settings');assert.equal(event.status.volume,.35);assert.equal(event.status.playbackRate,1.4);p.stop();
+});
+test('sliders antes do AudioContext ficar pronto não falham e conservam valores na inicialização',async()=>{
+ const e=environment(),p=new e.OrderedPlaybackBuffer({jobId:'early-settings',playerId:'player'});assert.doesNotThrow(()=>p.set(.2,1.5));await p.init();assert.equal(p.gain.gain.value,.2);assert.equal(p.rate,1.5);p.stop();
+});
+test('replay do mesmo card reseta snapshot offscreen com request novo e texto editado',async()=>{
+ const e=environment(),resolvers=[];e.context.LiveSessions.LiveSessionManager.prototype.acquire=async()=>({sendTurn:()=>new Promise(resolve=>resolvers.push(resolve))});e.context.LiveSessions.LiveSessionManager.prototype.release=()=>{};e.context.LiveSessions.LiveSessionManager.prototype.retire=()=>{};
+ const payload={operation:'TTS_LIVE_START',jobId:'manual-replay',playerId:'manual-replay',requestId:'first',text:'Primeiro texto.',modelId:'gemini-3.8-live',apiKeys:['fake-only']};await e.command(payload);await new Promise(r=>setImmediate(r));resolvers[0]({});await new Promise(r=>setImmediate(r));assert.equal((await e.command({operation:'GLOBAL_JOBS_SNAPSHOT'})).jobs[0].status,'completed');
+ await e.command({...payload,requestId:'second',text:'Texto editado.'});await new Promise(r=>setImmediate(r));const state=await e.command({operation:'GLOBAL_JOBS_SNAPSHOT'});assert.equal(state.jobs[0].requestId,'second');assert.equal(state.jobs[0].text,'Texto editado.');assert.equal(state.jobs[0].status,'connecting');await e.command({...payload,requestId:'second',operation:'STOP'});resolvers[1]({});
+});
+test('efeitos configurados chegam ao grafo Live e pitch chega ao worklet, fora do schema Gemini',async()=>{
+ const e=environment(),p=new e.OrderedPlaybackBuffer({jobId:'effects',pitchMultiplier:1.3,bass:3,mid:-2,treble:4,ambience:'room',ambienceIntensity:40,volume:.6,playbackRate:1.2});await p.init();assert.deepEqual(Array.from(p.filters,filter=>[filter.type,filter.frequency.value,filter.gain.value]),[['lowshelf',250,3],['peaking',1200,-2],['highshelf',3500,4]]);assert.equal(p.filters[1].Q.value,.8);assert.equal(p.convolver.buffer.numberOfChannels,2);assert.equal(p.convolver.buffer.length,18000);assert.ok(p.convolver.buffer.getChannelData(0).some(value=>value!==0));assert.equal(e.nodes[0].sent.find(packet=>packet.type==='pitch').value,1.3);assert.equal(p.gain.gain.value,.6);assert.equal(p.ctx.gains[1].gain.value,.72);assert.ok(Math.abs(p.ctx.gains[2].gain.value-.3)<1e-10);p.stop();assert.equal(p.ctx.state,'closed');
+});
+test('pitch multiplica resampling como detune legado, preservando rate, pause e drain',()=>{
+ let Processor;const events=[],context=vm.createContext({AudioWorkletProcessor:class{constructor(){this.port={postMessage:packet=>events.push(packet)};}},Float32Array,registerProcessor:(_name,cls)=>Processor=cls});vm.runInContext(fs.readFileSync(require.resolve('../pcm-player-worklet.js'),'utf8'),context);const p=new Processor(),out=new Float32Array(4);p.port.onmessage({data:{type:'enqueue',buffer:new Float32Array([0,.1,.2,.3,.4,.5]).buffer}});p.port.onmessage({data:{type:'pitch',value:1.5}});p.process([],[[out]]);for(const[index,value]of [0,.15,.3,.45].entries())assert.ok(Math.abs(out[index]-value)<1e-6);assert.equal(p.rate,1);assert.equal(events.filter(event=>event.type==='drain').length,1);
 });
 test('worklet emite frames, pausa sem consumir, retoma e flush descarta fila',()=>{
  let Processor;const messages=[];const context=vm.createContext({AudioWorkletProcessor:class{constructor(){this.port={postMessage:x=>messages.push(x)};}},Float32Array,registerProcessor(_name,cls){Processor=cls;}});
@@ -41,7 +58,7 @@ test('regressão STT offscreen mantém envio PCM, partial, final e encerramento'
  e.context.LiveSessions.decodeBase64=x=>new Uint8Array(Buffer.from(x,'base64'));
  const payload={jobId:'stt',modelId:'gemini-3.8-live',apiKeys:['fake-only']};assert.equal((await e.command({...payload,operation:'STT_LIVE_START'})).success,true);
  await e.command({...payload,operation:'STT_LIVE_AUDIO',audioBase64:'AAA=',sampleRate:16000});assert.deepEqual(audio,[[2,16000]]);
- session.handler({serverContent:{interimInputTranscription:{text:'Teste'},inputTranscription:{text:'Teste completo.'}}});assert.equal(e.events.find(x=>x.event==='stt-partial').text,'Teste');
+ session.handler({serverContent:{interimInputTranscription:{text:'Teste'},inputTranscription:{text:'Teste completo.'}}});await new Promise(r=>setImmediate(r));assert.equal(e.events.find(x=>x.event==='stt-partial').text,'Teste');
  await e.command({...payload,operation:'STT_LIVE_STOP'});assert.equal(session.ended,true);session.handler({serverContent:{turnComplete:true}});await new Promise(r=>setTimeout(r,1000));assert.equal(e.events.find(x=>x.event==='stt-final').text,'Teste completo.');
 });
 test('Ouvir inicia seleção com agente ativo sem substituir tarefa em andamento/replay',()=>{

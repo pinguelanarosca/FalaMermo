@@ -11,9 +11,10 @@ function createBundle(file, raw = {}, overrides = {}) {
         : '__require("extension/src/content/entrypoint.ts");';
     assert.ok(source.includes(entrypoint));
     const stored = structuredClone(raw);
+    const session = {};
     const context = vm.createContext({
         AbortController, structuredClone, console,
-        chrome: { runtime: {}, storage: { local: {
+        chrome: { runtime: {getURL:file=>'chrome-extension://test/'+file,sendMessage:async()=>({success:true})},offscreen:{hasDocument:async()=>false}, storage: {session:{get:async key=>({[key]:session[key]}),set:async values=>Object.assign(session,values)}, local: {
             get(_keys, callback) { callback(structuredClone(stored)); },
             set(value, callback) { Object.assign(stored, structuredClone(value)); callback(); },
         } } },
@@ -78,6 +79,8 @@ test('TTS_REQUEST encaminha a lista salva completa, inclusive sem chave principa
     assert.equal(calls[0].text, text);
     assert.deepEqual(Array.from(calls[0].apiKeys), keys);
     assert.equal(calls[0].modelId, 'gemini-3.8-live');
+    assert.equal(env.stored.history?.recentItems?.length||0,0,'início não deve fabricar conclusão no histórico');
+    await router.handleExtensionMessage({type:'LIVE_OFFSCREEN_EVENT',payload:{jobId:calls[0].jobId,event:'ended',eventSeq:1}},{url:'chrome-extension://test/offscreen.html'});
     assert.equal(env.stored.history.recentItems[0].status, 'success');
 });
 test('falha REQUEST ou 1007 inconclusivo não altera ranking/chaves', async () => {

@@ -10,7 +10,8 @@ function createBundle(file = 'background.js', raw = {}, failures = 0) {
     const entry = file === 'background.js' ? '__require("extension/src/background/index.ts");' : '__require("extension/src/content/entrypoint.ts");';
     const stored = structuredClone(raw);
     const trace = { reads: [], writes: [], requests: [], captures: 0, serializations: 0, failRead: false };
-    const chrome = { runtime: {}, tabs: { async get(id) { return { id, active: true, windowId: 7 }; }, async captureVisibleTab(windowId) { assert.equal(windowId, 7); trace.captures++; return 'data:image/jpeg;base64,aW1hZ2Vt'; } }, storage: { local: {
+    const session={};
+    const chrome = { runtime: {getURL:file=>'chrome-extension://test/'+file,sendMessage:async()=>({success:true})},offscreen:{hasDocument:async()=>false}, tabs: { async get(id) { return { id, active: true, windowId: 7 }; }, async captureVisibleTab(windowId) { assert.equal(windowId, 7); trace.captures++; return 'data:image/jpeg;base64,aW1hZ2Vt'; } }, storage: {session:{get:async key=>({[key]:session[key]}),set:async values=>Object.assign(session,values)}, local: {
         get(keys, callback) {
             trace.reads.push(keys === null ? null : Array.from(Array.isArray(keys) ? keys : [keys]));
             const selected = keys === null ? stored : Object.fromEntries((Array.isArray(keys) ? keys : [keys]).filter(key => key in stored).map(key => [key, stored[key]]));
@@ -133,22 +134,26 @@ test('TTS Live encaminha uma vez texto e chaves, sem requisição unary', async 
     assert.equal(env.trace.reads.filter(keys=>keys.includes('api')).length, 1);
 });
 
-test('popup envia após injetar o script sem espera fixa e carrega somente configuração necessária', async () => {
+test('popup monta painel compartilhado sem injetar scripts nem iniciar ações na página', async () => {
     const elements = Object.fromEntries(['agent', 'notice', 'status', 'read', 'dictate', 'hud', 'settings'].map(id => [id, { value: 'narrator', append() {} }]));
     const trace = { waits: 0, sends: 0, reads: [] };
+    elements.status.textContent='Pronto'; // Estado inicial definido pelo popup.html.
     const context = vm.createContext({
         document: { querySelector: selector => elements[selector.slice(1)], createElement: () => ({ append() {} }) },
         Option: function() {},
+        GlobalHud:{mount:()=>({update(){},destroy(){}})},window:{addEventListener(){}},
         setTimeout(callback) { trace.waits++; callback(); },
         chrome: {
             storage: { local: { async get(keys) { trace.reads.push(Array.from(keys)); return { api: { apiKey: 'fake-key' }, agents: { customAgents: [], activeAgentId: 'narrator' } }; } }, onChanged: { addListener() {} } },
             tabs: { async query() { return [{ id: 1, url: 'https://example.test' }]; }, async sendMessage() { if (++trace.sends === 1) throw new Error('Script ausente'); } },
-            scripting: { async insertCSS() {}, async executeScript() {} }, runtime: { openOptionsPage() {} },
+            scripting: { async insertCSS() {}, async executeScript() {} }, runtime: {onMessage:{addListener(){},removeListener(){}},openOptionsPage() {} },
         },
     });
     vm.runInContext(fs.readFileSync(path.join(bundleRoot, 'popup.js'), 'utf8'), context);
-    await elements.read.onclick();
-    assert.equal(trace.sends, 2);
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(elements.read.onclick, undefined);
+    assert.equal(elements.dictate.onclick, undefined);
+    assert.equal(trace.sends, 0);
     assert.equal(trace.waits, 0);
     assert.equal(elements.status.textContent, 'Pronto');
     assert.deepEqual(trace.reads[0], ['api', 'agents']);
@@ -182,7 +187,8 @@ for (const type of ['LENS_ANALYZE_REQUEST']) {
         assert.equal(request.key, 'fake-primary');
         assert.equal(env.trace.reads.filter(keys => keys.includes('api')).length, 1);
         const parts = request.body.contents[0].parts;
-        assert.ok(parts.some(part => part.text?.includes(type === 'STT_TRANSCRIBE_REQUEST' ? 'Mantenha meus termos.' : 'Descreva as legendas.')));
+        assert.equal(request.body.systemInstruction.parts[0].text,'Descreva as legendas.');
+        assert.equal(parts[0].inlineData.mimeType,'image/jpeg');assert.ok(parts[0].inlineData.data);assert.equal(parts.some(part=>part.text),false);
         assert.equal(env.trace.captures, type === 'LENS_ANALYZE_REQUEST' ? 1 : 0);
         assert.equal(env.stored.history.recentItems[0].agentId, 'custom-original');
     });

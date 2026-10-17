@@ -37,6 +37,9 @@
       "js": [
         "tts-config.js",
         "live-stt-diagnostics.js",
+        "global-hud.js",
+        "dictation-runtime.js",
+        "stt-realtime.js",
         "content.js"
       ],
       "css": [

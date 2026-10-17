@@ -6,7 +6,7 @@ function environment(acquire,slowInit=false){
  class AudioContext{constructor(){this.state='suspended';this.sampleRate=24000;this.destination={};this.init=deferred();this.audioWorklet={addModule:()=>slowInit?this.init.promise:Promise.resolve()};contexts.push(this);}createGain(){return{gain:{value:1},connect:x=>x};}async resume(){this.state='running';}async suspend(){this.state='suspended';}async close(){this.state='closed';}}
  class AudioWorkletNode{constructor(){this.sent=[];this.port={postMessage:(data,transfer)=>{this.sent.push(structuredClone(data,{transfer}));}};nodes.push(this);}connect(x){return x;}}
  class Manager{async acquire(options){attempts.push({jobId:options.jobId,blockId:options.blockId,modelId:options.modelId,keyIndex:options.keyIndex});return acquire(options);}release(){}retire(session){session.closed=true;}}
- const context=vm.createContext({console,performance,structuredClone,AudioContext,AudioWorkletNode,AbortController,DataView,Float32Array,Uint8Array,LiveConfig:config,LiveSessions:{LiveSessionManager:Manager,classifyLiveError:require('../live-session-manager.js').classifyLiveError},chrome:{runtime:{getURL:x=>x,onMessage:{addListener(fn){listener=fn;}},sendMessage(msg){events.push(msg.payload);return Promise.resolve();}}}});
+ const context=vm.createContext({console,performance,structuredClone,setTimeout,clearTimeout,AudioContext,AudioWorkletNode,AbortController,DataView,Float32Array,Uint8Array,LiveConfig:config,LiveSessions:{LiveSessionManager:Manager,classifyLiveError:require('../live-session-manager.js').classifyLiveError},chrome:{runtime:{getURL:x=>x,onMessage:{addListener(fn){listener=fn;}},sendMessage(msg){events.push(msg.payload);return Promise.resolve();}}}});
  vm.runInContext(fs.readFileSync(path.join(__dirname,'..','offscreen.js'),'utf8'),context);
  const command=payload=>new Promise(resolve=>listener({target:'offscreen',type:'LIVE_OFFSCREEN_COMMAND',payload},{},resolve));
  return{command,events,contexts,nodes,attempts};
@@ -42,14 +42,14 @@ test('três blocos paralelos terminam 3 → 1 → 2 e enfileiram 1 → 2 → 3 s
  sessions[2].finish(9000);await flush();assert.equal(env.nodes[0].sent.filter(x=>x.type==='enqueue').length,0);
  sessions[0].finish(3000);await flush();sessions[1].finish(6000);await flush();
  const chunks=env.nodes[0].sent.filter(x=>x.type==='enqueue');assert.deepEqual(chunks.map(x=>x.blockId),[0,1,2]);assert.deepEqual(chunks.map(x=>new Float32Array(x.buffer)[0]),[3000,6000,9000].map(x=>x/32768));assert.equal(env.events.some(x=>x.event==='generation-complete'),true);
- for(let i=0;i<3;i++)env.nodes[0].port.onmessage({data:{type:'drain'}});assert.equal(env.events.filter(x=>x.event==='ended').length,1);
+ for(let i=0;i<3;i++)env.nodes[0].port.onmessage({data:{type:'drain'}});await flush();assert.equal(env.events.filter(x=>x.event==='ended').length,1);
 });
 test('falha tardia de job cancelado não remove os controles do sucessor',async()=>{
  const old=deferred(),current=pendingSession(),env=environment(async o=>o.jobId==='old'?old.promise:current.session);
- await env.command({...base,jobId:'old',requestId:'old'});await env.command({...base,jobId:'new',requestId:'new'});await flush();old.reject(new Error('WebSocket closed'));await flush();
- const paused=await env.command({...base,operation:'PAUSE',requestId:'new'});assert.equal(paused.status?.paused,true);await env.command({...base,operation:'STOP',requestId:'new'});await flush();
+ await env.command({...base,jobId:'old',requestId:'old'});await env.command({...base,jobId:'old',operation:'STOP',requestId:'old'});await env.command({...base,jobId:'new',requestId:'new'});await flush();old.reject(new Error('WebSocket closed'));await flush();
+ const paused=await env.command({...base,jobId:'new',operation:'PAUSE',requestId:'new'});assert.equal(paused.status?.paused,true);await env.command({...base,jobId:'new',operation:'STOP',requestId:'new'});await flush();
 });
-test('inicializações simultâneas mantêm somente o job mais recente',async()=>{
- const item=pendingSession(),env=environment(async()=>item.session,true),first=env.command({...base,jobId:'old',requestId:'old'}),second=env.command({...base,jobId:'new',requestId:'new'});
- env.contexts[1].init.resolve();await second;env.contexts[0].init.resolve();await first;await flush();assert.deepEqual(env.attempts.map(x=>x.jobId),['new']);assert.equal(env.contexts[0].state,'closed');assert.equal(env.nodes.length,1);await env.command({...base,operation:'STOP',requestId:'new'});await flush();
+test('inicializações simultâneas preservam jobs independentes e controles individuais',async()=>{
+ const env=environment(async()=>pendingSession().session,true),first=env.command({...base,jobId:'old',requestId:'old'}),second=env.command({...base,jobId:'new',requestId:'new'});
+ env.contexts[1].init.resolve();await second;env.contexts[0].init.resolve();await first;await flush();assert.deepEqual(env.attempts.map(x=>x.jobId),['new','old']);assert.equal(env.contexts[0].state,'running');assert.equal(env.nodes.length,2);await env.command({...base,jobId:'new',operation:'STOP',requestId:'new'});assert.equal(env.contexts[0].state,'running');await env.command({...base,jobId:'old',operation:'STOP',requestId:'old'});await flush();assert.ok(env.contexts.every(c=>c.state==='closed'));
 });

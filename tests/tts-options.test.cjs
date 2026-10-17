@@ -20,7 +20,7 @@ function createOptions({ text = 'Texto para narração.', status = 200, emptyAud
     elements.ttsTestText.value = text;
     const adaptive=require('../tts-adaptive.js'),adaptiveStore=adaptive.createStore();
     const context = vm.createContext({
-        atob, structuredClone, AbortController, LiveConfig:require('../live-config.js'), TtsConfig: require("../tts-config.js"), TtsAdaptive:adaptive,
+        atob, structuredClone, AbortController, crypto:require('node:crypto').webcrypto, LiveConfig:require('../live-config.js'), TtsConfig: require("../tts-config.js"), TtsAdaptive:adaptive,
         setTimeout(callback, delay) { timers.set(++nextTimer, { callback, delay }); return nextTimer; },
         clearTimeout(id) { timers.delete(id); },
         chrome: {
@@ -84,11 +84,14 @@ function createOptions({ text = 'Texto para narração.', status = 200, emptyAud
 test('prévia TTS encaminha texto completo ao background Live sem fetch unary',async()=>{
  const text='Texto inteiro com ação 😀.\n'.repeat(500).trim(),env=createOptions({text});await env.synthesize('gemini-3.1-flash-live-preview');
  const message=env.messages.find(m=>m.type==='TTS_REQUEST');assert.equal(env.calls.length,0);assert.equal(message.payload.text,text);assert.equal(message.payload.previewAgent.modelPreferences.ttsModelId,'gemini-3.1-flash-live-preview');
- const preview=JSON.parse(env.elements.ttsPayload.textContent);assert.equal(preview.setup.setup.model,'models/gemini-3.1-flash-live-preview');assert.equal(preview.turn.clientContent.turns[0].parts[0].text,text);assert.equal(preview.setup.setup.generationConfig.speechConfig.voiceConfig.prebuiltVoiceConfig.voiceName,'Kore');assert.ok(!JSON.stringify(message).includes('test-key'));
+ const preview=JSON.parse(env.elements.ttsPayload.textContent);assert.equal(preview.setup.setup.model,'models/gemini-3.1-flash-live-preview');assert.equal(JSON.parse(preview.turn.clientContent.turns[0].parts[0].text).textToNarrate,text);assert.equal(preview.setup.setup.generationConfig.speechConfig.voiceConfig.prebuiltVoiceConfig.voiceName,'Kore');assert.ok(!JSON.stringify(message).includes('test-key'));
 });
 test('configuração convencional antiga é preservada mas execução efetiva usa Live',async()=>{
  const env=createOptions();await env.synthesize('gemini-3.8-flash-tts');const agent=env.messages.find(m=>m.type==='TTS_REQUEST').payload.previewAgent;
  assert.equal(agent.modelPreferences.ttsModelId,'gemini-3.8-flash-tts');assert.equal(env.calls.length,0);assert.equal(JSON.parse(env.elements.ttsPayload.textContent).setup.setup.model,'models/gemini-3.8-live');
+});
+test('prévias simultâneas ganham identidades independentes sem STOP implícito',async()=>{
+ const env=createOptions();await env.synthesize('gemini-3.8-live');await env.synthesize('gemini-3.8-live');const starts=env.messages.filter(message=>message.type==='TTS_REQUEST');assert.equal(starts.length,2);assert.ok(starts.every(message=>message.payload.playback.playerId));assert.notEqual(starts[0].payload.playback.playerId,starts[1].payload.playback.playerId);assert.notEqual(starts[0].payload.playback.requestId,starts[1].payload.playback.requestId);assert.equal(env.messages.some(message=>message.type==='PLAYBACK_COMMAND'),false);
 });
 test('preview Live nos três modos usa builder sem permitir JSON convencional',async()=>{
  const config=require('../live-config.js');for(const jsonMode of ['panel','override','complete']){

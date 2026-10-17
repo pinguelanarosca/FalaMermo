@@ -3,6 +3,7 @@ import './tts-adaptive.js';
 import './live-config.js';
 import './live-tts-diagnostics.js';
 import './live-stt-diagnostics.js';
+import './global-jobs.js';
 (()=>{
 const __modules={
 "extension/src/background/index.ts":function(module,exports,__require){
@@ -29,10 +30,12 @@ chrome.runtime.onInstalled.addListener(async (details) => {
 // Registro dos listeners de atalhos e menus
 (0, commandHandler_1.registerCommandHandlers)();
 (0, contextMenuHandler_1.setupContextMenus)();
-chrome.tabs.onRemoved?.addListener(tabId => messageRouter_1.stopPlaybackForTab(tabId).catch(() => {}));
+chrome.tabs.onRemoved?.addListener(tabId => messageRouter_1.originLost({tabId}).catch(error => console.warn('[GlobalJobs] Falha ao finalizar origem encerrada:',error.message)));
+chrome.tabs.onUpdated?.addListener((tabId,change) => { if(change.status==='loading'||change.discarded===true)void messageRouter_1.originLost({tabId}).catch(error=>console.warn('[GlobalJobs] Falha ao atualizar origem:',error.message)); });
+chrome.storage.onChanged?.addListener((changes,area) => {if(area==='local'&&changes.history)void messageRouter_1.historyChanged(changes.history.newValue).catch(error=>console.warn('[GlobalJobs] Falha ao sincronizar histórico:',error.message));});
 // Roteamento de mensagens assíncronas
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-    if (message.target === 'offscreen') return false;
+    if (message.target === 'offscreen'||['HUD_GLOBAL_STATE','LIVE_OPTIONS_EVENT','STT_GLOBAL_STOP','STT_GLOBAL_STATUS'].includes(message.type)) return false;
     (0, messageRouter_1.handleExtensionMessage)(message, sender)
         .then((response) => sendResponse(response))
         .catch((error) => sendResponse({ success: false, error: String(error) }));
@@ -43,6 +46,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 "extension/src/services/backgroundPlayback.ts":function(module,exports,__require){
 Object.defineProperty(exports, '__esModule', { value: true });
 let creating = null;
+let pendingStarts = 0;
 const preferences = new Map();
 const keyFor = route => `${route.tabId}:${route.frameId || 0}:${route.playerId}`;
 async function hasDocument() {
@@ -58,15 +62,15 @@ async function ensureDocument() {
     if (creating) return creating;
     creating = (async () => {
         if (!await hasDocument()) await chrome.offscreen.createDocument({
-            url: 'offscreen.html', reasons: ['AUDIO_PLAYBACK'],
-            justification: 'Iniciar a narração assim que estiver disponível, mesmo com a aba em segundo plano.',
+            url: 'offscreen.html', reasons: ['AUDIO_PLAYBACK','BLOBS'],
+            justification: 'Reproduzir PCM e processar frames Blob recebidos pelo WebSocket Gemini Live, inclusive durante ditado sem áudio de saída.',
         });
     })();
     try { await creating; } finally { creating = null; }
 }
 function routeFor(payload, sender) {
-    if ((!sender.tab?.id && !sender.url?.startsWith(chrome.runtime.getURL('options.html'))) || !payload.playerId) throw new Error('Player sem origem identificada.');
-    return { tabId: sender.tab?.id || 0, frameId: sender.frameId || 0, playerId: payload.playerId };
+    if ((!sender.tab?.id && !['options.html','popup.html'].some(page=>sender.url?.split(/[?#]/)[0]===chrome.runtime.getURL(page))) || !payload.playerId) throw new Error('Player sem origem identificada.');
+    return { tabId: sender.tab?.id || 0, frameId: sender.frameId || 0, ...(sender.documentId?{documentId:sender.documentId}:{}), playerId: payload.playerId };
 }
 async function send(payload) {
     return chrome.runtime.sendMessage({ type: 'TTS_OFFSCREEN_COMMAND', target: 'offscreen', payload });
@@ -95,9 +99,10 @@ async function handlePlaybackCommand(payload, sender) {
         preferences.set(keyFor(route), next);
     }
     if (payload.operation === 'STOP') preferences.delete(keyFor(route));
-    if (payload.operation === 'PLAY' || payload.operation === 'TTS_LIVE_START' || payload.operation === 'STT_LIVE_START') await ensureDocument();
-    else if (!await hasDocument()) return { success: true };
-    return send({ ...payload, ...route });
+    const starts=['PLAY','TTS_LIVE_START','STT_LIVE_START'].includes(payload.operation);
+    if(starts)pendingStarts++;
+    try {if(starts)await ensureDocument();else if(!await hasDocument())return{success:true};return await send({...payload,...route});}
+    finally{if(starts)pendingStarts--;}
 }
 async function forwardPlaybackEvent(payload, sender) {
     if (sender.url !== chrome.runtime.getURL('offscreen.html')) return { success: false };
@@ -110,8 +115,11 @@ async function forwardPlaybackEvent(payload, sender) {
 }
 async function stopPlaybackForTab(tabId) {
     for (const key of preferences.keys()) if (key.startsWith(`${tabId}:`)) preferences.delete(key);
-    if (await hasDocument()) await send({ operation: 'STOP_TAB', tabId });
+    // Playback lives offscreen; closing its source tab is not a stop command.
 }
+exports.hasDocument=hasDocument;
+exports.send=send;
+exports.isStarting=()=>pendingStarts>0||creating!==null;
 exports.playGeneratedAudio = playGeneratedAudio;
 exports.handlePlaybackCommand = handlePlaybackCommand;
 exports.forwardPlaybackEvent = forwardPlaybackEvent;
@@ -141,6 +149,80 @@ let activeTtsAbortController = null;
 let diagnosticTtsController = null;
 const playbackControllers = new Map();
 const liveId=prefix=>`${prefix}-${Date.now()}-${Math.random().toString(36).slice(2,10)}`;
+const globalViewers=new Map();
+const viewerStorageKey='falamermo.globalHudViewers.v1';
+let viewerWrites=Promise.resolve();
+function persistViewers(){const next=viewerWrites.catch(()=>{}).then(()=>chrome.storage.session?.set({[viewerStorageKey]:[...globalViewers.values()].slice(-512)}));viewerWrites=next;return next;}
+const cleanPage=sender=>['options.html','popup.html'].find(page=>sender.url?.split(/[?#]/)[0]===chrome.runtime.getURL(page));
+const senderOrigin=sender=>({tabId:sender.tab?.id||0,frameId:sender.frameId||0,...(sender.documentId?{documentId:sender.documentId}:{}),...(cleanPage(sender)?{page:cleanPage(sender)}:{})});
+const allowedHudSender=sender=>Boolean(sender.tab?.id||cleanPage(sender));
+const globalJobs=globalThis.GlobalJobs.create({storage:chrome.storage?.session,
+ warn:message=>console.warn('[GlobalJobs]',message),
+ getHistory:()=>chromeStorageAdapter_1.chromeStorage.get('history'),
+ updateHistory:fn=>chromeStorageAdapter_1.chromeStorage.update('history',fn),
+ ...(chrome.tabs?.get&&chrome.tabs?.update?{getTab:id=>chrome.tabs.get(id),updateTab:(id,value)=>chrome.tabs.update(id,value)}:{}),
+ notify:async state=>{
+  const packet={type:'HUD_GLOBAL_STATE',target:'global-hud',state};
+  const before=globalViewers.size;
+  await Promise.all([...globalViewers].map(async([key,viewer])=>{try{await chrome.tabs.sendMessage(viewer.tabId,packet,viewer.documentId?{documentId:viewer.documentId}:{frameId:viewer.frameId});}catch{globalViewers.delete(key);}}));
+  if(globalViewers.size!==before)await persistViewers();
+  await chrome.runtime.sendMessage(packet).catch(()=>{});
+ }
+});
+let globalRecovery=null;
+async function recoverGlobalJobs(){if(globalRecovery)return globalRecovery;globalRecovery=(async()=>{const saved=await chrome.storage.session?.get(viewerStorageKey);for(const viewer of saved?.[viewerStorageKey]||[])if(Number.isInteger(viewer.tabId)&&viewer.tabId>0&&Number.isInteger(viewer.frameId)){const safe={tabId:viewer.tabId,frameId:viewer.frameId,...(typeof viewer.documentId==='string'?{documentId:viewer.documentId}: {})};globalViewers.set(`${safe.tabId}:${safe.frameId}:${safe.documentId||''}`,safe);}await globalJobs.get();if(backgroundPlayback_1.hasDocument){const present=await backgroundPlayback_1.hasDocument();const response=present?await backgroundPlayback_1.send({operation:'GLOBAL_JOBS_SNAPSHOT'}):{success:true,jobs:[]};if(response?.success&&Array.isArray(response.jobs)){const persisted=await globalJobs.reconcile(response.jobs);if(present)await backgroundPlayback_1.send({operation:'GLOBAL_JOBS_ACK',sequences:Object.fromEntries(persisted.jobs.map(job=>[job.jobId,job.eventSeq]))});}}await globalJobs.restoreProtections();
+ for(const job of (await globalJobs.get()).jobs.filter(job=>job.type==='STT'&&job.originAvailable&&['inserting','error'].includes(job.status))){
+  let status;try{status=await sendToOrigin(job,{type:'STT_GLOBAL_STATUS',payload:{jobId:job.jobId}});}catch{}
+  if(status?.found&&['completed','insertion-failed'].includes(status.status)){await globalJobs.insertion({jobId:job.jobId,inserted:status.inserted===true,reason:status.reason||'RECOVERED_RESULT'},job.origin);continue;}
+  if(status?.found&&status.status==='cancelled'){await globalJobs.event({jobId:job.jobId,event:'stt-cancelled'});continue;}
+  if(status?.found){await sendToOrigin(job,{type:job.origin.tabId?'STT_LIVE_EVENT':'LIVE_OPTIONS_EVENT',payload:{jobId:job.jobId,eventSeq:job.eventSeq,event:job.status==='inserting'?'stt-final':'stt-error',text:job.text,error:job.error,incomplete:job.incomplete}}).catch(()=>{});}
+  else if(job.status==='inserting')await globalJobs.originLost({...job.origin,jobId:job.jobId});
+ }
+})();try{await globalRecovery;}catch(error){globalRecovery=null;throw error;}}
+async function sendToOrigin(job,message){if(job.origin.tabId)return chrome.tabs.sendMessage(job.origin.tabId,message,job.origin.documentId?{documentId:job.origin.documentId}:{frameId:job.origin.frameId});return chrome.runtime.sendMessage({...message,target:'stt-origin',origin:job.origin});}
+async function handleOriginLost(query){await recoverGlobalJobs();for(const[key,viewer]of globalViewers)if(viewer.tabId===query.tabId&&(query.frameId===undefined||viewer.frameId===query.frameId))globalViewers.delete(key);await persistViewers();const affected=await globalJobs.originLost(query);for(const job of affected){
+ // A navigation can start before pagehide. Give the original document its normal PCM drain;
+ // a closed/destroyed document rejects immediately, then offscreen finalizes available input.
+ try{await sendToOrigin(job,{type:'STT_GLOBAL_STOP',payload:{jobId:job.jobId}});}catch{}
+ if(await backgroundPlayback_1.hasDocument?.())await backgroundPlayback_1.send({operation:'STT_ORIGIN_LOST',jobId:job.jobId,playerId:job.playerId,...job.origin}).catch(error=>globalJobs.fail(job.jobId,error.message));
+}}
+exports.originLost=handleOriginLost;
+exports.historyChanged=async()=>{await recoverGlobalJobs();return globalJobs.historyChanged(()=>chromeStorageAdapter_1.chromeStorage.get('history'));};
+const guiCommands=new Map();
+async function controlGlobalJob(payload){
+ const work=(guiCommands.get(payload.jobId)||Promise.resolve()).catch(()=>{}).then(()=>runGlobalJobCommand(payload));
+ guiCommands.set(payload.jobId,work);
+ try{return await work;}finally{if(guiCommands.get(payload.jobId)===work)guiCommands.delete(payload.jobId);}
+}
+async function runGlobalJobCommand(payload){const job=await globalJobs.find({jobId:payload.jobId});if(!job)return{success:false,error:'Tarefa não encontrada.'};
+ if(payload.action==='select')return{success:true,state:await globalJobs.ui({activeTaskId:job.jobId})};
+ if(payload.action==='collapse')return{success:true,state:await globalJobs.collapse(payload)};
+ if(payload.action==='edit')return{success:true,state:await globalJobs.edit(payload)};
+ if(payload.action==='play'){
+  if(job.type!=='TTS'||!globalThis.GlobalJobs.TERMINAL.has(job.status)||!job.text.trim())return{success:false,error:'Tarefa não está pronta para reprodução.'};
+  const response=await handleExtensionMessage({type:'TTS_REQUEST',payload:{text:job.text,agentId:job.agentId,playback:{playerId:job.playerId,requestId:liveId('request'),...job.progress}}},{url:chrome.runtime.getURL('popup.html')},job);
+  return{...response,state:await globalJobs.get()};
+ }
+ if(payload.action==='remove'){
+  if(['flushing','inserting'].includes(job.status))return{success:false,error:'Aguarde a finalização desta tarefa.'};
+  if(!globalThis.GlobalJobs.TERMINAL.has(job.status)){
+   if(job.type==='STT'){await sendToOrigin(job,{type:job.origin.tabId?'STT_LIVE_EVENT':'LIVE_OPTIONS_EVENT',payload:{jobId:job.jobId,event:'stt-cancelled'}}).catch(()=>{});if(await backgroundPlayback_1.hasDocument?.())await backgroundPlayback_1.send({operation:'STT_LIVE_CANCEL',jobId:job.jobId,playerId:job.playerId,...job.origin});await globalJobs.event({jobId:job.jobId,event:'stt-cancelled'});}
+   else await runGlobalJobCommand({...payload,action:'stop'});
+  }
+  await globalJobs.remove(job.jobId);return{success:true,state:await globalJobs.get()};
+ }
+ if(payload.action==='seekWords')return{success:false,error:'O PCM Live não fornece timestamps por palavra. Navegação exata indisponível; nenhuma posição estimada foi aplicada.'};
+ if(!['stop','pause','resume','set'].includes(payload.action))return{success:false,error:'Controle inválido.'};
+ if(job.type==='STT'){
+  if(payload.action!=='stop')return{success:false,error:'Controle indisponível para ditado.'};
+  if(globalThis.GlobalJobs.TERMINAL.has(job.status))return{success:true};
+  if(['flushing','inserting'].includes(job.status))return{success:false,error:'Aguarde a etapa de finalização atual.'};
+  if(['waiting','transforming'].includes(job.status)){if(await backgroundPlayback_1.hasDocument?.())await backgroundPlayback_1.send({operation:'STT_LIVE_CANCEL',jobId:job.jobId,playerId:job.playerId,...job.origin});else await sendToOrigin(job,{type:job.origin.tabId?'STT_LIVE_EVENT':'LIVE_OPTIONS_EVENT',payload:{jobId:job.jobId,event:'stt-cancelled'}}).catch(()=>{});await globalJobs.event({jobId:job.jobId,event:'stt-cancelled'});return{success:true};}
+  await globalJobs.stopped(job.jobId);let response;try{response=await sendToOrigin(job,{type:'STT_GLOBAL_STOP',payload:{jobId:job.jobId}});}catch{}
+  if(!response?.success){await globalJobs.originLost({...job.origin,jobId:job.jobId});if(await backgroundPlayback_1.hasDocument?.())await backgroundPlayback_1.send({operation:'STT_ORIGIN_LOST',jobId:job.jobId,playerId:job.playerId,...job.origin});}return{success:true};
+ }
+ const operation={stop:'STOP',pause:'PAUSE',resume:'RESUME',set:'SET'}[payload.action];if(!globalThis.GlobalJobs.TERMINAL.has(job.status)&&await backgroundPlayback_1.hasDocument?.()){const result=await backgroundPlayback_1.send({operation,jobId:job.jobId,playerId:job.playerId,requestId:job.requestId,...job.origin,...(Number.isFinite(payload.volume)?{volume:Math.max(0,Math.min(1,payload.volume))}:{}),...(Number.isFinite(payload.playbackRate)?{playbackRate:Math.max(.5,Math.min(2,payload.playbackRate))}:{})});if(result?.success===false)return result;}if(payload.action==='stop')await globalJobs.stopped(job.jobId);if(payload.action==='set')await globalJobs.settings(payload);return{success:true,state:await globalJobs.get()};
+}
 async function liveKeyOrders(models,keys){
  const adaptive=globalThis.TtsAdaptive,pairs=adaptive.catalog(models,keys),data=await adaptive.getStore().snapshot(pairs),ranked=adaptive.orderPairs(data,pairs);
  // A pontuação só ordena chaves dentro do modelo; nunca ordena modelos.
@@ -177,9 +259,52 @@ async function addHistoryLog(type, previewText, agentId, status = 'success', err
         console.warn('[HistoryLog] Falha ao gravar histórico:', err);
     }
 }
-async function handleExtensionMessage(message, sender) {
+async function handleExtensionMessage(message, sender, guiJob) {
     try {
         switch (message.type) {
+            case 'HUD_GLOBAL_GET': {
+                if(!allowedHudSender(sender))return{success:false,error:'Painel sem origem válida.'};
+                await recoverGlobalJobs();
+                const origin=senderOrigin(sender);
+                if(origin.tabId){
+                    const old=(await globalJobs.get()).jobs.filter(job=>job.origin.tabId===origin.tabId&&job.origin.frameId===origin.frameId&&job.origin.documentId&&origin.documentId&&job.origin.documentId!==origin.documentId);
+                    for(const job of old)await handleOriginLost(job.origin);
+                    globalViewers.set(`${origin.tabId}:${origin.frameId}:${origin.documentId||''}`,origin);
+                    await persistViewers();
+                }
+                return{success:true,state:await globalJobs.get()};
+            }
+            case 'HUD_GLOBAL_UI_SET':
+                if(!allowedHudSender(sender))return{success:false};
+                await recoverGlobalJobs();return{success:true,state:await globalJobs.ui(message.payload||{})};
+            case 'HUD_GLOBAL_CREATE': {
+                if(!allowedHudSender(sender))return{success:false};
+                await recoverGlobalJobs();
+                const agents=await chromeStorageAdapter_1.chromeStorage.get('agents');
+                const agent=globalThis.LiveConfig.resolveAgent(agents,null,defaultAgents_1.DEFAULT_AGENTS,defaultAgents_1.AGENT_ID_ALIASES);
+                return{success:true,state:await globalJobs.draft({jobId:liveId('manual'),agentId:agent.metadata.id,origin:{tabId:0,frameId:0}})};
+            }
+            case 'HUD_HISTORY_CLEAR':
+                if(cleanPage(sender)!=='options.html')return{success:false,error:'Limpeza disponível somente nas opções.'};
+                await recoverGlobalJobs();return{success:true,state:await globalJobs.clearHistory(),history:await chromeStorageAdapter_1.chromeStorage.get('history')};
+            case 'HUD_GLOBAL_COMMAND':
+                if(!allowedHudSender(sender))return{success:false};
+                await recoverGlobalJobs();return controlGlobalJob(message.payload||{});
+            case 'HUD_CAPTURE_STATE':
+                if(!allowedHudSender(sender))return{success:false};
+                await recoverGlobalJobs();return{success:true,state:await globalJobs.capture(message.payload||{},senderOrigin(sender))};
+            case 'HUD_INSERTION_RESULT':
+                if(!allowedHudSender(sender))return{success:false};
+                await recoverGlobalJobs();return{success:true,state:await globalJobs.insertion(message.payload||{},senderOrigin(sender))};
+            case 'LIVE_OFFSCREEN_IDLE': {
+                if(sender.url!==chrome.runtime.getURL('offscreen.html'))return{success:false};
+                if(!chrome.offscreen?.closeDocument||backgroundPlayback_1.isStarting?.())return{success:true};
+                const state=await globalJobs.get();
+                if(state.jobs.some(job=>!globalThis.GlobalJobs.TERMINAL.has(job.status)&&job.status!=='inserting'))return{success:true};
+                const latest=await backgroundPlayback_1.send({operation:'GLOBAL_JOBS_SNAPSHOT'});
+                if(latest?.success&&(latest.activeJobIds||latest.jobs?.filter(job=>!globalThis.GlobalJobs.TERMINAL.has(job.status))||[]).length===0&&!backgroundPlayback_1.isStarting?.())await chrome.offscreen.closeDocument();
+                return{success:true};
+            }
             case 'LIVE_STT_DIAGNOSTIC': {
                 if(!sender.tab&&![chrome.runtime.getURL('options.html'),chrome.runtime.getURL('offscreen.html')].includes(sender.url?.split(/[?#]/)[0]))return{success:false};
                 return globalThis.LiveSttDiagnostics.record(message.payload);
@@ -198,7 +323,11 @@ async function handleExtensionMessage(message, sender) {
             }
             case 'LIVE_OFFSCREEN_EVENT': {
                 if (sender.url !== chrome.runtime.getURL('offscreen.html')) return { success: false };
+                await recoverGlobalJobs();
                 const {apiKeys,apiKey,systemInstruction,advancedJson,...event} = message.payload || {};
+                const registered=event.jobId?await globalJobs.find({jobId:event.jobId}):null;
+                if(event.jobId&&!registered)return{success:true,ignored:true};
+                if(event.jobId){const applied=await globalJobs.event(event);if(!applied.changed)return{success:true,duplicate:true};}
                 if (event.event === 'ranking' && !['REQUEST','CANCELLED','INVALIDATED_CONTEXT','UNKNOWN'].includes(event.result)) {
                     const adaptive=globalThis.TtsAdaptive,config=globalThis.LiveConfig;
                     const api=await chromeStorageAdapter_1.chromeStorage.get('api');
@@ -206,7 +335,9 @@ async function handleExtensionMessage(message, sender) {
                     const pair=pairs.find(item=>item.model===event.modelId&&item.keyIndex===event.keyIndex);
                     if(pair){const data=await adaptive.getStore().snapshot(pairs);const type=['SUCCESS','TRANSIENT','QUOTA','AUTH','MODEL','REQUEST','CANCELLED'].includes(event.result)?event.result:'TRANSIENT';await adaptive.getStore().record(pairs,pair,{type,durationMs:event.durationMs||0,label:type},data.epoch).catch(()=>{});}
                 }
-                if(event.tabId)await chrome.tabs.sendMessage(event.tabId,{type:event.operation==='STT_LIVE_START'||event.event?.startsWith('stt-')?'STT_LIVE_EVENT':'TTS_PLAYBACK_EVENT',payload:event},{frameId:event.frameId||0}).catch(()=>{});
+                const destination=registered?.origin||event;
+                if(registered?.originAvailable===false)return{success:true};
+                if(destination.tabId)await chrome.tabs.sendMessage(destination.tabId,{type:event.operation==='STT_LIVE_START'||event.event?.startsWith('stt-')?'STT_LIVE_EVENT':'TTS_PLAYBACK_EVENT',payload:event},destination.documentId?{documentId:destination.documentId}:{frameId:destination.frameId||0}).catch(()=>{});
                 else if(event.tabId===0)void chrome.runtime.sendMessage({type:'LIVE_OPTIONS_EVENT',payload:event}).catch(()=>{});
                 return { success: true };
             }
@@ -259,8 +390,14 @@ async function handleExtensionMessage(message, sender) {
                 }catch(error){trace.mark('REQUEST_ERROR',{error:__require("shared/utils/ttsConfiguration.ts").redactTtsSecrets(error.message)});return {success:false,error:error.message,trace:trace.snapshot()};}
                 finally{if(diagnosticTtsController===controller)diagnosticTtsController=null;}
             }
-            case 'TTS_PLAYBACK_COMMAND':
-                return backgroundPlayback_1.handlePlaybackCommand(message.payload, sender);
+            case 'TTS_PLAYBACK_COMMAND': {
+                await recoverGlobalJobs();
+                const payload=message.payload||{},job=await globalJobs.find({...payload,...senderOrigin(sender)});
+                if(job&&!await globalJobs.hasOrigin(job.jobId,senderOrigin(sender)))return{success:false,error:'Player pertence a outro documento.'};
+                const result=await backgroundPlayback_1.handlePlaybackCommand({...payload,...(job?{jobId:job.jobId}: {})},sender);
+                if(job&&payload.operation==='STOP')await globalJobs.stopped(job.jobId);
+                return result;
+            }
             case 'TTS_PLAYBACK_EVENT':
                 return backgroundPlayback_1.forwardPlaybackEvent(message.payload, sender);
             case 'TTS_REQUEST': {
@@ -274,16 +411,18 @@ async function handleExtensionMessage(message, sender) {
                     const settings=await chromeStorageAdapter_1.chromeStorage.getMany(['api','agents','models','audio']);
                     const keys=(0,defaultSettings_1.getTtsApiKeys)(settings.api);
                     if(!keys.length)return {success:false,error:'Chave de API Gemini não configurada. Abra as opções para configurar.'};
-                    const agent=sender.url&&sender.url.startsWith(chrome.runtime.getURL('options.html'))&&message.payload.previewAgent?message.payload.previewAgent:settings.agents.customAgents?.find(a=>a.metadata.id===agentId)||(0,defaultAgents_1.getCanonicalAgent)(agentId);
+                    const agent=sender.url?.split(/[?#]/)[0]===chrome.runtime.getURL('options.html')&&message.payload.previewAgent?message.payload.previewAgent:globalThis.LiveConfig.resolveAgent(settings.agents,agentId,defaultAgents_1.DEFAULT_AGENTS,defaultAgents_1.AGENT_ID_ALIASES);
                     const live=globalThis.LiveConfig.migrateAgent(agent,settings.models).live,liveOptions=globalThis.LiveConfig.buildAgentLiveOptions(agent,settings.audio,settings.models);
                     const model=globalThis.LiveConfig.LIVE_TTS_MODELS.includes(live.preferredModel)?live.preferredModel:globalThis.LiveConfig.DEFAULTS.ttsModelId;
                     const models=globalThis.LiveConfig.modelChain('tts',model);
                     const keyOrderByModel=await liveKeyOrders(models,keys);
                     const route={playerId:playback?.playerId||liveId('player'),requestId:playback?.requestId||liveId('request')};
-                    const payload={...route,...liveOptions,operation:'TTS_LIVE_START',jobId:liveId('job'),generation:Date.now(),text,apiKeys:keys,models,keyOrderByModel,modelId:model,voiceName:voiceName||liveOptions.voiceName,volume:playback?.volume??liveOptions.volume,playbackRate:playback?.playbackRate??liveOptions.playbackRate};
-                    const result=await backgroundPlayback_1.handlePlaybackCommand(payload,sender);
-                    if(!result?.success)throw new Error(result?.error||'Falha no TTS Live.');
-                    void addHistoryLog('tts',text.slice(0,80),agentId,'success');
+                    const payload={...route,...liveOptions,operation:'TTS_LIVE_START',jobId:guiJob?.jobId||liveId('job'),generation:Date.now(),text,apiKeys:keys,models,keyOrderByModel,modelId:model,voiceName:voiceName||liveOptions.voiceName,volume:playback?.volume??liveOptions.volume,playbackRate:playback?.playbackRate??liveOptions.playbackRate};
+                    await recoverGlobalJobs();
+                    if(guiJob)await globalJobs.preparePlayback(payload);
+                    else await globalJobs.start({...payload,type:'TTS',origin:senderOrigin(sender),agentId:agent.metadata.id});
+                    const playbackSender=guiJob?.origin.tabId?{...sender,tab:{id:guiJob.origin.tabId},frameId:guiJob.origin.frameId,...(guiJob.origin.documentId?{documentId:guiJob.origin.documentId}:{})}:sender;
+                    let result;try{result=await backgroundPlayback_1.handlePlaybackCommand(payload,playbackSender);if(!result?.success)throw new Error(result?.error||'Falha no TTS Live.');}catch(error){await globalJobs.fail(payload.jobId,error.message);throw error;}
                     return {success:true,data:{jobId:payload.jobId,modelUsed:model,blocks:result.blocks,live:true}};
                 }
                 // REMOVIDO: Cancelamento automático de solicitações anteriores.
@@ -379,7 +518,10 @@ async function handleExtensionMessage(message, sender) {
                     const playbackKey = `${sender.tab.id}:${sender.frameId || 0}:${playerId}`;
                     playbackControllers.get(playbackKey)?.abort('Interrompido por TTS_STOP');
                     playbackControllers.delete(playbackKey);
-                    await backgroundPlayback_1.handlePlaybackCommand({ playerId, operation: 'STOP' }, sender);
+                    const job=await globalJobs.find({playerId,...senderOrigin(sender)});
+                    if(job&&!await globalJobs.hasOrigin(job.jobId,senderOrigin(sender)))return{success:false,error:'Player pertence a outro documento.'};
+                    await backgroundPlayback_1.handlePlaybackCommand({ playerId,operation:'STOP',...(job?{jobId:job.jobId}: {})},sender);
+                    if(job)await globalJobs.stopped(job.jobId);
                     return { success: true };
                 }
                 if (activeTtsAbortController) {
@@ -399,18 +541,27 @@ async function handleExtensionMessage(message, sender) {
             case 'STT_LIVE_START': {
                 const settings=await chromeStorageAdapter_1.chromeStorage.getMany(['api','agents','models','audio']);
                 const keys=(0,defaultSettings_1.getTtsApiKeys)(settings.api);if(!keys.length)return{success:false,error:'Chave de API Gemini não configurada.'};
-                const agent=(sender.url?.startsWith(chrome.runtime.getURL('options.html'))&&message.payload.previewAgent)||settings.agents.customAgents?.find(a=>a.metadata.id===message.payload.agentId)||(0,defaultAgents_1.getCanonicalAgent)(message.payload.agentId);
+                const agent=(sender.url?.split(/[?#]/)[0]===chrome.runtime.getURL('options.html')&&message.payload.previewAgent)||globalThis.LiveConfig.resolveAgent(settings.agents,message.payload.agentId,defaultAgents_1.DEFAULT_AGENTS,defaultAgents_1.AGENT_ID_ALIASES);
                 const migrated=globalThis.LiveConfig.migrateAgent(agent,settings.models),stt=migrated.live.stt||{};
                 const instruction=agent.instructions?.sttFormattingInstruction||'';
                 const transform=stt.transform===true||(stt.transform!==false&&agent.metadata?.id!=='narrator'&&Boolean(instruction.trim()));
                 const modelId=globalThis.LiveConfig.LIVE_STT_MODELS.includes(stt.preferredModel)?stt.preferredModel:globalThis.LiveConfig.DEFAULTS.sttModelId;
                 const models=globalThis.LiveConfig.modelChain('stt',modelId);
-                return backgroundPlayback_1.handlePlaybackCommand({...message.payload,operation:'STT_LIVE_START',apiKeys:keys,modelId,models,customVocabulary:stt.customVocabulary,smartTranscription:stt.smartTranscription,languageCodes:stt.languageCodes,thinkingLevel:stt.thinkingLevel,thinkingBudget:stt.thinkingBudget,vad:stt.vad,transformInstruction:transform?instruction:null,transformModels:globalThis.LiveConfig.modelChain('tts',migrated.live.preferredModel),voiceName:migrated.live.voiceName,playerId:message.payload.playerId||message.payload.jobId},sender);
+                await recoverGlobalJobs();
+                const payload={...message.payload,agentId:agent.metadata.id,operation:'STT_LIVE_START',apiKeys:keys,modelId,models,customVocabulary:stt.customVocabulary,smartTranscription:stt.smartTranscription,languageCodes:stt.languageCodes,thinkingLevel:stt.thinkingLevel,thinkingBudget:stt.thinkingBudget,vad:stt.vad,transformInstruction:transform?instruction:null,transformModels:globalThis.LiveConfig.modelChain('tts',migrated.live.preferredModel),voiceName:migrated.live.voiceName,playerId:message.payload.playerId||message.payload.jobId};
+                await globalJobs.start({...payload,type:'STT',origin:senderOrigin(sender),agentId:agent.metadata.id});
+                try{const result=await backgroundPlayback_1.handlePlaybackCommand(payload,sender);if(!result?.success)throw new Error(result?.error||'Falha no STT Live.');return result;}catch(error){await globalJobs.fail(payload.jobId,error.message);throw error;}
             }
             case 'STT_LIVE_AUDIO':
             case 'STT_LIVE_STOP':
-            case 'STT_LIVE_CANCEL':
-                return backgroundPlayback_1.handlePlaybackCommand({...message.payload,operation:message.type},sender);
+            case 'STT_LIVE_CANCEL': {
+                await recoverGlobalJobs();
+                if(!await globalJobs.hasOrigin(message.payload?.jobId,senderOrigin(sender)))return{success:false,error:'Ditado pertence a outro documento ou foi encerrado.'};
+                const result=await backgroundPlayback_1.handlePlaybackCommand({...message.payload,operation:message.type},sender);
+                if(message.type==='STT_LIVE_STOP')await globalJobs.stopped(message.payload.jobId,'waiting');
+                if(message.type==='STT_LIVE_CANCEL')await globalJobs.event({jobId:message.payload.jobId,event:'stt-cancelled'});
+                return result;
+            }
             case 'TEST_API_KEY': {
                 const isValid = await geminiDirectClient_1.geminiDirectClient.testApiKey(message.payload.apiKey);
                 return { success: isValid, error: isValid ? undefined : 'Chave inválida ou sem permissão de acesso.' };
@@ -440,9 +591,10 @@ async function handleExtensionMessage(message, sender) {
                 });
                 try {
                     const startTime = Date.now();
-                    const description = await (0, tabCaptureHandler_1.captureAndAnalyzeTab)(tabId, message.payload.instruction, message.payload.agentId, message.payload.rect, sender.url);
+                    let resolvedAgentId=message.payload.agentId;
+                    const description = await (0, tabCaptureHandler_1.captureAndAnalyzeTab)(tabId, message.payload.instruction, message.payload.agentId, message.payload.rect, sender.url,id=>{resolvedAgentId=id;});
                     const durationMs = Date.now() - startTime;
-                    await addHistoryLog('vision', description.length > 80 ? description.substring(0, 80) + '...' : description, message.payload.agentId, 'success');
+                    await addHistoryLog('vision', description.length > 80 ? description.substring(0, 80) + '...' : description, resolvedAgentId, 'success');
                     await (0, diagnosticLogger_1.logDiagnostic)({
                         level: 'info',
                         source: 'LENS',
@@ -1584,7 +1736,7 @@ function bodyPreview(body) {
     const compact = body.replace(/\s+/g, ' ').trim();
     return compact.length > 400 ? `${compact.slice(0, 400)}…` : compact;
 }
-async function readJsonResponse(response, context, trace) {
+async function readJsonResponse(response, context, trace, {includeBodyPreview=true}={}) {
     const raw = await response.text();
     trace?.mark("HTTP_BODY_END");
     trace?.mark("PARSE_START");
@@ -1597,7 +1749,7 @@ async function readJsonResponse(response, context, trace) {
         trace?.mark('PARSE_END');return parsed;
     }
     catch (err) {
-        const preview = bodyPreview(raw);
+        const preview = includeBodyPreview?bodyPreview(raw):'';
         throw new Error(`${context}: resposta não-JSON (HTTP ${response.status}${contentType ? `, ${contentType}` : ''}).${preview ? ` Corpo: ${preview}` : ''}`, { cause: err });
     }
 }
@@ -1801,7 +1953,7 @@ class GeminiDirectClient {
     /**
      * Inspeciona conteúdo visual com a whitelist Vision/Geral.
      */
-    async inspectVisionContext(imageBase64, instruction, apiKey, modelId) {
+    async inspectVisionContext(imageBase64, instruction, apiKey, modelId, options={}) {
         if (!apiKey) {
             throw new Error('Chave de API Gemini não informada.');
         }
@@ -1820,24 +1972,8 @@ class GeminiDirectClient {
             }, MAX_PER_MODEL_TIMEOUT_MS);
             try {
                 const endpoint = `${GEMINI_BASE_URL}/models/${targetModel}:generateContent?key=${apiKey}`;
-                const payload = {
-                    contents: [
-                        {
-                            role: 'user',
-                            parts: [
-                                {
-                                    inline_data: {
-                                        mime_type: 'image/jpeg',
-                                        data: imageBase64,
-                                    },
-                                },
-                                {
-                                    text: instruction || 'Extraia e transcreva com exatidão todo o texto visível nesta área selecionada da página. Retorne unicamente o texto extraído, limpo, sem introduções ou observações, pronto para ser lido.',
-                                },
-                            ],
-                        },
-                    ],
-                };
+                const payload=globalThis.LiveConfig.buildVisionPayload({modelId:targetModel,imageBase64,mimeType:options.mimeType||'image/jpeg',instruction:instruction||'Extraia e transcreva com exatidão todo o texto visível nesta área selecionada da página. Retorne unicamente o texto extraído, limpo, sem introduções ou observações, pronto para ser lido.'});
+                await (0,diagnosticLogger_1.logDiagnostic)({level:'info',source:'LENS',operation:'PAYLOAD_CONTRACT',modelId:targetModel,message:JSON.stringify({schema:'GenerateContent',agentId:options.agentId||null,systemInstructionPresent:true,systemInstructionCharacters:payload.systemInstruction.parts[0].text.length,mimeType:payload.contents[0].parts[0].inlineData.mimeType,imageBase64Characters:imageBase64.length})});
                 const response = await fetch(endpoint, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -1846,7 +1982,9 @@ class GeminiDirectClient {
                 });
                 const durationMs = Date.now() - startTime;
                 if (!response.ok) {
-                    const errorText = await readHttpError(response, `Visão ${targetModel}`);
+                    // O provedor pode ecoar imagem/instruções no erro. Não persistir esse corpo.
+                    await readHttpError(response, `Visão ${targetModel}`);
+                    const errorText = `HTTP ${response.status}`;
                     await (0, diagnosticLogger_1.logDiagnostic)({
                         level: 'error',
                         source: 'LENS',
@@ -1857,9 +1995,9 @@ class GeminiDirectClient {
                         message: `Falha HTTP (${response.status}) no modelo ${targetModel}: ${errorText}`,
                         errorDetails: errorText,
                     });
-                    throw new Error(`Falha HTTP (${response.status}) no modelo ${targetModel}: ${errorText}`);
+                    throw Object.assign(new Error(`Falha HTTP (${response.status}) no modelo ${targetModel}: ${errorText}`),{httpStatus:response.status});
                 }
-                const data = await readJsonResponse(response, `Visão ${targetModel}`);
+                const data = await readJsonResponse(response, `Visão ${targetModel}`,undefined,{includeBodyPreview:false});
                 const description = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
                 await (0, diagnosticLogger_1.logDiagnostic)({
                     level: 'info',
@@ -1873,7 +2011,8 @@ class GeminiDirectClient {
             }
             catch (err) {
                 const durationMs = Date.now() - startTime;
-                const errMsg = err instanceof Error ? err.message : String(err);
+                const errMsg = redactApiKeys(err instanceof Error ? err.message : String(err),[apiKey]);
+                const safeError=Object.assign(new Error(errMsg),{name:err?.name||'Error',...(Number.isFinite(err?.httpStatus)?{httpStatus:err.httpStatus}:{})});
                 await (0, diagnosticLogger_1.logDiagnostic)({
                     level: 'error',
                     source: 'LENS',
@@ -1881,9 +2020,9 @@ class GeminiDirectClient {
                     modelId: targetModel,
                     durationMs,
                     message: errMsg,
-                    errorDetails: err?.stack || String(err),
+                    errorDetails: safeError.stack,
                 });
-                throw err;
+                throw safeError;
             }
             finally {
                 clearTimeout(timeoutId);
@@ -1921,10 +2060,10 @@ class GeminiDirectClient {
             const endpoint = `${GEMINI_BASE_URL}/models?key=${apiKey}`;
             const response = await fetch(endpoint, { method: 'GET', signal: controller.signal });
             if (!response.ok) {
-                const errorText = await readHttpError(response, 'Listagem de modelos');
-                throw new Error(`Erro ao listar modelos: ${errorText}`);
+                await readHttpError(response, 'Listagem de modelos');
+                throw new Error(`Erro ao listar modelos: HTTP ${response.status}`);
             }
-            const data = await readJsonResponse(response, 'Listagem de modelos');
+            const data = await readJsonResponse(response, 'Listagem de modelos',undefined,{includeBodyPreview:false});
             const modelsList = data.models || [];
             const allowedIds = new Set([
                 ...modelsCatalog_1.TTS_MODELS_WHITELIST,
@@ -1943,6 +2082,7 @@ class GeminiDirectClient {
             }))
                 .filter((m) => allowedIds.has(m.id));
         }
+        catch(error){throw Object.assign(new Error(redactApiKeys(error?.message||String(error),[apiKey])),{name:error?.name||'Error'});}
         finally {
             clearTimeout(timeoutId);
         }
@@ -2250,7 +2390,7 @@ const chromeStorageAdapter_1 = __require("extension/src/services/storage/chromeS
 const defaultAgents_1 = __require("shared/constants/defaultAgents.ts");
 const pcmWav_1 = __require("shared/utils/pcmWav.ts");
 const diagnosticLogger_1 = __require("extension/src/services/diagnosticLogger.ts");
-async function captureAndAnalyzeTab(tabId, instruction, agentId, rect, expectedUrl) {
+async function captureAndAnalyzeTab(tabId, instruction, agentId, rect, expectedUrl, onAgentResolved) {
     // Timeout Global de 30s para o fluxo inteiro da captura até a resposta
     const GLOBAL_LENS_TIMEOUT_MS = 30000;
     const executionPromise = (async () => {
@@ -2258,8 +2398,8 @@ async function captureAndAnalyzeTab(tabId, instruction, agentId, rect, expectedU
         if (!apiSettings.apiKey) {
             throw new Error('Chave de API Gemini não configurada. Abra as opções da extensão.');
         }
-        const customAgent = agentsSettings.customAgents?.find((a) => a.metadata.id === agentId);
-        const agent = customAgent || (0, defaultAgents_1.getCanonicalAgent)(agentId);
+        const agent=globalThis.LiveConfig.resolveAgent(agentsSettings,agentId,defaultAgents_1.DEFAULT_AGENTS,defaultAgents_1.AGENT_ID_ALIASES);
+        onAgentResolved?.(agent.metadata.id);
         // captureVisibleTab captura a aba ativa da JANELA, não recebe tabId.
         const target = await chrome.tabs.get(tabId);
         const tabChanged = () => Object.assign(new Error('A aba mudou durante a seleção. Volte à página desejada e tente o Lens novamente.'), { code: 'LENS_TAB_CHANGED' });
@@ -2320,7 +2460,7 @@ async function captureAndAnalyzeTab(tabId, instruction, agentId, rect, expectedU
             }
         }
         const prompt = instruction || agent.instructions.lensInspectionInstruction || 'Descreva a área selecionada da imagem.';
-        return geminiDirectClient_1.geminiDirectClient.inspectVisionContext(base64ToSend, prompt, apiSettings.apiKey, agent.modelPreferences.visionModelId || modelsSettings.visionModelId);
+        return geminiDirectClient_1.geminiDirectClient.inspectVisionContext(base64ToSend,prompt,apiSettings.apiKey,agent.modelPreferences.visionModelId||modelsSettings.visionModelId,{agentId:agent.metadata.id,mimeType:'image/jpeg'});
     })();
     let timerId;
     const timeoutPromise = new Promise((_, reject) => {
@@ -2423,7 +2563,7 @@ async function sendTabMessageSafe(tabId, tabUrl, message) {
                 }).catch(() => { });
                 await chrome.scripting.executeScript({
                     target: { tabId },
-                    files: ['tts-config.js','content.js'],
+                    files: message.type==='CMD_START_DICTATION'?['tts-config.js','live-stt-diagnostics.js','global-hud.js','dictation-runtime.js','stt-realtime.js','content.js']:['tts-config.js','content.js'],
                 });
                 // Aguarda inicialização do DOM e retenta envio
                 await new Promise((resolve) => setTimeout(resolve, 150));
@@ -2455,29 +2595,10 @@ exports.setupContextMenus = setupContextMenus;
 const tabMessenger_1 = __require("extension/src/utils/tabMessenger.ts");
 function createMenus() {
     chrome.contextMenus.removeAll(() => {
-        // 1. Menu Principal para texto selecionado
         chrome.contextMenus.create({
             id: 'read_selection_menu',
-            title: '🔊 Ler em voz alta com Gemini (TTS)',
+            title: 'Narrar',
             contexts: ['selection'],
-        });
-        // 2. Menu de Tradução
-        chrome.contextMenus.create({
-            id: 'translate_selection_menu',
-            title: '🌐 Traduzir e Ouvir Seleção',
-            contexts: ['selection'],
-        });
-        // 3. Menu de Resumo
-        chrome.contextMenus.create({
-            id: 'summarize_selection_menu',
-            title: '📝 Resumir e Ouvir Seleção',
-            contexts: ['selection'],
-        });
-        // 4. Menu de Ditado para campos de texto
-        chrome.contextMenus.create({
-            id: 'dictate_menu',
-            title: '🎙 Ditar com Gemini (STT)',
-            contexts: ['editable'],
         });
     });
 }
@@ -2500,23 +2621,6 @@ function setupContextMenus() {
                 await (0, tabMessenger_1.sendTabMessageSafe)(tab.id, tab.url, {
                     type: 'CMD_READ_SELECTION',
                     payload: { text: info.selectionText },
-                });
-                break;
-            case 'translate_selection_menu':
-                await (0, tabMessenger_1.sendTabMessageSafe)(tab.id, tab.url, {
-                    type: 'CMD_READ_SELECTION',
-                    payload: { text: info.selectionText, agentId: 'translator' },
-                });
-                break;
-            case 'summarize_selection_menu':
-                await (0, tabMessenger_1.sendTabMessageSafe)(tab.id, tab.url, {
-                    type: 'CMD_READ_SELECTION',
-                    payload: { text: info.selectionText, agentId: 'summarizer' },
-                });
-                break;
-            case 'dictate_menu':
-                await (0, tabMessenger_1.sendTabMessageSafe)(tab.id, tab.url, {
-                    type: 'CMD_START_DICTATION',
                 });
                 break;
         }

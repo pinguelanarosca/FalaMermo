@@ -22,7 +22,7 @@ test('captura real das funções de protocolo/player persiste antes do fim e sob
  nodes[0].port.onmessage({data:{type:'first-played',blockId:0,frames:1}});sockets[0].onmessage({data:JSON.stringify({serverContent:{turnComplete:true}})});await flush();nodes[0].port.onmessage({data:{type:'drain'}});await flush();
  const after=await sw.context.LiveTtsDiagnostics.read();for(const stage of ['first-frame-consumed','first-playback','turn-complete','generation-complete','ended','stopped'])assert.equal(after.jobs[0].milestones[stage],true,stage);context.LiveSessions.getTtsDiagnostics=()=>{throw Error('offscreen indisponível');};
  const restarted=worker(session),options=helper(undefined,msg=>restarted.route(msg,{url:'chrome-extension://test/options.html'})),persisted=await options.get();assert.equal(persisted.jobs[0].milestones.ended,true);assert.equal(persisted.jobs[0].sessions[0].model,'gemini-3.8-live');
- const serialized=JSON.stringify(session.data);assert.ok(!serialized.includes(secret));assert.ok(!serialized.includes(personal));assert.ok(!/base64|inlineData|systemInstruction|"setup"|"turn"|"text"|"buffer"/.test(serialized));
+ const serialized=JSON.stringify(session.data);assert.ok(!serialized.includes(secret));assert.ok(!serialized.includes(personal));assert.ok(!/base64|inlineData|"systemInstruction"\s*:|"setup"\s*:|"turn"\s*:|"text"\s*:|"buffer"\s*:/.test(serialized));
  assert.equal(events.some(x=>x.payload.event==='ended'),true);
 });
 test('allowlist descarta conteúdo arbitrário e autentica remetentes no background',async()=>{
@@ -31,6 +31,9 @@ test('allowlist descarta conteúdo arbitrário e autentica remetentes no backgro
  assert.equal((await sw.route({type:'LIVE_TTS_DIAGNOSTIC',payload:packet},{url:'chrome-extension://test/offscreen.html'})).success,true);
  assert.equal((await sw.route({type:'LIVE_TTS_DIAGNOSTICS_GET'},{url:'chrome-extension://test/content.html'})).success,false);
  const data=await sw.context.LiveTtsDiagnostics.read(),serialized=JSON.stringify(data);assert.ok(!serialized.includes(secret));assert.ok(!serialized.includes(personal));assert.ok(!serialized.includes('AAA='));assert.equal(data.jobs[0].events[0].keyId,'key#1');
+});
+test('resumo lógico permite nomes de campos e presença de instrução, nunca valores de conteúdo',async()=>{
+ const session=area(),api=helper(session),packet={jobId,stage:'setup-complete',protocol:{sessionId,model:'gemini-3.1-flash-live-preview',schema:'BidiGenerateContentSetup',systemInstructionPresent:true,systemInstructionCharacters:42,setupFields:['model','systemInstruction',personal],generationFields:['speechConfig',secret],systemInstruction:{parts:[{text:personal}]},text:personal}};await api.record(packet);const summary=(await api.read()).jobs[0].sessions[0];assert.equal(summary.systemInstructionPresent,true);assert.equal(summary.systemInstructionCharacters,42);assert.deepEqual(Array.from(summary.setupFields),['model','systemInstruction']);assert.deepEqual(Array.from(summary.generationFields),['speechConfig']);assert.equal(summary.model,'gemini-3.1-flash-live-preview');assert.ok(!JSON.stringify(summary).includes(personal));assert.ok(!JSON.stringify(summary).includes(secret));assert.equal(summary.systemInstruction,undefined);
 });
 test('writes concorrentes preservam eventos; limites e TTL limpam histórico na consulta',async()=>{
  const session=area(),api=helper(session),jobs=Array.from({length:12},(_,i)=>'job-'+(1791482000000+i)+'-abc');

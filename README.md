@@ -2,7 +2,7 @@
 
 Extensão Chrome Manifest V3 para narração, ditado e seleção visual com Gemini, agentes personalizados e HUD na página.
 
-FalaMermo v1.0.2 consolida os payloads Gemini, a narração literal, o HUD/Popup compartilhados e o ditado realtime com VAD e transcrições parciais. A versão interna do manifest permanece `2.0.2`. Esta versão pública está no código da branch `main`, sem nova tag, GitHub Release ou ZIP; as releases anteriores permanecem inalteradas.
+FalaMermo v1.0.3 incorpora o scheduler STT para distribuir ditados independentes entre até nove contas, preservando a narração literal, os agentes, o HUD/Popup compartilhados e o ditado realtime com VAD e parciais. A versão do manifest foi alinhada para `1.0.3`, mantendo Manifest V3, por decisão do mantenedor: a extensão nunca foi publicada na Chrome Web Store. Esta entrega está no código da branch `main`, sem nova tag, GitHub Release ou ZIP; as releases anteriores permanecem inalteradas.
 
 ## Instalação no Chrome
 
@@ -12,7 +12,7 @@ FalaMermo v1.0.2 consolida os payloads Gemini, a narração literal, o HUD/Popup
 4. Selecione a pasta extraída, abra as opções da extensão e configure sua chave Gemini.
 5. Atualize as páginas que já estavam abertas. Após atualizar/recarregar a extensão, atualize também essas páginas.
 
-Não há etapa de build obrigatória. Para atualizar uma instalação descompactada, feche trabalhos ativos, atualize o código na mesma pasta já carregada e clique **Recarregar** em `chrome://extensions`. Não remova a extensão nem limpe seu armazenamento; mantenha a pasta para preservar a instalação e as preferências. Atualize também as páginas abertas. Os ZIPs das releases anteriores não contêm as mudanças da v1.0.2.
+Não há etapa de build obrigatória. Para atualizar uma instalação descompactada, feche trabalhos ativos, atualize o código na mesma pasta já carregada e clique **Recarregar** em `chrome://extensions`. Não remova a extensão nem limpe seu armazenamento; mantenha a pasta para preservar a instalação e as preferências. Atualize também as páginas abertas. Os ZIPs das releases anteriores não contêm as mudanças da v1.0.3.
 
 ## Configuração e utilização
 
@@ -42,6 +42,24 @@ Em **Inserção do ditado**, escolha **Ao finalizar** (padrão) ou **Em tempo re
 O PCM é enviado continuamente, sem acumular toda a gravação até Parar. Em tempo real, o VAD local delimita turnos em pausas de 500 ms ou ao atingir 12 s, com pre-roll e overlap de 200 ms nos cortes por limite. Parciais e texto confirmado são consolidados por sequência no mesmo cartão. As filas são limitadas: congestionamento encerra o ditado com erro explícito, em vez de descartar áudio silenciosamente. Cancelar interrompe captura, filas e respostas tardias; a transformação do agente ocorre somente após a consolidação final. O merge de overlap é heurístico, sem timestamps por palavra.
 
 Trocar de aba não cancela o ditado. Navegar ou fechar a página de origem destrói sua captura local: áudio ainda não entregue não pode ser recuperado. Resultados já recebidos permanecem identificados como incompletos quando necessário; não são inseridos em outra página. Uma narração offscreen pode continuar após fechar sua origem. Esses cenários ainda exigem homologação física na instalação atual.
+
+### Scheduler STT por conta
+
+Jobs de ditado independentes são distribuídos entre as API keys configuradas, tratadas como recursos de contas independentes. Não há login/senha nem redistribuição dos chunks: cada job permanece na mesma sessão, modelo e conta até encerrar. Não há duplicação de áudio ou corrida do mesmo ditado entre modelos.
+
+Por padrão, há até nove sessões STT, uma por conta, e até nove admissões pendentes. A seleção considera ocupação, consumo/reservas estimados, número de admissões e uso recente. O scheduler preserva a preferência de modelo e tenta as contas elegíveis desse modelo antes de avançar na cadeia. Contas ocupadas aguardam admissão por até 2 s; ocupação local não faz saltar modelos. Zero-Retry impede repetir pares que falharam e replay de operações recentes.
+
+O orçamento usa uma janela de 60 s, duração de PCM/contexto e `usageMetadata` quando recebido. Tetos conhecidos podem ser definidos pela política numérica `api.sttScheduler`; não há nova tela nem alteração automática de configurações. Sem teto conhecido, o diagnóstico indica `UNKNOWN`, mantém limites de sessões e reage a 429/cooldown — não presume TPM infinito nem promete controle exato de faturamento. Consumo de TTS, Lens e outros clientes não está integralmente incluído nesse orçamento STT.
+
+429, AUTH, timeout e falhas de conexão influenciam a admissão de novos jobs. Depois da admissão, falhas encerram somente aquele job, sem replay de PCM ou migração silenciosa de contexto. Captura, VAD, merge, destino original e transformação final pelo agente continuam nos fluxos existentes.
+
+Para consultar a telemetria sanitizada, inclusive após o offscreen encerrar, execute no Console de `options.html`:
+
+```javascript
+await chrome.runtime.sendMessage({type:'STT_SCHEDULER_GET'})
+```
+
+São exibidos conta (`key#1`…`key#9`), modelo, jobs ativos, estimativas/observações de tokens, reservas, 429/AUTH, cooldown, latências e motivo da escolha, sem API keys ou conteúdo. Zero mensagens de usage não significa consumo zero. O estado limitado usa armazenamento de sessão, com TTL de 24 h; não recupera o contexto Gemini após perder o offscreen. Falha de persistência é sinalizada por `storageHealthy:false`.
 
 ## Modelos e fallback
 
@@ -78,7 +96,9 @@ O estado de sessão permite recuperar o service worker, mas não sobrevive ao re
 
 O seek exato por palavra ainda está indisponível. Microfone físico, áudio real e a extensão instalada no Chrome não foram homologados integralmente pela automação mais recente.
 
-Consulte as [notas da v1.0.2](docs/RELEASE-v1.0.2.md), as [notas anteriores](docs/RELEASE-v1.0.1.md) e o [histórico da v1.0.0](https://github.com/pinguelanarosca/FalaMermo/releases/tag/v1.0.0).
+Não há ganho comparativo de latência comprovado para o scheduler nem teto real de TPM conhecido automaticamente. Os testes reais anteriores do scheduler usaram áudio sintético e não substituem homologação física da instalação atual.
+
+Consulte as [notas da v1.0.3](docs/RELEASE-v1.0.3.md), o [histórico v1.0.2](docs/RELEASE-v1.0.2.md), as [notas v1.0.1](docs/RELEASE-v1.0.1.md) e a [release v1.0.0](https://github.com/pinguelanarosca/FalaMermo/releases/tag/v1.0.0).
 
 ## Validação do código
 
@@ -90,4 +110,4 @@ node tools/verify-publication.cjs
 git diff --check
 ```
 
-O verificador confere recursos, manifest, sintaxe JavaScript e padrões de segredos nos arquivos públicos selecionados. Isso não substitui homologação física. A ferramenta de empacotamento anterior foi preservada, mas não foi executada nem atualizada para produzir um ZIP v1.0.2 nesta publicação.
+O verificador confere recursos, versão do manifest, sintaxe JavaScript e padrões de segredos nos arquivos públicos selecionados. Isso não substitui homologação física. A ferramenta de empacotamento usa a mesma versão pública, mas não foi executada nesta entrega: nenhum ZIP v1.0.3 foi gerado.

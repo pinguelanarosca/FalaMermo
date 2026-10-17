@@ -3,17 +3,18 @@ const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
 const root = path.resolve(__dirname, '..');
+const PUBLIC_VERSION = '1.0.3';
 const runtimeFiles = [
     'manifest.json', 'background.js', 'content.js', 'content.css',
     'popup.html', 'popup.js', 'options.html', 'options.js',
     'offscreen.html', 'offscreen.js', 'lens-permission.html', 'lens-permission.js',
     'tts-config.js', 'tts-adaptive.js', 'live-config.js', 'live-session-manager.js',
     'live-tts-diagnostics.js', 'live-stt-diagnostics.js', 'mic-capture-worklet.js', 'pcm-player-worklet.js',
-    'global-jobs.js', 'global-hud.js', 'dictation-runtime.js', 'stt-realtime.js',
+    'global-jobs.js', 'global-hud.js', 'dictation-runtime.js', 'stt-realtime.js', 'stt-scheduler.js',
     'icons/icon16.png', 'icons/icon48.png', 'icons/icon128.png',
 ];
 function publicFiles() {
-    return [...runtimeFiles, 'README.md', '.gitignore', 'docs/RELEASE-v1.0.0.md', 'docs/RELEASE-v1.0.1.md', 'docs/RELEASE-v1.0.2.md',
+    return [...runtimeFiles, 'README.md', '.gitignore', 'docs/RELEASE-v1.0.0.md', 'docs/RELEASE-v1.0.1.md', 'docs/RELEASE-v1.0.2.md', 'docs/RELEASE-v1.0.3.md',
         'tools/verify-publication.cjs', 'tools/package-release.cjs',
         ...fs.readdirSync(path.join(root, 'tests')).filter(name =>
             name.endsWith('.test.cjs') || name === 'load-background.cjs').map(name => 'tests/' + name)].sort();
@@ -53,6 +54,7 @@ function verify(directory = root, files = publicFiles(), {syntax = true} = {}) {
     }
     const manifest = JSON.parse(fs.readFileSync(path.join(directory, 'manifest.json'), 'utf8'));
     if (manifest.manifest_version !== 3 || !/^\d+(\.\d+){0,3}$/.test(manifest.version)) throw Error('Manifest inválido');
+    if (manifest.version !== PUBLIC_VERSION) throw Error('Versão do manifest deve corresponder à versão pública ' + PUBLIC_VERSION);
     if (manifest.background?.type !== 'module') throw Error('Background deve permanecer módulo');
     const resources = [manifest.background.service_worker, manifest.action.default_popup, manifest.options_page,
         ...Object.values(manifest.icons || {}), ...Object.values(manifest.action.default_icon || {}),
@@ -75,7 +77,7 @@ function verify(directory = root, files = publicFiles(), {syntax = true} = {}) {
     return {files: files.length, javascript: files.filter(file => /\.(?:js|cjs)$/.test(file)).length,
         manifestVersion: manifest.version, manifestName: manifest.name, secretFindings: 0, referencesChecked: resources.length};
 }
-module.exports = {root, runtimeFiles, publicFiles, verify};
+module.exports = {root, PUBLIC_VERSION, runtimeFiles, publicFiles, verify};
 if (require.main === module) {
     try { console.log(JSON.stringify(verify(), null, 2)); }
     catch (error) { console.error(error.message); process.exitCode = 1; }

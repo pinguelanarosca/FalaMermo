@@ -25,6 +25,7 @@ docs/*
 !docs/RELEASE-v1.0.0.md
 !docs/RELEASE-v1.0.1.md
 !docs/RELEASE-v1.0.2.md
+!docs/RELEASE-v1.0.3.md
 LEIA-ME.txt
 VERIFICACAO.txt
 tools/*

@@ -21,6 +21,13 @@ test('runtime rejeita modelo convencional/Translate/Transcribe e JSON antes do s
  for(const modelId of ['gemini-3.8-flash-tts','gemini-3.5-live-translate-preview','gemini-3.5-transcribe-live']){session.options.modelId=modelId;await assert.rejects(session.open(),error=>error.httpStatus===400);assert.equal(instances.length,0);}
  session.options.modelId='gemini-3.8-live';session.options.jsonMode='override';session.options.advancedJson={setup:{model:'models/gemini-3.8-flash-tts'}};await assert.rejects(session.open(),/corresponder/);assert.equal(instances.length,0);
 });
+test('cancelar acquire STT fecha socket pendente sem interferir no acquire TTS',async t=>{
+ const {instances,options}=transport(t),manager=new sessions.LiveSessionManager(),controller=new AbortController();t.after(()=>manager.closeAll());
+ const a=manager.acquire({...options,jobId:'stt-abort',mode:'dictation',signal:controller.signal}),rejected=assert.rejects(a);const b=manager.acquire({...options,jobId:'tts-survives'});assert.equal(instances.length,2);controller.abort();await rejected;assert.equal(instances[0].readyState,3);assert.equal(instances[1].readyState,0);instances[1].open();await flush();instances[1].message(JSON.stringify({setupComplete:{}}));const tts=await b;assert.equal(tts.ready,true);manager.release(tts);
+});
+test('RetryInfo do erro Live é exposto somente como atraso numérico no STT',async t=>{
+ const {session,instances}=transport(t,{mode:'dictation'}),open=session.open();instances[0].open();await flush();instances[0].message(JSON.stringify({error:{code:429,message:'quota',details:[{'@type':'type.googleapis.com/google.rpc.RetryInfo',retryDelay:'2.5s'}]}}));await assert.rejects(open,e=>e.httpStatus===429&&e.retryAfterMs===2500);
+});
 test('trocar credencial no mesmo slot nunca reutiliza socket ou handle de outra chave',async t=>{
  const {instances,options}=transport(t),manager=new sessions.LiveSessionManager();t.after(()=>manager.closeAll());
  const first=manager.acquire(options);instances[0].open();await flush();instances[0].message(JSON.stringify({setupComplete:{}}));const a=await first;manager.release(a);a.resumeHandle='opaque-resumption-A';

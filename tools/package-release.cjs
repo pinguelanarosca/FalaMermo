@@ -4,10 +4,10 @@ const path = require('node:path');
 const os = require('node:os');
 const cp = require('node:child_process');
 const crypto = require('node:crypto');
-const {root, runtimeFiles, verify} = require('./verify-publication.cjs');
-const name = 'FalaMermo-v1.0.1.zip';
+const {root, PUBLIC_VERSION, runtimeFiles, verify} = require('./verify-publication.cjs');
+const name = `FalaMermo-v${PUBLIC_VERSION}.zip`;
 try {
-    const files = [...runtimeFiles, 'README.md', 'docs/RELEASE-v1.0.1.md'];
+    const files = [...runtimeFiles, 'README.md', `docs/RELEASE-v${PUBLIC_VERSION}.md`];
     verify(root, files);
     const directory = path.join(root, 'dist');
     fs.mkdirSync(directory, {recursive: true});

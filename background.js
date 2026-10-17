@@ -4,6 +4,7 @@ import './live-config.js';
 import './live-tts-diagnostics.js';
 import './live-stt-diagnostics.js';
 import './global-jobs.js';
+import './stt-scheduler.js';
 (()=>{
 const __modules={
 "extension/src/background/index.ts":function(module,exports,__require){
@@ -262,6 +263,19 @@ async function addHistoryLog(type, previewText, agentId, status = 'success', err
 async function handleExtensionMessage(message, sender, guiJob) {
     try {
         switch (message.type) {
+            case 'STT_SCHEDULER_LOAD':
+            case 'STT_SCHEDULER_SAVE': {
+                if(sender.url?.split(/[?#]/)[0]!==chrome.runtime.getURL('offscreen.html'))return{success:false};
+                const scheduler=globalThis.SttScheduler,key=scheduler.STORAGE_KEY;
+                if(message.type==='STT_SCHEDULER_LOAD')return{success:true,state:scheduler.sanitize((await chrome.storage.session.get(key))[key])};
+                await chrome.storage.session.set({[key]:scheduler.sanitize(message.payload)});return{success:true};
+            }
+            case 'STT_SCHEDULER_GET': {
+                if(sender.url?.split(/[?#]/)[0]!==chrome.runtime.getURL('options.html'))return{success:false};
+                if(await backgroundPlayback_1.hasDocument())return backgroundPlayback_1.send({operation:'STT_SCHEDULER_SNAPSHOT'});
+                const state=globalThis.SttScheduler.sanitize((await chrome.storage.session.get(globalThis.SttScheduler.STORAGE_KEY))[globalThis.SttScheduler.STORAGE_KEY]);
+                return{success:true,diagnostics:{persisted:true,...globalThis.SttScheduler.summarize(state)}};
+            }
             case 'HUD_GLOBAL_GET': {
                 if(!allowedHudSender(sender))return{success:false,error:'Painel sem origem válida.'};
                 await recoverGlobalJobs();
@@ -548,7 +562,7 @@ async function handleExtensionMessage(message, sender, guiJob) {
                 const modelId=globalThis.LiveConfig.LIVE_STT_MODELS.includes(stt.preferredModel)?stt.preferredModel:globalThis.LiveConfig.DEFAULTS.sttModelId;
                 const models=globalThis.LiveConfig.modelChain('stt',modelId);
                 await recoverGlobalJobs();
-                const payload={...message.payload,agentId:agent.metadata.id,operation:'STT_LIVE_START',apiKeys:keys,modelId,models,customVocabulary:stt.customVocabulary,smartTranscription:stt.smartTranscription,languageCodes:stt.languageCodes,thinkingLevel:stt.thinkingLevel,thinkingBudget:stt.thinkingBudget,vad:stt.vad,transformInstruction:transform?instruction:null,transformModels:globalThis.LiveConfig.modelChain('tts',migrated.live.preferredModel),voiceName:migrated.live.voiceName,playerId:message.payload.playerId||message.payload.jobId};
+                const payload={...message.payload,schedulerPolicy:globalThis.SttScheduler.policy(settings.api?.sttScheduler),agentId:agent.metadata.id,operation:'STT_LIVE_START',apiKeys:keys,modelId,models,customVocabulary:stt.customVocabulary,smartTranscription:stt.smartTranscription,languageCodes:stt.languageCodes,thinkingLevel:stt.thinkingLevel,thinkingBudget:stt.thinkingBudget,vad:stt.vad,transformInstruction:transform?instruction:null,transformModels:globalThis.LiveConfig.modelChain('tts',migrated.live.preferredModel),voiceName:migrated.live.voiceName,playerId:message.payload.playerId||message.payload.jobId};
                 await globalJobs.start({...payload,type:'STT',origin:senderOrigin(sender),agentId:agent.metadata.id});
                 try{const result=await backgroundPlayback_1.handlePlaybackCommand(payload,sender);if(!result?.success)throw new Error(result?.error||'Falha no STT Live.');return result;}catch(error){await globalJobs.fail(payload.jobId,error.message);throw error;}
             }

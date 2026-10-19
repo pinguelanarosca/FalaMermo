@@ -2,17 +2,17 @@
 
 Extensão Chrome Manifest V3 para narração, ditado e seleção visual com Gemini, agentes personalizados e HUD na página.
 
-FalaMermo v1.0.3 incorpora o scheduler STT para distribuir ditados independentes entre até nove contas, preservando a narração literal, os agentes, o HUD/Popup compartilhados e o ditado realtime com VAD e parciais. A versão do manifest foi alinhada para `1.0.3`, mantendo Manifest V3, por decisão do mantenedor: a extensão nunca foi publicada na Chrome Web Store. Esta entrega está no código da branch `main`, sem nova tag, GitHub Release ou ZIP; as releases anteriores permanecem inalteradas.
+FalaMermo v1.0.4 consolida os controles de reprodução global e individual, navegação pelo PCM recebido, HUD/Popup compartilhados e janelas por tarefa. Mantém o scheduler STT para até nove contas, narração literal, agentes e ditado realtime com VAD e parciais. A versão pública e a versão do manifest são `1.0.4`, mantendo Manifest V3. O código está na branch `main`; o pacote instalável e seu checksum acompanham a [release v1.0.4](https://github.com/pinguelanarosca/FalaMermo/releases/tag/v1.0.4).
 
 ## Instalação no Chrome
 
-1. Clone [este repositório](https://github.com/pinguelanarosca/FalaMermo) na branch `main`, ou baixe o código dessa branch pelo GitHub.
+1. Baixe e extraia `FalaMermo-v1.0.4.zip` da [release v1.0.4](https://github.com/pinguelanarosca/FalaMermo/releases/tag/v1.0.4), ou clone [este repositório](https://github.com/pinguelanarosca/FalaMermo) na branch `main`.
 2. Mantenha o código em uma pasta permanente. `manifest.json` deve estar diretamente nessa pasta.
 3. Abra `chrome://extensions`, ative **Modo do desenvolvedor** e escolha **Carregar sem compactação**.
 4. Selecione a pasta extraída, abra as opções da extensão e configure sua chave Gemini.
 5. Atualize as páginas que já estavam abertas. Após atualizar/recarregar a extensão, atualize também essas páginas.
 
-Não há etapa de build obrigatória. Para atualizar uma instalação descompactada, feche trabalhos ativos, atualize o código na mesma pasta já carregada e clique **Recarregar** em `chrome://extensions`. Não remova a extensão nem limpe seu armazenamento; mantenha a pasta para preservar a instalação e as preferências. Atualize também as páginas abertas. Os ZIPs das releases anteriores não contêm as mudanças da v1.0.3.
+Não há etapa de build obrigatória. Para atualizar uma instalação descompactada, feche trabalhos ativos, atualize o código na mesma pasta já carregada e clique **Recarregar** em `chrome://extensions`. Não remova a extensão nem limpe seu armazenamento; mantenha a pasta para preservar a instalação e as preferências. Atualize também as páginas abertas. Pacotes anteriores não contêm as mudanças da v1.0.4.
 
 ## Configuração e utilização
 
@@ -29,13 +29,19 @@ Atalhos internos padrão: `Ctrl+B` para ler seleção, `Ctrl+Shift+Space` para i
 
 ### HUD/Popup compartilhados
 
-Cada narração e ditado tem um cartão próprio, sincronizado entre páginas, popup e opções. Parar, copiar, pausar e ajustar uma narração afeta somente o job escolhido. Visibilidade e minimização também são compartilhadas; os controles dos cartões permanecem acessíveis ao minimizar. Em páginas restritas, consulte as tarefas pelo popup ou pelas opções.
+Cada narração e ditado tem um cartão próprio, sincronizado entre páginas, popup, opções e janela individual. Novas tarefas aparecem no topo por data de criação; cartões automáticos começam recolhidos, com chevron, maximizar e X. O X apenas oculta o cartão global, sem parar o job nem apagar o resultado. **Parar** é um controle separado. Ao minimizar o HUD, a barra superior mantém os três controles globais, o badge de atividade e restaurar/fechar; popup e opções continuam acessíveis. A lista do popup tem rolagem própria sem esconder cabeçalho, agente ou player. As barras de rolagem são visualmente ocultas, sem desativar teclado, toque ou roda do mouse.
 
-Clique em um cartão para torná-lo ativo. O player inferior usa um único botão **Play/Pause**, além de volume e velocidade, para essa tarefa. Os cartões têm controles individuais para recolher/expandir, copiar, parar e remover; remover uma narração ativa interrompe somente ela.
+Os controles globais **⏪ ▶/⏸ ⏩** ficam lado a lado: Pause pausa todas as narrações em reprodução; sem nenhuma reproduzindo, Play retoma somente a pausada mais recentemente. Sem pausadas, Play fica desabilitado e nunca inicia uma tarefa concluída. Cada cartão TTS expandido e sua janela têm **⏪ ▶/⏸ ⏩ ■** individuais; Play explícito após conclusão cria nova reprodução. Volume, velocidade e setas globais afetam a tarefa selecionada; as setas individuais afetam somente seu cartão. Em páginas restritas, consulte e controle as tarefas pelo popup ou pelas opções.
+
+A pausa silencia a saída final do grafo de áudio, confirma o worklet pausado e aguarda o AudioContext suspenso. Retomar preserva o cursor e o buffer, restaurando o volume selecionado. Comandos têm sequência e validação de job/player/request; confirmações antigas ou de um player inexistente não devem fabricar o estado Pausado. O progresso expandido mostra contexto, estado do worklet, cursor PCM e último ACK confirmado.
+
+Maximizar abre uma janela redimensionável para o mesmo job, sem duplicá-lo. Nela estão texto completo, cópia, edição e controles individuais. Fechar a janela não interrompe a tarefa. TTS permite edição somente após parar/concluir, não durante pausa. No STT, a edição altera uma cópia de trabalho para eventual narração; a transcrição original, o histórico e o texto já inserido no site não são reescritos. Rascunhos e cópias de trabalho ficam no estado de sessão, não são um backup persistente.
+
+Clique em um cartão para torná-lo ativo para navegação, volume e velocidade. O botão central global mantém sua regra de pausar todas/retomar a última pausada, independentemente dessa seleção. A cópia de texto fica na janela individual ou no histórico; ocultar um cartão ativo não interrompe sua reprodução.
 
 Use **+** para criar uma tarefa manual com o agente ativo, digite ou cole texto e pressione Play. O rascunho é sincronizado no armazenamento de sessão, sem buscar conteúdo da página. Pare ou aguarde a conclusão para editar novamente; pausa preserva a reprodução atual. Play após conclusão gera uma nova narração pelo mesmo motor TTS. Edições concorrentes são recusadas sem sobrescrever o rascunho local.
 
-As setas por palavra estão desabilitadas com explicação: o stream PCM atual não possui alinhamento/timestamps por palavra e descarta amostras consumidas. Não é aplicado seek falso por porcentagem nem ressíntese oculta. Essa navegação permanece pendente de uma solução de alinhamento compatível, sem mudar o motor nesta revisão de GUI.
+As setas deslocam **5 segundos de PCM recebido**, acumulando cliques e respeitando o buffer disponível. O player retém uma janela recente de aproximadamente 60 segundos de PCM consumido enquanto o job está ativo; os limites de posição reais são sincronizados. Avançar não pula para áudio ainda não recebido. Ao parar/concluir, o PCM é liberado; reproduzir novamente é uma ação explícita de nova narração. Não há seek exato por palavra, timestamps inventados, ressíntese oculta ou nova chamada Gemini ao navegar.
 
 Em **Inserção do ditado**, escolha **Ao finalizar** (padrão) ou **Em tempo real**. O modo em tempo real substitui somente o intervalo pertencente ao ditado, distingue texto confirmado de provisório e interrompe a inserção se detectar edição manual conflitante. Agentes que transformam o transcript aguardam o resultado transformado. O destino continua sendo exclusivamente o campo capturado no início, mesmo que o HUD seja aberto em outra aba.
 
@@ -80,7 +86,15 @@ Ao usar os recursos, o conteúdo necessário é enviado ao Gemini: texto e instr
 
 Há histórico/diagnósticos locais. Não exporte nem publique seu armazenamento, chaves, áudio, textos pessoais ou instruções privadas. Os diagnósticos persistidos específicos de reprodução TTS e de STT usam resumos limitados e sanitizados; isso não torna todo histórico da extensão livre de conteúdo pessoal. O diagnóstico STT guarda somente contadores e estados em armazenamento de sessão, limitado a 8 jobs e 40 eventos por job, com expiração de 24 horas; não inclui chaves, áudio, texto reconhecido, identificadores de dispositivo ou instruções dos agentes.
 
-O estado global do HUD guarda textos necessários à visualização e recuperação em armazenamento de sessão. Ele não é um diagnóstico sanitizado. Resultados concluídos também podem integrar o histórico local, conforme sua preferência e limite; podem conter texto pessoal. Não são guardados PCM, base64 ou credenciais no registro de jobs. A limpeza do histórico remove os resultados concluídos correspondentes do HUD.
+Para consultar os últimos diagnósticos TTS no Console de `options.html`, inclusive após o offscreen encerrar:
+
+```javascript
+await LiveTtsDiagnostics.get()
+```
+
+O resumo TTS aceita também tarefas manuais, registra marcos de pausa/retomada/seek e mantém no máximo 8 jobs, 120 eventos por job e 12 sessões por job, com expiração de 24 horas. Não mantém o offscreen aberto artificialmente nem armazena chaves, PCM, base64 ou conteúdo pessoal nesses diagnósticos.
+
+O estado global do HUD guarda textos necessários à visualização e recuperação em armazenamento de sessão. Ele não é um diagnóstico sanitizado. Resultados concluídos também podem integrar o histórico local, conforme sua preferência e limite; podem conter texto pessoal. Nas Opções, configure até 5.000 resultados/3.650 dias (padrão: 50 resultados/365 dias, preservando limites existentes) e reabra tarefas históricas. A expiração ocorre ao salvar novos resultados, segundo esses limites. Há orçamento de 6 MB para histórico e 4 MB para o registro de sessão; resultados já salvos podem sair do cache de sessão e ser reabertos pelo histórico. Se não for possível salvar, o resultado permanece na sessão com aviso; novas tarefas podem ser recusadas para evitar perda. Não são guardados PCM, base64 ou credenciais no registro de jobs. A limpeza explícita do histórico remove os resultados concluídos correspondentes do HUD.
 
 O estado de sessão permite recuperar o service worker, mas não sobrevive ao recarregamento/atualização da extensão ou reinício do navegador. Somente o histórico habilitado preserva resultados concluídos além dessa sessão. [Documentação Chrome](https://developer.chrome.com/docs/extensions/reference/api/storage#storage_areas).
 
@@ -91,14 +105,14 @@ O estado de sessão permite recuperar o service worker, mas não sobrevive ao re
 - Depois de recarregar a extensão, um content script antigo pode perder autorização para comunicar-se. O STT trata a invalidação, libera sua captura e orienta F5; não reconecta nem recarrega páginas automaticamente. Uma página com código anterior à correção precisa ser atualizada para receber a proteção.
 - Campos removidos, editores especiais, páginas internas/restritas do Chrome e permissões recusadas podem impedir inserção/captura. Lens não funciona em todas as páginas.
 - Conectividade, cotas, permissões de modelo, latência, mudanças do serviço e encerramento de previews podem afetar o funcionamento. Não há promessa de tempo fixo ou disponibilidade de todas as chaves.
-- Gemini 3.8 Live e Extended Thinking usam VAD manual por padrão no ditado, mantendo preferências explícitas. O automático do 3.8 apresentou sessões sem transcrição em testes anteriores; uma preferência explícita automática continua sendo respeitada. Extended Thinking utiliza configuração específica de thinking; VAD automático desse modelo não foi homologado. Reprodução audível e microfone físico não foram repetidos durante a publicação.
+- Gemini 3.8 Live e Extended Thinking usam VAD manual por padrão no ditado, mantendo preferências explícitas. O automático do 3.8 apresentou sessões sem transcrição em testes anteriores; uma preferência explícita automática continua sendo respeitada. Extended Thinking utiliza configuração específica de thinking; VAD automático desse modelo não foi homologado. Microfone físico não foi repetido nesta preparação da release.
 - Em testes anteriores, o 3.8 retornou texto mesmo para PCM inteiramente silencioso. Texto reconhecido não comprova que houve fala; revise o resultado. No modo Ao finalizar, sessões sem confirmação de finalização podem aguardar o deadline existente de 15 segundos após Parar (90 segundos no Extended). Isso não limita a duração da gravação. A sincronização entre abas, janelas e service worker ainda requer homologação física no Chrome instalado.
 
-O seek exato por palavra ainda está indisponível. Microfone físico, áudio real e a extensão instalada no Chrome não foram homologados integralmente pela automação mais recente.
+O seek exato por palavra ainda está indisponível. No ciclo de correção anterior à publicação, foram testadas duas narrações reais simultâneas no Chrome; o usuário confirmou silêncio nas pausas individual/global e ao fim da sequência de Stop. O seek cumulativo em pausa foi medido no cursor PCM. A retomada seletiva teve evidência técnica, mas o usuário não conseguiu distinguir as vozes para homologá-la pelo ouvido. Controles no popup nativo, Opções e janela individual, assim como microfone físico e inserção nesta versão, não foram homologados integralmente pela automação. Uma geração retornou áudio muito curto; o replay explícito posterior retornou áudio longo, sem alteração da geração para contornar o resultado.
 
 Não há ganho comparativo de latência comprovado para o scheduler nem teto real de TPM conhecido automaticamente. Os testes reais anteriores do scheduler usaram áudio sintético e não substituem homologação física da instalação atual.
 
-Consulte as [notas da v1.0.3](docs/RELEASE-v1.0.3.md), o [histórico v1.0.2](docs/RELEASE-v1.0.2.md), as [notas v1.0.1](docs/RELEASE-v1.0.1.md) e a [release v1.0.0](https://github.com/pinguelanarosca/FalaMermo/releases/tag/v1.0.0).
+Consulte as [notas da v1.0.4](docs/RELEASE-v1.0.4.md), as [notas da v1.0.3](docs/RELEASE-v1.0.3.md), o [histórico v1.0.2](docs/RELEASE-v1.0.2.md), as [notas v1.0.1](docs/RELEASE-v1.0.1.md) e a [release v1.0.0](https://github.com/pinguelanarosca/FalaMermo/releases/tag/v1.0.0).
 
 ## Validação do código
 
@@ -110,4 +124,4 @@ node tools/verify-publication.cjs
 git diff --check
 ```
 
-O verificador confere recursos, versão do manifest, sintaxe JavaScript e padrões de segredos nos arquivos públicos selecionados. Isso não substitui homologação física. A ferramenta de empacotamento usa a mesma versão pública, mas não foi executada nesta entrega: nenhum ZIP v1.0.3 foi gerado.
+O verificador confere recursos, versão do manifest, sintaxe JavaScript e padrões de segredos nos arquivos públicos selecionados. Isso não substitui homologação física. `node tools/package-release.cjs` gera o pacote da versão pública, verifica as entradas e a extração e calcula seu SHA-256; os artefatos em `dist/` não entram no Git.

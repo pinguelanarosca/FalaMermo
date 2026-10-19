@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "FalaMermo",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Narração e ditado Gemini Live, Lens, HUD e agentes personalizados com configurações avançadas.",
   "permissions": [
     "storage",

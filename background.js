@@ -151,10 +151,17 @@ let diagnosticTtsController = null;
 const playbackControllers = new Map();
 const liveId=prefix=>`${prefix}-${Date.now()}-${Math.random().toString(36).slice(2,10)}`;
 const globalViewers=new Map();
+const viewerRecoveries=new Map();
+function stopViewerRecovery(key){const pending=viewerRecoveries.get(key);if(pending)clearTimeout(pending.timer);viewerRecoveries.delete(key);}
+function recoverViewer(key,viewer,attempt=0){
+ if(viewerRecoveries.has(key)||globalViewers.get(key)!==viewer||attempt>=3)return;
+ const timer=setTimeout(async()=>{viewerRecoveries.delete(key);if(globalViewers.get(key)!==viewer)return;try{const state=await globalJobs.get();await chrome.tabs.sendMessage(viewer.tabId,{type:'HUD_GLOBAL_STATE',target:'global-hud',state},viewer.documentId?{documentId:viewer.documentId}:{frameId:viewer.frameId});}catch{recoverViewer(key,viewer,attempt+1);}},[100,400,1000][attempt]);
+ viewerRecoveries.set(key,{timer});
+}
 const viewerStorageKey='falamermo.globalHudViewers.v1';
 let viewerWrites=Promise.resolve();
 function persistViewers(){const next=viewerWrites.catch(()=>{}).then(()=>chrome.storage.session?.set({[viewerStorageKey]:[...globalViewers.values()].slice(-512)}));viewerWrites=next;return next;}
-const cleanPage=sender=>['options.html','popup.html'].find(page=>sender.url?.split(/[?#]/)[0]===chrome.runtime.getURL(page));
+const cleanPage=sender=>['options.html','popup.html','task.html'].find(page=>sender.url?.split(/[?#]/)[0]===chrome.runtime.getURL(page));
 const senderOrigin=sender=>({tabId:sender.tab?.id||0,frameId:sender.frameId||0,...(sender.documentId?{documentId:sender.documentId}:{}),...(cleanPage(sender)?{page:cleanPage(sender)}:{})});
 const allowedHudSender=sender=>Boolean(sender.tab?.id||cleanPage(sender));
 const globalJobs=globalThis.GlobalJobs.create({storage:chrome.storage?.session,
@@ -164,9 +171,7 @@ const globalJobs=globalThis.GlobalJobs.create({storage:chrome.storage?.session,
  ...(chrome.tabs?.get&&chrome.tabs?.update?{getTab:id=>chrome.tabs.get(id),updateTab:(id,value)=>chrome.tabs.update(id,value)}:{}),
  notify:async state=>{
   const packet={type:'HUD_GLOBAL_STATE',target:'global-hud',state};
-  const before=globalViewers.size;
-  await Promise.all([...globalViewers].map(async([key,viewer])=>{try{await chrome.tabs.sendMessage(viewer.tabId,packet,viewer.documentId?{documentId:viewer.documentId}:{frameId:viewer.frameId});}catch{globalViewers.delete(key);}}));
-  if(globalViewers.size!==before)await persistViewers();
+  await Promise.all([...globalViewers].map(async([key,viewer])=>{try{await chrome.tabs.sendMessage(viewer.tabId,packet,viewer.documentId?{documentId:viewer.documentId}:{frameId:viewer.frameId});stopViewerRecovery(key);}catch{recoverViewer(key,viewer);}}));
   await chrome.runtime.sendMessage(packet).catch(()=>{});
  }
 });
@@ -181,7 +186,7 @@ async function recoverGlobalJobs(){if(globalRecovery)return globalRecovery;globa
  }
 })();try{await globalRecovery;}catch(error){globalRecovery=null;throw error;}}
 async function sendToOrigin(job,message){if(job.origin.tabId)return chrome.tabs.sendMessage(job.origin.tabId,message,job.origin.documentId?{documentId:job.origin.documentId}:{frameId:job.origin.frameId});return chrome.runtime.sendMessage({...message,target:'stt-origin',origin:job.origin});}
-async function handleOriginLost(query){await recoverGlobalJobs();for(const[key,viewer]of globalViewers)if(viewer.tabId===query.tabId&&(query.frameId===undefined||viewer.frameId===query.frameId))globalViewers.delete(key);await persistViewers();const affected=await globalJobs.originLost(query);for(const job of affected){
+async function handleOriginLost(query){await recoverGlobalJobs();for(const[key,viewer]of globalViewers)if(viewer.tabId===query.tabId&&(query.frameId===undefined||viewer.frameId===query.frameId)){stopViewerRecovery(key);globalViewers.delete(key);}await persistViewers();const affected=await globalJobs.originLost(query);for(const job of affected){
  // A navigation can start before pagehide. Give the original document its normal PCM drain;
  // a closed/destroyed document rejects immediately, then offscreen finalizes available input.
  try{await sendToOrigin(job,{type:'STT_GLOBAL_STOP',payload:{jobId:job.jobId}});}catch{}
@@ -190,30 +195,55 @@ async function handleOriginLost(query){await recoverGlobalJobs();for(const[key,v
 exports.originLost=handleOriginLost;
 exports.historyChanged=async()=>{await recoverGlobalJobs();return globalJobs.historyChanged(()=>chromeStorageAdapter_1.chromeStorage.get('history'));};
 const guiCommands=new Map();
+const taskWindows=new Map();
+const taskWindowsKey='falamermo.taskWindows.v1';
+let globalPlaybackCommand=Promise.resolve();
+async function toggleGlobalPlayback(intent){
+ const work=globalPlaybackCommand.catch(()=>{}).then(async()=>{
+  const state=await globalJobs.get(),playing=state.jobs.filter(job=>job.type==='TTS'&&job.status==='playing');
+  const action=intent==='pause'||intent==='resume'?intent:playing.length?'pause':'resume';
+  const targets=action==='pause'?playing:playing.length?[]:state.jobs.filter(job=>job.type==='TTS'&&job.status==='paused').sort((a,b)=>b.pausedAt-a.pausedAt||b.updatedAt-a.updatedAt||b.jobId.localeCompare(a.jobId)).slice(0,1);
+  const results=await Promise.all(targets.map(job=>controlGlobalJob({jobId:job.jobId,requestId:job.requestId,action})));
+  return{success:results.every(result=>result.success),state:await globalJobs.get(),...(results.some(result=>!result.success)?{error:'Uma reprodução não confirmou o controle.'}:{})};
+ });globalPlaybackCommand=work;return work;
+}
 async function controlGlobalJob(payload){
  const work=(guiCommands.get(payload.jobId)||Promise.resolve()).catch(()=>{}).then(()=>runGlobalJobCommand(payload));
  guiCommands.set(payload.jobId,work);
  try{return await work;}finally{if(guiCommands.get(payload.jobId)===work)guiCommands.delete(payload.jobId);}
 }
 async function runGlobalJobCommand(payload){const job=await globalJobs.find({jobId:payload.jobId});if(!job)return{success:false,error:'Tarefa não encontrada.'};
+ if(['stop','pause','resume','seek','set'].includes(payload.action)&&payload.requestId&&payload.requestId!==job.requestId)return{success:false,error:'Controle de reprodução antigo. Atualize o painel; a tarefa atual foi preservada.'};
  if(payload.action==='select')return{success:true,state:await globalJobs.ui({activeTaskId:job.jobId})};
  if(payload.action==='collapse')return{success:true,state:await globalJobs.collapse(payload)};
  if(payload.action==='edit')return{success:true,state:await globalJobs.edit(payload)};
+ if(['play','narrate'].includes(payload.action)&&payload.expectedText!==undefined&&payload.expectedText!==(job.type==='STT'?job.workingText??job.text:job.text))return{success:false,error:'O texto foi alterado em outro painel. Revise a tarefa antes de narrar.'};
+ if(payload.action==='reopen')return{success:true,state:await globalJobs.reopen(job.jobId)};
+ if(payload.action==='maximize'){
+  if(!taskWindows.has(job.jobId)){const saved=(await chrome.storage.session?.get(taskWindowsKey))?.[taskWindowsKey];if(Number.isInteger(saved?.[job.jobId]))taskWindows.set(job.jobId,saved[job.jobId]);}
+  const windowId=taskWindows.get(job.jobId);
+  if(windowId){try{await chrome.windows.update(windowId,{focused:true});return{success:true};}catch{taskWindows.delete(job.jobId);}}
+  const opened=await chrome.windows.create({url:chrome.runtime.getURL('task.html')+'?jobId='+encodeURIComponent(job.jobId),type:'popup',width:700,height:640,focused:true});
+  if(opened?.id){taskWindows.set(job.jobId,opened.id);await chrome.storage.session?.set({[taskWindowsKey]:Object.fromEntries([...taskWindows].slice(-128))});}return{success:true};
+ }
+ if(payload.action==='narrate'&&job.type==='STT'){
+  if(!globalThis.GlobalJobs.TERMINAL.has(job.status))return{success:false,error:'Aguarde a conclusão do ditado.'};
+  const created=await globalJobs.draft({jobId:liveId('manual'),agentId:job.agentId,origin:{tabId:0,frameId:0}}),jobId=created.activeTaskId;
+  await globalJobs.edit({jobId,text:job.workingText??job.text,expectedText:''});
+  return runGlobalJobCommand({jobId,action:'play'});
+ }
  if(payload.action==='play'){
   if(job.type!=='TTS'||!globalThis.GlobalJobs.TERMINAL.has(job.status)||!job.text.trim())return{success:false,error:'Tarefa não está pronta para reprodução.'};
   const response=await handleExtensionMessage({type:'TTS_REQUEST',payload:{text:job.text,agentId:job.agentId,playback:{playerId:job.playerId,requestId:liveId('request'),...job.progress}}},{url:chrome.runtime.getURL('popup.html')},job);
   return{...response,state:await globalJobs.get()};
  }
  if(payload.action==='remove'){
-  if(['flushing','inserting'].includes(job.status))return{success:false,error:'Aguarde a finalização desta tarefa.'};
-  if(!globalThis.GlobalJobs.TERMINAL.has(job.status)){
-   if(job.type==='STT'){await sendToOrigin(job,{type:job.origin.tabId?'STT_LIVE_EVENT':'LIVE_OPTIONS_EVENT',payload:{jobId:job.jobId,event:'stt-cancelled'}}).catch(()=>{});if(await backgroundPlayback_1.hasDocument?.())await backgroundPlayback_1.send({operation:'STT_LIVE_CANCEL',jobId:job.jobId,playerId:job.playerId,...job.origin});await globalJobs.event({jobId:job.jobId,event:'stt-cancelled'});}
-   else await runGlobalJobCommand({...payload,action:'stop'});
-  }
   await globalJobs.remove(job.jobId);return{success:true,state:await globalJobs.get()};
  }
  if(payload.action==='seekWords')return{success:false,error:'O PCM Live não fornece timestamps por palavra. Navegação exata indisponível; nenhuma posição estimada foi aplicada.'};
- if(!['stop','pause','resume','set'].includes(payload.action))return{success:false,error:'Controle inválido.'};
+ if(!['stop','pause','resume','set','seek'].includes(payload.action))return{success:false,error:'Controle inválido.'};
+ if(payload.action==='pause'&&job.status!=='playing'||payload.action==='resume'&&job.status!=='paused')return{success:true,state:await globalJobs.get()};
+ if(payload.action==='seek'&&(job.type!=='TTS'||!job.progress||!Number.isFinite(job.progress.availableEnd)||![-5,5].includes(payload.deltaSeconds)))return{success:false,error:'Buffer PCM navegável indisponível.'};
  if(job.type==='STT'){
   if(payload.action!=='stop')return{success:false,error:'Controle indisponível para ditado.'};
   if(globalThis.GlobalJobs.TERMINAL.has(job.status))return{success:true};
@@ -222,7 +252,18 @@ async function runGlobalJobCommand(payload){const job=await globalJobs.find({job
   await globalJobs.stopped(job.jobId);let response;try{response=await sendToOrigin(job,{type:'STT_GLOBAL_STOP',payload:{jobId:job.jobId}});}catch{}
   if(!response?.success){await globalJobs.originLost({...job.origin,jobId:job.jobId});if(await backgroundPlayback_1.hasDocument?.())await backgroundPlayback_1.send({operation:'STT_ORIGIN_LOST',jobId:job.jobId,playerId:job.playerId,...job.origin});}return{success:true};
  }
- const operation={stop:'STOP',pause:'PAUSE',resume:'RESUME',set:'SET'}[payload.action];if(!globalThis.GlobalJobs.TERMINAL.has(job.status)&&await backgroundPlayback_1.hasDocument?.()){const result=await backgroundPlayback_1.send({operation,jobId:job.jobId,playerId:job.playerId,requestId:job.requestId,...job.origin,...(Number.isFinite(payload.volume)?{volume:Math.max(0,Math.min(1,payload.volume))}:{}),...(Number.isFinite(payload.playbackRate)?{playbackRate:Math.max(.5,Math.min(2,payload.playbackRate))}:{})});if(result?.success===false)return result;}if(payload.action==='stop')await globalJobs.stopped(job.jobId);if(payload.action==='set')await globalJobs.settings(payload);return{success:true,state:await globalJobs.get()};
+ let commandEventSeq,commandStatus;const operation={stop:'STOP',pause:'PAUSE',resume:'RESUME',set:'SET',seek:'SEEK_PCM'}[payload.action];
+ if(!globalThis.GlobalJobs.TERMINAL.has(job.status)&&await backgroundPlayback_1.hasDocument?.()){
+  const result=await backgroundPlayback_1.send({operation,jobId:job.jobId,playerId:job.playerId,requestId:job.requestId,...job.origin,...(payload.action==='seek'?{deltaSeconds:payload.deltaSeconds}:{}),...(Number.isFinite(payload.volume)?{volume:Math.max(0,Math.min(1,payload.volume))}:{}),...(Number.isFinite(payload.playbackRate)?{playbackRate:Math.max(.5,Math.min(2,payload.playbackRate))}:{})});
+  if(!result?.success)return result||{success:false,error:'Player não confirmou o comando.'};
+  commandEventSeq=result.eventSeq;commandStatus=result.status;
+  if(['pause','resume','seek'].includes(payload.action)){
+   const paused=payload.action==='seek'?job.status==='paused':payload.action==='pause';
+   if(result.operation!==operation||commandStatus?.jobId!==job.jobId||commandStatus?.playerId!==job.playerId||commandStatus?.requestId!==job.requestId||!Number.isInteger(commandEventSeq)||!Number.isInteger(commandStatus.controlSeq)||commandStatus.controlSeq<1||commandStatus.controlSeq<=(job.progress.controlSeq||0)||commandStatus.paused!==paused||commandStatus.workletPaused!==paused||commandStatus.contextState!==(paused?'suspended':'running')||paused&&commandStatus.outputMuted!==true)return{success:false,error:'Player não confirmou o estado efetivo de áudio. Reabra o painel para consultar a tarefa.'};
+  }
+ }else if(['pause','resume','seek'].includes(payload.action))return{success:false,error:'Player indisponível. Reabra a tarefa para consultar o resultado.'};
+ if(['pause','resume','seek'].includes(payload.action))await globalJobs.event({jobId:job.jobId,requestId:job.requestId,event:payload.action==='seek'?'position':payload.action==='pause'?'pause':'play',status:commandStatus,eventSeq:commandEventSeq});
+ if(payload.action==='stop')await globalJobs.stopped(job.jobId);if(payload.action==='set')await globalJobs.settings(payload);return{success:true,state:await globalJobs.get()};
 }
 async function liveKeyOrders(models,keys){
  const adaptive=globalThis.TtsAdaptive,pairs=adaptive.catalog(models,keys),data=await adaptive.getStore().snapshot(pairs),ranked=adaptive.orderPairs(data,pairs);
@@ -288,6 +329,12 @@ async function handleExtensionMessage(message, sender, guiJob) {
                 }
                 return{success:true,state:await globalJobs.get()};
             }
+            case 'HUD_GLOBAL_TOGGLE':
+                if(!allowedHudSender(sender))return{success:false};
+                await recoverGlobalJobs();return toggleGlobalPlayback(message.payload?.action);
+            case 'HUD_GLOBAL_REOPEN':
+                if(!allowedHudSender(sender))return{success:false};
+                await recoverGlobalJobs();return{success:true,state:await globalJobs.reopen(message.payload?.jobId)};
             case 'HUD_GLOBAL_UI_SET':
                 if(!allowedHudSender(sender))return{success:false};
                 await recoverGlobalJobs();return{success:true,state:await globalJobs.ui(message.payload||{})};
@@ -409,7 +456,7 @@ async function handleExtensionMessage(message, sender, guiJob) {
                 const payload=message.payload||{},job=await globalJobs.find({...payload,...senderOrigin(sender)});
                 if(job&&!await globalJobs.hasOrigin(job.jobId,senderOrigin(sender)))return{success:false,error:'Player pertence a outro documento.'};
                 const result=await backgroundPlayback_1.handlePlaybackCommand({...payload,...(job?{jobId:job.jobId}: {})},sender);
-                if(job&&payload.operation==='STOP')await globalJobs.stopped(job.jobId);
+                if(job&&payload.operation==='STOP'&&result?.success)await globalJobs.stopped(job.jobId);
                 return result;
             }
             case 'TTS_PLAYBACK_EVENT':
@@ -534,7 +581,8 @@ async function handleExtensionMessage(message, sender, guiJob) {
                     playbackControllers.delete(playbackKey);
                     const job=await globalJobs.find({playerId,...senderOrigin(sender)});
                     if(job&&!await globalJobs.hasOrigin(job.jobId,senderOrigin(sender)))return{success:false,error:'Player pertence a outro documento.'};
-                    await backgroundPlayback_1.handlePlaybackCommand({ playerId,operation:'STOP',...(job?{jobId:job.jobId}: {})},sender);
+                    const result=await backgroundPlayback_1.handlePlaybackCommand({ playerId,operation:'STOP',...(job?{jobId:job.jobId,requestId:job.requestId}: {})},sender);
+                    if(!result?.success)return result||{success:false,error:'Player não confirmou a parada.'};
                     if(job)await globalJobs.stopped(job.jobId);
                     return { success: true };
                 }
@@ -1136,6 +1184,7 @@ exports.DEFAULT_UI_PREFERENCES = {
 exports.DEFAULT_HISTORY_SETTINGS = {
     enabled: true,
     maxEntries: 50,
+    retentionDays: 365,
     recentItems: [],
 };
 exports.DEFAULT_LOGS_SETTINGS = {
@@ -1294,6 +1343,7 @@ function mergeHistorySettings(base, candidate) {
         ...(typeof candidate.maxEntries === 'number' && Number.isFinite(candidate.maxEntries) && candidate.maxEntries > 0
             ? { maxEntries: Math.floor(candidate.maxEntries) }
             : {}),
+        ...(Number.isFinite(candidate.retentionDays)?{retentionDays:Math.max(1,Math.min(3650,Math.floor(candidate.retentionDays)))}:{}),
         ...(Array.isArray(candidate.recentItems) ? { recentItems: candidate.recentItems } : {}),
     };
 }

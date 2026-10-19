@@ -1,11 +1,11 @@
 (function(root,factory){const api=factory(root);if(typeof module==='object'&&module.exports)module.exports=api;else root.LiveTtsDiagnostics=api;})(globalThis,function(root){
 'use strict';
 const STORAGE_KEY='liveTtsDiagnosticsV1',MAX_JOBS=8,MAX_EVENTS=120,MAX_SESSIONS=12,TTL_MS=24*60*60*1000;
-const stages=new Set(['offscreen-command-received','socket-created','socket-open','setup-sent','setup-complete','turn-sent','first-pcm','turn-complete','turn-error','interaction-status','socket-error','socket-close','server-error','message-parse-error','worklet-ready','destination-connected','context-running','pcm-received','player-enqueue','first-frame-consumed','first-playback','generation-complete','ended','paused','resumed','settings-applied','stopped','error','protocol-diagnostic']);
+const stages=new Set(['offscreen-command-received','socket-created','socket-open','setup-sent','setup-complete','turn-sent','first-pcm','turn-complete','turn-error','interaction-status','socket-error','socket-close','server-error','message-parse-error','worklet-ready','destination-connected','context-running','pcm-received','player-enqueue','first-frame-consumed','first-playback','generation-complete','ended','paused','resumed','seeked','control-error','settings-applied','stopped','error','protocol-diagnostic']);
 const enums={model:['gemini-3.8-live','gemini-3.8-live-extended-thinking','gemini-3.1-flash-live-preview','gemini-2.5-flash-native-audio-preview-12-2025'],schema:['BidiGenerateContentSetup'],family:['native-audio','level','budget'],phase:['created','connecting','socket-open','awaiting-setup-complete','ready','awaiting-first-pcm','streaming'],contextState:['suspended','running','closed','interrupted'],interactionStatus:['IN_PROGRESS','IDLE'],encoding:['PCM signed Int16'],endianness:['little']};
-const numberFields=['blockId','bytes','frames','sampleRate','channels','bitDepth','contextSampleRate','sourceBytes','volume','playbackRate','elapsedMs','readyState','code','blocks','socketOpenMs','setupCompleteMs','systemInstructionCharacters','textCharacters','wireTextCharacters'];
-const booleanFields=['muted','paused','local','socketOpen','setupCompleteReceived','systemInstructionPresent'];
-const validJob=id=>typeof id==='string'&&/^job-\d{13}-[a-z0-9]{1,20}$/.test(id);
+const numberFields=['blockId','bytes','frames','sampleRate','channels','bitDepth','contextSampleRate','sourceBytes','volume','playbackRate','elapsedMs','readyState','code','blocks','socketOpenMs','setupCompleteMs','systemInstructionCharacters','textCharacters','wireTextCharacters','controlSeq','positionFrame','currentTime','availableStart','availableEnd'];
+const booleanFields=['muted','paused','local','socketOpen','setupCompleteReceived','systemInstructionPresent','workletPaused','outputMuted'];
+const validJob=id=>typeof id==='string'&&/^(?:job|manual)-\d{13}-[a-z0-9]{1,20}$/.test(id);
 const validSession=id=>typeof id==='string'&&/^live-\d{13}-[a-z0-9]{1,20}$/.test(id);
 function fields(input={}){
  const out={};for(const [key,values] of Object.entries(enums))if(values.includes(input[key]))out[key]=input[key];

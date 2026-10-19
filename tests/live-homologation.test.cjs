@@ -4,7 +4,8 @@ function deferred(){let resolve,reject;const promise=new Promise((a,b)=>{resolve
 function environment(acquire,slowInit=false){
  const events=[],contexts=[],nodes=[],attempts=[];let listener;
  class AudioContext{constructor(){this.state='suspended';this.sampleRate=24000;this.destination={};this.init=deferred();this.audioWorklet={addModule:()=>slowInit?this.init.promise:Promise.resolve()};contexts.push(this);}createGain(){return{gain:{value:1},connect:x=>x};}async resume(){this.state='running';}async suspend(){this.state='suspended';}async close(){this.state='closed';}}
- class AudioWorkletNode{constructor(){this.sent=[];this.port={postMessage:(data,transfer)=>{this.sent.push(structuredClone(data,{transfer}));}};nodes.push(this);}connect(x){return x;}}
+ let Processor;vm.runInNewContext(fs.readFileSync(path.join(__dirname,'..','pcm-player-worklet.js'),'utf8'),{sampleRate:24000,Float32Array,AudioWorkletProcessor:class{constructor(){this.port={postMessage(){}};}},registerProcessor:(_name,type)=>Processor=type});
+ class AudioWorkletNode{constructor(){this.sent=[];this.processor=new Processor();this.processor.port.postMessage=data=>queueMicrotask(()=>this.port.onmessage?.({data}));this.port={postMessage:(data,transfer)=>{const copy=structuredClone(data,{transfer});this.sent.push(copy);this.processor.port.onmessage({data:copy});}};nodes.push(this);}connect(x){return x;}}
  class Manager{async acquire(options){attempts.push({jobId:options.jobId,blockId:options.blockId,modelId:options.modelId,keyIndex:options.keyIndex});return acquire(options);}release(){}retire(session){session.closed=true;}}
  const context=vm.createContext({console,performance,structuredClone,setTimeout,clearTimeout,AudioContext,AudioWorkletNode,AbortController,DataView,Float32Array,Uint8Array,LiveConfig:config,LiveSessions:{LiveSessionManager:Manager,classifyLiveError:require('../live-session-manager.js').classifyLiveError},chrome:{runtime:{getURL:x=>x,onMessage:{addListener(fn){listener=fn;}},sendMessage(msg){events.push(msg.payload);return Promise.resolve();}}}});
  vm.runInContext(fs.readFileSync(path.join(__dirname,'..','offscreen.js'),'utf8'),context);
@@ -42,12 +43,17 @@ test('três blocos paralelos terminam 3 → 1 → 2 e enfileiram 1 → 2 → 3 s
  sessions[2].finish(9000);await flush();assert.equal(env.nodes[0].sent.filter(x=>x.type==='enqueue').length,0);
  sessions[0].finish(3000);await flush();sessions[1].finish(6000);await flush();
  const chunks=env.nodes[0].sent.filter(x=>x.type==='enqueue');assert.deepEqual(chunks.map(x=>x.blockId),[0,1,2]);assert.deepEqual(chunks.map(x=>new Float32Array(x.buffer)[0]),[3000,6000,9000].map(x=>x/32768));assert.equal(env.events.some(x=>x.event==='generation-complete'),true);
- for(let i=0;i<3;i++)env.nodes[0].port.onmessage({data:{type:'drain'}});await flush();assert.equal(env.events.filter(x=>x.event==='ended').length,1);
+ for(let i=0;i<3;i++)env.nodes[0].port.onmessage({data:{type:'drain'}});env.nodes[0].port.onmessage({data:{type:'position',frame:3,totalFrames:3,availableStart:0}});await flush();assert.equal(env.events.filter(x=>x.event==='ended').length,1);
 });
 test('falha tardia de job cancelado não remove os controles do sucessor',async()=>{
  const old=deferred(),current=pendingSession(),env=environment(async o=>o.jobId==='old'?old.promise:current.session);
  await env.command({...base,jobId:'old',requestId:'old'});await env.command({...base,jobId:'old',operation:'STOP',requestId:'old'});await env.command({...base,jobId:'new',requestId:'new'});await flush();old.reject(new Error('WebSocket closed'));await flush();
  const paused=await env.command({...base,jobId:'new',operation:'PAUSE',requestId:'new'});assert.equal(paused.status?.paused,true);await env.command({...base,jobId:'new',operation:'STOP',requestId:'new'});await flush();
+});
+test('Stop de request antigo não cancela replay atual do mesmo job nem outra tarefa',async()=>{
+ const env=environment(async()=>pendingSession().session);await env.command(base);await env.command({...base,operation:'STOP'});await env.command({...base,requestId:'replay'});await env.command({...base,jobId:'other',requestId:'other'});
+ assert.equal((await env.command({...base,operation:'STOP'})).success,false);const state=await env.command({operation:'GLOBAL_JOBS_SNAPSHOT'});assert.equal(state.activeJobIds.length,2);assert.equal(env.contexts[1].state,'running');assert.equal(env.contexts[2].state,'running');
+ await env.command({...base,operation:'STOP',requestId:'replay'});assert.equal(env.contexts[2].state,'running');await env.command({...base,operation:'STOP',jobId:'other',requestId:'other'});
 });
 test('inicializações simultâneas preservam jobs independentes e controles individuais',async()=>{
  const env=environment(async()=>pendingSession().session,true),first=env.command({...base,jobId:'old',requestId:'old'}),second=env.command({...base,jobId:'new',requestId:'new'});

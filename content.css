@@ -17,8 +17,12 @@
 }
 
 .ext-hud-card {
+  box-sizing: border-box;
   position: fixed;
   width: 320px;
+  max-height: calc(100vh - 48px);
+  display: flex;
+  flex-direction: column;
   background: rgba(15, 23, 42, 0.94);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
@@ -35,6 +39,11 @@
   transform: translateY(8px) scale(0.96);
 }
 
+.ext-hud-card[data-minimized="true"]{height:auto!important;min-height:0!important}
+.ext-hud-card[data-minimized="true"]>.ext-hud-body{display:none!important}
+.ext-hud-card,.ext-hud-card *{scrollbar-width:none!important;scrollbar-gutter:auto!important}
+.ext-hud-card::-webkit-scrollbar,.ext-hud-card ::-webkit-scrollbar{display:none!important;width:0!important;height:0!important}
+
 .ext-hud-header {
   display: flex;
   align-items: center;
@@ -43,6 +52,8 @@
   background: rgba(255, 255, 255, 0.04);
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
   cursor: grab;
+  flex-shrink: 0;
+  gap: 6px;
 }
 
 .ext-hud-header:active {
@@ -56,7 +67,11 @@
   font-weight: 600;
   font-size: 12px;
   color: #94a3b8;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
 }
+.ext-hud-title>span:first-child{flex:none}
 
 .ext-hud-badge {
   font-size: 10px;
@@ -64,6 +79,10 @@
   border-radius: 9999px;
   font-weight: 500;
   text-transform: uppercase;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .ext-hud-badge.idle { background: rgba(148, 163, 184, 0.2); color: #94a3b8; }
@@ -74,6 +93,7 @@
 .ext-hud-controls {
   display: flex;
   gap: 4px;
+  flex: none;
 }
 
 .ext-btn-icon {
@@ -94,9 +114,18 @@
   color: #f1f5f9;
 }
 
+.ext-hud-body[hidden]{display:none!important}
 .ext-hud-body {
   padding: 12px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
 }
+#ext-global-jobs{display:flex;flex:1;min-height:0}
+#ext-global-jobs>.fm-global-hud{display:flex;flex-direction:column;flex:1;min-height:0}
+#ext-global-jobs>.fm-global-hud>:not(.fm-global-jobs){flex-shrink:0}
+#ext-global-jobs .fm-global-jobs{flex:1;min-height:0}
 
 .ext-hud-text-preview {
   max-height: 80px;

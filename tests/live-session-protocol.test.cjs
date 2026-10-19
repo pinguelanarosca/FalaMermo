@@ -158,9 +158,9 @@ test('offscreen encerra payload rejeitado sem repetir em nove chaves/modelos',as
   close(){this.readyState=3;}
  }
  class AudioContext{
-  constructor(){this.audioWorklet={async addModule(){}};this.destination={};}
+  constructor(){this.state='suspended';this.audioWorklet={async addModule(){}};this.destination={};}
   createGain(){return{gain:{value:1},connect(){return this;}};}
-  async resume(){}async close(){}
+  async resume(){this.state='running';}async close(){this.state='closed';}
  }
  class AudioWorkletNode{constructor(){this.port={postMessage(){}};}connect(node){return node;}}
  const context=vm.createContext({console,performance,structuredClone,WebSocket:Socket,AudioContext,AudioWorkletNode,AbortController,TextDecoder,Blob,atob,btoa,setTimeout,clearTimeout,setInterval(){return 0;},clearInterval(){},chrome:{runtime:{getURL:file=>'chrome-extension://test/'+file,onMessage:{addListener(fn){listener=fn;}},sendMessage(message){messages.push(message);return Promise.resolve();}}}});

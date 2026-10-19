@@ -64,6 +64,25 @@ function loadEntrypoint(e,storage){
  const deps={'extension/src/content/ui/hudController.ts':{hud:e.hud},'extension/src/content/controllers/ttsController.ts':{tts:{setVolume(){},setSpeed(){},stop(){}}},'extension/src/content/controllers/sttController.ts':{stt:e.stt},'extension/src/content/controllers/lensController.ts':{lens:{}},'extension/src/services/storage/chromeStorageAdapter.ts':{chromeStorage:storage},'extension/src/content/styles/hud.css?raw':{default:''}};
  const m={exports:{}};e.context.modules['extension/src/content/entrypoint.ts'](m,m.exports,id=>deps[id]||e.load(id));
 }
+test('início antes da preferência carregar respeita realtime e insere parcial antes do Stop',async()=>{
+ const e=contentEnv(),ui=deferred();loadEntrypoint(e,{get:key=>key==='ui'?ui.promise:Promise.resolve({}),subscribe(){}});e.events.DOMContentLoaded();
+ const starting=e.stt.startLiveRecording('narrator');await flush();ui.resolve({dictationInsertion:'realtime'});await starting;
+ const start=e.messages.find(message=>message.type==='STT_LIVE_START');assert.equal(start.payload.realtime,true);
+ const jobId=e.stt.liveJobId;await e.stt.handleLiveEvent({jobId,event:'stt-partial',eventSeq:1,confirmedText:'',partialText:'antes de parar'});
+ assert.equal(e.input.value,'Antes de pararoriginal');assert.equal(e.stt.isRecording,true);assert.equal(e.messages.some(message=>message.type==='STT_LIVE_STOP'),false);e.stt.cancelRecording();await flush();
+});
+test('falha ao ler preferência não congela silenciosamente ditado no modo final',async()=>{
+ const e=contentEnv();loadEntrypoint(e,{get:key=>key==='ui'?Promise.reject(Error('Storage temporariamente indisponível')):Promise.resolve({}),subscribe(){}});e.events.DOMContentLoaded();await flush();await e.stt.startLiveRecording('narrator');assert.equal(e.streams.length,0);assert.ok(!e.messages.some(m=>m.type==='STT_LIVE_START'));assert.match(e.hud.preview,/preferência de inserção/);
+});
+test('PCM → VAD → transporte → registro → campo original: parcial inserido ainda gravando',async()=>{
+ const e=contentEnv(),GlobalJobs=require('../global-jobs.js'),registry=GlobalJobs.create(),origin={tabId:1,frameId:0};let sequence=0,delivery=Promise.resolve(),ended=0;
+ const emit=result=>{delivery=delivery.then(async()=>{const payload={jobId:e.stt.liveJobId,event:'stt-partial',eventSeq:++sequence,...result};await registry.event(payload);await e.stt.handleLiveEvent(payload);});};
+ let transport;e.runtime.sendMessage=async message=>{e.messages.push(message);const p=message.payload;if(message.type==='STT_LIVE_START'){await registry.start({...p,type:'STT',origin});transport=new e.context.SttRealtime.LiveChunkTransport({jobId:p.jobId,sendAudio(){},endAudio(){ended++;},onPartial:emit});}if(message.type==='STT_LIVE_AUDIO')transport.submitAudioChunk({pcm:new Uint8Array(Buffer.from(p.audioBase64||'','base64')),chunk:p.chunk,endOnly:p.endOnly});if(message.type==='HUD_CAPTURE_STATE')await registry.capture(p,origin);return{success:true};};
+ e.stt.insertionMode='realtime';await e.stt.startLiveRecording('narrator');e.doc.activeElement=e.other;
+ for(let i=0;i<7;i++)e.nodes[0].port.onmessage({data:new Float32Array(4800).fill(.1).buffer});for(let i=0;i<5;i++)e.nodes[0].port.onmessage({data:new Float32Array(4800).buffer});await e.stt.liveCapture.audioQueue.drain();assert.equal(ended,1);
+ transport.receive({inputTranscription:{text:'fala antes do Stop'}});await delivery;assert.equal(e.input.value,'Fala antes do Stoporiginal');assert.equal(e.other.value,'outro');assert.equal(e.stt.isRecording,true);assert.equal(e.streams[0].track.stopped,false);assert.equal(e.messages.some(m=>m.type==='STT_LIVE_STOP'),false);assert.equal((await registry.get()).jobs[0].partialText,'fala antes do Stop');
+ transport.cancel();e.stt.cancelRecording();await flush();assert.equal(e.streams[0].track.stopped,true);
+});
 test('DOMContentLoaded tardio após recarga não lê storage nem registra mensagens',()=>{
  const e=contentEnv();let reads=0;loadEntrypoint(e,{get(){reads++;return Promise.resolve({});},subscribe(){}});e.runtime.invalid=true;assert.doesNotThrow(()=>e.events.DOMContentLoaded());assert.equal(reads,0);assert.equal(e.messageListener,undefined);assertInvalidated(e);
 });

@@ -49,13 +49,14 @@ function initialize() {
     try {
     // A representação desta página pode desaparecer; o player offscreen continua independente.
     // Carrega atalhos configurados pelo usuário
-    chromeStorageAdapter_1.chromeStorage.get('ui').then((uiData) => {
+    sttController_1.stt.preferencesReady = chromeStorageAdapter_1.chromeStorage.get('ui').then((uiData) => {
         if (!sttController_1.stt.ensureExtensionContext()) return;
         if (uiData?.shortcuts) {
             cachedShortcuts = { ...cachedShortcuts, ...uiData.shortcuts };
         }
+        sttController_1.stt.preferencesError=null;
         sttController_1.stt.insertionMode = uiData?.dictationInsertion === 'realtime' ? 'realtime' : 'final';
-    }).catch(error => sttController_1.stt.reportRuntimeError(error));
+    }).catch(error => {sttController_1.stt.preferencesError=error;sttController_1.stt.reportRuntimeError(error);});
     // Carrega e acompanha o agente ativo para que atalhos/HUD respeitem a persona escolhida.
     chromeStorageAdapter_1.chromeStorage.get('agents').then(applyActiveAgentAudio).catch(error => sttController_1.stt.reportRuntimeError(error));
     chromeStorageAdapter_1.chromeStorage.subscribe('agents', (agentsData) => applyActiveAgentAudio(agentsData));
@@ -65,6 +66,7 @@ function initialize() {
         if (newUi?.shortcuts) {
             cachedShortcuts = { ...cachedShortcuts, ...newUi.shortcuts };
         }
+        sttController_1.stt.preferencesError=null;
         sttController_1.stt.insertionMode = newUi?.dictationInsertion === 'realtime' ? 'realtime' : 'final';
     });
     // Conecta ações do HUD aos controladores
@@ -252,6 +254,7 @@ class HudController {
         const root = shadowDomWrapper_1.shadowDom.getRoot();
         const wrapper = document.createElement('div');
         wrapper.className = 'ext-hud-card hidden';
+        wrapper.setAttribute('data-fm-layout','compact-2');
         wrapper.style.right = `${this.posX}px`;
         wrapper.style.bottom = `${this.posY}px`;
         wrapper.innerHTML = `
@@ -260,6 +263,7 @@ class HudController {
           <span>⚡ FalaMermo</span>
           <span class="ext-hud-badge idle" id="ext-badge">Pronto</span>
         </div>
+        <div id="ext-global-compact" class="fm-global-mini-controls" hidden></div>
         <div class="ext-hud-controls">
           <button class="ext-btn-icon" id="ext-btn-min" title="Ocultar">−</button>
           <button class="ext-btn-icon" id="ext-btn-close" title="Fechar">✕</button>
@@ -278,7 +282,7 @@ class HudController {
         this.speedSlider = wrapper.querySelector('#ext-speed');
         this.setupListeners(wrapper);
         if(globalThis.GlobalHud){
-            this.globalView=globalThis.GlobalHud.mount(wrapper.querySelector('#ext-global-jobs'),{embedded:true,agentSelector:true,send:message=>chrome.runtime.sendMessage(message),onState:state=>this.applyGlobalState(state)});
+            this.globalView=globalThis.GlobalHud.mount(wrapper.querySelector('#ext-global-jobs'),{embedded:true,compactControls:wrapper.querySelector('#ext-global-compact'),agentSelector:true,send:message=>chrome.runtime.sendMessage(message),onState:state=>this.applyGlobalState(state)});
         }
     }
     setupListeners(wrapper) {
@@ -336,12 +340,18 @@ class HudController {
         });
     }
     setStatus(badge, label) {
+        if(typeof this.globalView?.notice==='function'){
+            if(/Atualize|Falha|Erro|Selecione|Nenhum PCM/i.test(label||'')){this.localNotice=true;this.globalView.notice(label);}
+            else if(['loading','recording','playing'].includes(badge)){this.localNotice=false;this.globalView.notice('');}
+        }
+        if(globalThis.GlobalHud&&Number.isFinite(this.globalRevision)&&label!=='Atualize a página')return;
         if (this.badgeElement) {
             this.badgeElement.className = `ext-hud-badge ${badge}`;
             this.badgeElement.textContent = label;
         }
     }
     setTextPreview(text) {
+        if(this.localNotice&&typeof this.globalView?.notice==='function'){this.globalView.notice(text);return;}
         if (this.previewElement) {
             this.previewElement.textContent = text || 'Nenhum texto selecionado.';
         }
@@ -367,7 +377,7 @@ class HudController {
         this.updateGlobalUi({visible:false});
     }
     updateGlobalUi(payload){if(!globalThis.GlobalHud)return;try{void chrome.runtime.sendMessage({type:'HUD_GLOBAL_UI_SET',payload}).then(result=>{if(result?.success&&result.state)this.applyGlobalState(result.state);}).catch(error=>console.error('[HUD visibility]',error?.message||String(error)));}catch(error){console.error('[HUD visibility]',error?.message||String(error));}}
-    applyGlobalState(state){if(!state||Number.isFinite(this.globalRevision)&&state.revision<this.globalRevision)return;this.globalRevision=state.revision;this.globalMinimized=state.minimized===true;this.container?.classList.toggle('hidden',state.visible===false);for(const element of this.container?.querySelectorAll('#ext-preview,.ext-hud-sliders')||[])element.hidden=this.globalMinimized;this.globalView?.update(state);}
+    applyGlobalState(state){if(!state||Number.isFinite(this.globalRevision)&&state.revision<this.globalRevision)return;this.globalRevision=state.revision;this.globalMinimized=state.minimized===true;this.container?.setAttribute?.('data-minimized',String(this.globalMinimized));this.container?.classList.toggle('hidden',state.visible===false);for(const element of this.container?.querySelectorAll('.ext-hud-body')||[]){element.hidden=this.globalMinimized;element.inert=this.globalMinimized;}const jobs=state.jobs||[],playing=jobs.filter(job=>job.type==='TTS'&&job.status==='playing').length,recording=jobs.filter(job=>job.type==='STT'&&job.status==='recording').length,active=jobs.filter(job=>!['ready','completed','error','cancelled'].includes(job.status)).length,badge=this.container?.querySelector('#ext-badge');if(badge){badge.textContent=recording||playing?[recording?recording+' gravando':'',playing?playing+' narrando':''].filter(Boolean).join(' · '):active?active+' em andamento':jobs.some(job=>job.status==='paused')?'Pausado':'Pronto';badge.dataset.state=recording?'recording':playing?'playing':'idle';badge.className='ext-hud-badge '+badge.dataset.state;}const button=this.container?.querySelector('#ext-btn-min');if(button){button.title=this.globalMinimized?'Restaurar HUD':'Minimizar HUD';button.setAttribute('aria-expanded',String(!this.globalMinimized));button.setAttribute('aria-label',button.title);button.textContent=this.globalMinimized?'▢':'−';}this.globalView?.update(state);}
     toggle() {
         if (this.container?.classList.contains('hidden')) {
             this.show();
@@ -821,6 +831,7 @@ class TtsController {
      * Não realiza nova requisição à API ao repetir.
      */
     togglePlayPause() {
+        if(globalThis.GlobalHud){try{void chrome.runtime.sendMessage({type:'HUD_GLOBAL_TOGGLE',payload:{}}).catch(error=>console.error('[Global playback]',error?.name||'Error'));}catch(error){console.error('[Global playback]',error?.name||'Error');}return;}
         if(this.latestGlobalTask){const task=this.latestGlobalTask;if(task.failed||task.stopped)return;task.paused=!task.paused;this.controlGlobalTask(task.paused?'PAUSE':'RESUME');return;}
         if (!this.audio || this.isFetchingChunk)
             return;
@@ -1403,6 +1414,11 @@ class SttController {
         // Uma recarga pode não produzir outro callback Chrome. Vigia apenas o job ativo, sem reconectar.
         this.contextWatch=setInterval(()=>{try{this.ensureExtensionContext();}catch(error){this.cancelRecording();this.reportRuntimeError(error);}},1000);
         try {
+            if(this.preferencesReady)await this.preferencesReady;
+            if(!current()||!this.ensureExtensionContext())return;
+            if(this.preferencesError)throw new Error('Não foi possível ler a preferência de inserção. Reabra as opções e confirme o modo antes de ditar.');
+            job.mode=this.insertionMode;
+            globalThis.LiveSttDiagnostics?.capture(capture,'starting',{insertionMode:job.mode});
             const stream=await navigator.mediaDevices.getUserMedia({audio:{channelCount:1}});capture.stream=stream;
             if(!current()){stream.getTracks().forEach(track=>track.stop());return;}
             this.activeStream=stream;
@@ -1411,6 +1427,7 @@ class SttController {
             if(!current()){this.cancelLiveJob(jobId);return;}
             if(!opened?.success)throw new Error(opened?.error||'Falha ao abrir STT Live.');
             job.transform=opened.transform===true;
+            globalThis.LiveSttDiagnostics?.capture(capture,'setup-complete',{insertionMode:job.mode,transform:job.transform});
             if(!this.ensureExtensionContext())return;
             const ctx=new AudioContext({latencyHint:'interactive'});capture.context=ctx;this.liveAudioContext=ctx;await ctx.audioWorklet.addModule(chrome.runtime.getURL('mic-capture-worklet.js'));
             if(!current()||!this.ensureExtensionContext())return;
@@ -1495,7 +1512,7 @@ class SttController {
         if(payload.event==='stt-transform-attempt'){job.transform=true;this.publishCapture(job,'transforming');if(showLegacy())hudController_1.hud.setStatus('loading','Transformando');}
         if(payload.event==='stt-error'||payload.event==='stt-final'){
             if(job.finishing)return;job.finishing=true;await this.releaseLiveCapture(job.capture);if(job.cancelled||!this.ensureExtensionContext())return;
-            if(payload.event==='stt-error'){job.capture?.audioQueue?.close();this.publishCapture(job,'error');if(showLegacy()){hudController_1.hud.setStatus('idle','Erro STT');hudController_1.hud.setTextPreview([payload.error,job.committed,job.partial].filter(Boolean).join('\n'));}this.cancelLiveJob(payload.jobId);job.insertion.dispose();this.liveJobs.delete(job.jobId);return;}
+            if(payload.event==='stt-error'){job.capture?.audioQueue?.close();this.publishCapture(job,'error');if(showLegacy()){hudController_1.hud.setStatus('idle','Erro STT');hudController_1.hud.setTextPreview(payload.error||'Falha no ditado. O texto recebido continua no cartão da tarefa.');}this.cancelLiveJob(payload.jobId);job.insertion.dispose();this.liveJobs.delete(job.jobId);return;}
             const text=payload.text||job.committed;this.publishCapture(job,'inserting');if(showLegacy())hudController_1.hud.setStatus('loading','Inserindo');const result=await this.insertJobText(job,text,true);if(job.cancelled)return;
             this.rememberJobResult(job.jobId,result);
             this.publishCapture(job,result.inserted?'completed':'insertion-failed');
@@ -3343,7 +3360,7 @@ function recordShortcutFromEvent(e) {
 
 },
 "extension/src/content/styles/hud.css?raw":function(module,exports,__require){
-module.exports="/**\n * @license\n * SPDX-License-Identifier: Apache-2.0\n * \n * Estilos encapsulados do HUD flutuante (injetado via Shadow DOM).\n */\n\n:host {\n  all: initial;\n  position: fixed;\n  z-index: 2147483647;\n  font-family: -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Helvetica, Arial, sans-serif;\n  font-size: 13px;\n  line-height: 1.4;\n  color: #f1f5f9;\n  user-select: none;\n}\n\n.ext-hud-card {\n  position: fixed;\n  width: 320px;\n  background: rgba(15, 23, 42, 0.94);\n  backdrop-filter: blur(12px);\n  -webkit-backdrop-filter: blur(12px);\n  border: 1px solid rgba(255, 255, 255, 0.12);\n  border-radius: 12px;\n  box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.5), 0 8px 10px -6px rgba(0, 0, 0, 0.5);\n  overflow: hidden;\n  transition: opacity 0.2s ease, transform 0.2s ease;\n}\n\n.ext-hud-card.hidden {\n  opacity: 0;\n  pointer-events: none;\n  transform: translateY(8px) scale(0.96);\n}\n\n.ext-hud-header {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  padding: 8px 12px;\n  background: rgba(255, 255, 255, 0.04);\n  border-bottom: 1px solid rgba(255, 255, 255, 0.08);\n  cursor: grab;\n}\n\n.ext-hud-header:active {\n  cursor: grabbing;\n}\n\n.ext-hud-title {\n  display: flex;\n  align-items: center;\n  gap: 6px;\n  font-weight: 600;\n  font-size: 12px;\n  color: #94a3b8;\n}\n\n.ext-hud-badge {\n  font-size: 10px;\n  padding: 2px 6px;\n  border-radius: 9999px;\n  font-weight: 500;\n  text-transform: uppercase;\n}\n\n.ext-hud-badge.idle { background: rgba(148, 163, 184, 0.2); color: #94a3b8; }\n.ext-hud-badge.playing { background: rgba(59, 130, 246, 0.25); color: #60a5fa; }\n.ext-hud-badge.recording { background: rgba(239, 68, 68, 0.25); color: #f87171; animation: ext-pulse 1.5s infinite; }\n.ext-hud-badge.loading { background: rgba(245, 158, 11, 0.25); color: #fbbf24; }\n\n.ext-hud-controls {\n  display: flex;\n  gap: 4px;\n}\n\n.ext-btn-icon {\n  background: transparent;\n  border: none;\n  color: #94a3b8;\n  cursor: pointer;\n  padding: 4px;\n  border-radius: 6px;\n  display: flex;\n  align-items: center;\n  justify-content: center;\n  transition: all 0.15s;\n}\n\n.ext-btn-icon:hover {\n  background: rgba(255, 255, 255, 0.1);\n  color: #f1f5f9;\n}\n\n.ext-hud-body {\n  padding: 12px;\n}\n\n.ext-hud-text-preview {\n  max-height: 80px;\n  overflow-y: auto;\n  font-size: 12px;\n  color: #cbd5e1;\n  background: rgba(0, 0, 0, 0.25);\n  border-radius: 6px;\n  padding: 8px;\n  margin-bottom: 10px;\n  border: 1px solid rgba(255, 255, 255, 0.05);\n  word-break: break-word;\n}\n\n.ext-hud-actions {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  gap: 8px;\n}\n\n.ext-btn-primary {\n  background: #3b82f6;\n  color: white;\n  border: none;\n  border-radius: 6px;\n  padding: 6px 12px;\n  font-size: 12px;\n  font-weight: 500;\n  cursor: pointer;\n  display: flex;\n  align-items: center;\n  gap: 6px;\n  transition: background 0.15s;\n}\n\n.ext-btn-primary:hover {\n  background: #2563eb;\n}\n\n.ext-btn-secondary {\n  background: rgba(255, 255, 255, 0.08);\n  color: #cbd5e1;\n  border: 1px solid rgba(255, 255, 255, 0.1);\n  border-radius: 6px;\n  padding: 6px 10px;\n  font-size: 12px;\n  cursor: pointer;\n  transition: background 0.15s;\n}\n\n.ext-btn-secondary:hover {\n  background: rgba(255, 255, 255, 0.15);\n}\n\n.ext-hud-sliders {\n  display: flex;\n  align-items: center;\n  gap: 8px;\n  margin-top: 10px;\n  font-size: 11px;\n  color: #94a3b8;\n}\n\n.ext-hud-sliders input[type=\"range\"] {\n  flex: 1;\n  accent-color: #3b82f6;\n  height: 4px;\n}\n\n@keyframes ext-pulse {\n  0%, 100% { opacity: 1; }\n  50% { opacity: 0.5; }\n}\n\n/* Overlay do Lens */\n.ext-lens-overlay {\n  position: fixed;\n  inset: 0;\n  background: rgba(0, 0, 0, 0.35);\n  z-index: 2147483646;\n  cursor: crosshair;\n}\n\n.ext-lens-box {\n  position: absolute;\n  border: 2px dashed #3b82f6;\n  background: rgba(59, 130, 246, 0.15);\n  pointer-events: none;\n}\n"; module.exports.default=module.exports;
+module.exports="/**\n * @license\n * SPDX-License-Identifier: Apache-2.0\n * \n * Estilos encapsulados do HUD flutuante (injetado via Shadow DOM).\n */\n\n:host {\n  all: initial;\n  position: fixed;\n  z-index: 2147483647;\n  font-family: -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Helvetica, Arial, sans-serif;\n  font-size: 13px;\n  line-height: 1.4;\n  color: #f1f5f9;\n  user-select: none;\n}\n\n.ext-hud-card {\n  box-sizing: border-box;\n  position: fixed;\n  width: 320px;\n  max-height: calc(100vh - 48px);\n  display: flex;\n  flex-direction: column;\n  background: rgba(15, 23, 42, 0.94);\n  backdrop-filter: blur(12px);\n  -webkit-backdrop-filter: blur(12px);\n  border: 1px solid rgba(255, 255, 255, 0.12);\n  border-radius: 12px;\n  box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.5), 0 8px 10px -6px rgba(0, 0, 0, 0.5);\n  overflow: hidden;\n  transition: opacity 0.2s ease, transform 0.2s ease;\n}\n\n.ext-hud-card.hidden {\n  opacity: 0;\n  pointer-events: none;\n  transform: translateY(8px) scale(0.96);\n}\n\n.ext-hud-card[data-minimized=\"true\"]{height:auto!important;min-height:0!important}\n.ext-hud-card[data-minimized=\"true\"]>.ext-hud-body{display:none!important}\n.ext-hud-card,.ext-hud-card *{scrollbar-width:none!important;scrollbar-gutter:auto!important}\n.ext-hud-card::-webkit-scrollbar,.ext-hud-card ::-webkit-scrollbar{display:none!important;width:0!important;height:0!important}\n\n.ext-hud-header {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  padding: 8px 12px;\n  background: rgba(255, 255, 255, 0.04);\n  border-bottom: 1px solid rgba(255, 255, 255, 0.08);\n  cursor: grab;\n  flex-shrink: 0;\n  gap: 6px;\n}\n\n.ext-hud-header:active {\n  cursor: grabbing;\n}\n\n.ext-hud-title {\n  display: flex;\n  align-items: center;\n  gap: 6px;\n  font-weight: 600;\n  font-size: 12px;\n  color: #94a3b8;\n  min-width: 0;\n  white-space: nowrap;\n  overflow: hidden;\n}\n.ext-hud-title>span:first-child{flex:none}\n\n.ext-hud-badge {\n  font-size: 10px;\n  padding: 2px 6px;\n  border-radius: 9999px;\n  font-weight: 500;\n  text-transform: uppercase;\n  min-width: 0;\n  overflow: hidden;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n}\n\n.ext-hud-badge.idle { background: rgba(148, 163, 184, 0.2); color: #94a3b8; }\n.ext-hud-badge.playing { background: rgba(59, 130, 246, 0.25); color: #60a5fa; }\n.ext-hud-badge.recording { background: rgba(239, 68, 68, 0.25); color: #f87171; animation: ext-pulse 1.5s infinite; }\n.ext-hud-badge.loading { background: rgba(245, 158, 11, 0.25); color: #fbbf24; }\n\n.ext-hud-controls {\n  display: flex;\n  gap: 4px;\n  flex: none;\n}\n\n.ext-btn-icon {\n  background: transparent;\n  border: none;\n  color: #94a3b8;\n  cursor: pointer;\n  padding: 4px;\n  border-radius: 6px;\n  display: flex;\n  align-items: center;\n  justify-content: center;\n  transition: all 0.15s;\n}\n\n.ext-btn-icon:hover {\n  background: rgba(255, 255, 255, 0.1);\n  color: #f1f5f9;\n}\n\n.ext-hud-body[hidden]{display:none!important}\n.ext-hud-body {\n  padding: 12px;\n  display: flex;\n  flex-direction: column;\n  min-height: 0;\n  overflow: hidden;\n}\n#ext-global-jobs{display:flex;flex:1;min-height:0}\n#ext-global-jobs>.fm-global-hud{display:flex;flex-direction:column;flex:1;min-height:0}\n#ext-global-jobs>.fm-global-hud>:not(.fm-global-jobs){flex-shrink:0}\n#ext-global-jobs .fm-global-jobs{flex:1;min-height:0}\n\n.ext-hud-text-preview {\n  max-height: 80px;\n  overflow-y: auto;\n  font-size: 12px;\n  color: #cbd5e1;\n  background: rgba(0, 0, 0, 0.25);\n  border-radius: 6px;\n  padding: 8px;\n  margin-bottom: 10px;\n  border: 1px solid rgba(255, 255, 255, 0.05);\n  word-break: break-word;\n}\n\n.ext-hud-actions {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  gap: 8px;\n}\n\n.ext-btn-primary {\n  background: #3b82f6;\n  color: white;\n  border: none;\n  border-radius: 6px;\n  padding: 6px 12px;\n  font-size: 12px;\n  font-weight: 500;\n  cursor: pointer;\n  display: flex;\n  align-items: center;\n  gap: 6px;\n  transition: background 0.15s;\n}\n\n.ext-btn-primary:hover {\n  background: #2563eb;\n}\n\n.ext-btn-secondary {\n  background: rgba(255, 255, 255, 0.08);\n  color: #cbd5e1;\n  border: 1px solid rgba(255, 255, 255, 0.1);\n  border-radius: 6px;\n  padding: 6px 10px;\n  font-size: 12px;\n  cursor: pointer;\n  transition: background 0.15s;\n}\n\n.ext-btn-secondary:hover {\n  background: rgba(255, 255, 255, 0.15);\n}\n\n.ext-hud-sliders {\n  display: flex;\n  align-items: center;\n  gap: 8px;\n  margin-top: 10px;\n  font-size: 11px;\n  color: #94a3b8;\n}\n\n.ext-hud-sliders input[type=\"range\"] {\n  flex: 1;\n  accent-color: #3b82f6;\n  height: 4px;\n}\n\n@keyframes ext-pulse {\n  0%, 100% { opacity: 1; }\n  50% { opacity: 0.5; }\n}\n\n/* Overlay do Lens */\n.ext-lens-overlay {\n  position: fixed;\n  inset: 0;\n  background: rgba(0, 0, 0, 0.35);\n  z-index: 2147483646;\n  cursor: crosshair;\n}\n\n.ext-lens-box {\n  position: absolute;\n  border: 2px dashed #3b82f6;\n  background: rgba(59, 130, 246, 0.15);\n  pointer-events: none;\n}\n"; module.exports.default=module.exports;
 },
 };
 const __cache={}; function __require(id){if(__cache[id])return __cache[id].exports;const fn=__modules[id];if(!fn)throw new Error("Module not found: "+id);const module={exports:{}};__cache[id]=module;fn(module,module.exports,__require);return module.exports;}

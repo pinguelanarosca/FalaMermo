@@ -1,12 +1,13 @@
 class GeminiPcmProcessor extends AudioWorkletProcessor{
  constructor(){
   super();this.queue=[];this.index=0;this.cursor=0;this.totalFrames=0;this.rate=1;this.pitch=1;this.paused=false;this.started=false;this.lastReport=0;
+  this.rendering=false;this.controlSeq=0;
   this.sampleRate=typeof sampleRate==='number'?sampleRate:24000;
   this.retainedFrames=Math.min(this.sampleRate*60,3*1024*1024);
   this.port.onmessage=({data})=>{
    if(data.type==='enqueue'){const frames=new Float32Array(data.buffer);if(frames.length){this.queue.push({frames,blockId:data.blockId,start:this.totalFrames,end:this.totalFrames+frames.length,drained:false});this.totalFrames+=frames.length;}else this.port.postMessage({type:'drain'});}
-   if(data.type==='flush'){this.queue=[];this.index=0;this.cursor=0;this.totalFrames=0;this.started=false;}
-   if(data.type==='pause')this.paused=data.value;
+   if(data.type==='flush'){this.queue=[];this.index=0;this.cursor=0;this.totalFrames=0;this.started=false;this.rendering=false;}
+   if(data.type==='pause'){this.paused=data.value;this.rendering=false;}
    if(data.type==='rate'&&Number.isFinite(data.value))this.rate=Math.max(.5,Math.min(2,data.value));
    if(data.type==='pitch'&&Number.isFinite(data.value))this.pitch=Math.max(.2,Math.min(3,data.value));
    if(data.type==='seek'&&Number.isFinite(data.deltaSeconds)){
@@ -15,7 +16,10 @@ class GeminiPcmProcessor extends AudioWorkletProcessor{
     this.drainThrough(this.cursor);this.report(true);
    }
    // ACK identifies the command actually applied, not merely a delivered message.
-   if(Number.isInteger(data.controlSeq)&&['pause','seek'].includes(data.type))this.port.postMessage({type:'control-ack',controlSeq:data.controlSeq,command:data.type,paused:this.paused,frame:this.cursor,totalFrames:this.totalFrames,availableStart:this.queue[0]?.start||0});
+   if(Number.isInteger(data.controlSeq)&&['pause','seek'].includes(data.type)){
+    this.controlSeq=data.controlSeq;
+    this.port.postMessage({type:'control-ack',controlSeq:data.controlSeq,command:data.type,paused:this.paused,frame:this.cursor,totalFrames:this.totalFrames,availableStart:this.queue[0]?.start||0});
+   }
   };
  }
  drainThrough(cursor){for(const segment of this.queue){if(segment.end>cursor)break;if(!segment.drained){segment.drained=true;this.port.postMessage({type:'drain'});}}}
@@ -37,6 +41,10 @@ class GeminiPcmProcessor extends AudioWorkletProcessor{
    if(!this.started){this.started=true;this.port.postMessage({type:'first-played',blockId:segment.blockId,frames:1});}
    this.cursor=Math.min(this.totalFrames,this.cursor+this.rate*this.pitch);
    if(this.cursor>=segment.end){if(!segment.drained){segment.drained=true;this.port.postMessage({type:'drain'});}this.index++;}
+  }
+  if(Boolean(written)!==this.rendering){
+   this.rendering=Boolean(written);
+   this.port.postMessage({type:'playback-state',rendering:this.rendering,controlSeq:this.controlSeq});
   }
   if(written)this.report();return true;
  }

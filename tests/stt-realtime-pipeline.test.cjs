@@ -8,6 +8,15 @@ function transport(config={}){let now=100,number=0;const timers=new Map(),sent=[
  const queue=new LiveChunkTransport({jobId:'job',config,sendAudio:bytes=>sent.push(bytes.slice()),endAudio:()=>ended.push(true),onPartial:p=>partials.push(p),onChunk:p=>results.push(p),onFailure:e=>errors.push(e),onDiagnostic:p=>diagnostics.push(p),now:()=>now,setTimer:(fn,ms)=>{timers.set(++number,{fn,ms});return number;},clearTimer:id=>timers.delete(id)});
  return{queue,sent,ended,partials,results,errors,diagnostics,timers,advance:ms=>now+=ms,fire:ms=>{for(const[id,t]of [...timers])if(t.ms===ms){timers.delete(id);t.fn();}}};}
 function packetsForTwo(){const e=capture();for(let n=0;n<2;n++){e.pipeline.push(pcm());for(let i=0;i<5;i++)e.pipeline.push(pcm(100,0));}return e.packets;}
+function windowTimerFixture(){let id=0;const timers=new Map(),calls=[];return{timers,calls,setTimer:function(fn,ms){calls.push(['set',this===globalThis]);if(this!==globalThis)throw new TypeError('Illegal invocation: setTimeout');timers.set(++id,{fn,ms});return id;},clearTimer:function(timer){calls.push(['clear',this===globalThis]);if(this!==globalThis)throw new TypeError('Illegal invocation: clearTimeout');timers.delete(timer);},fire(ms){for(const [id,timer]of [...timers])if(timer.ms===ms){timers.delete(id);timer.fn();}}};}
+test('timers Window mantêm receptor no fechamento VAD, parciais, settle e finalização',async()=>{
+ const native=windowTimerFixture(),results=[],errors=[],queue=new LiveChunkTransport({jobId:'job',setTimer:native.setTimer,clearTimer:native.clearTimer,sendAudio(){},endAudio(){},onChunk:result=>results.push(result),onFailure:error=>errors.push(error)});
+ assert.doesNotThrow(()=>{for(const packet of packetsForTwo())queue.submitAudioChunk(packet);});
+ assert.doesNotThrow(()=>queue.receive({inputTranscription:{text:'Primeira.'}}));native.fire(900);assert.equal(results.length,1);const final=queue.finish();queue.receive({inputTranscription:{text:'Segunda.',finished:true}});assert.equal((await final).text,'Primeira. Segunda.');assert.equal(native.timers.size,0);assert.equal(errors.length,0);assert.ok(native.calls.every(([,windowReceiver])=>windowReceiver));
+});
+test('timers Window mantêm receptor no timeout e cancelamento, sem mascarar erro nem deixar timers vivos',async()=>{
+ for(const cancel of [false,true]){const native=windowTimerFixture(),errors=[],queue=new LiveChunkTransport({jobId:'job',setTimer:native.setTimer,clearTimer:native.clearTimer,sendAudio(){},endAudio(){},onFailure:error=>errors.push(error)});for(const packet of packetsForTwo())queue.submitAudioChunk(packet);const final=queue.finish(),failed=assert.rejects(final,error=>error.code===(cancel?'CANCELLED':'CHUNK_TIMEOUT'));if(cancel)assert.doesNotThrow(()=>queue.cancel());else assert.doesNotThrow(()=>native.fire(15000));await failed;assert.equal(native.timers.size,0);assert.equal(queue.pendingBytes,0);assert.equal(errors.length,cancel?0:1);assert.ok(native.calls.every(([,windowReceiver])=>windowReceiver));}
+});
 test('OFF conserva frames legados sem novos cortes; ON envia primeiro PCM antes do Stop',()=>{
  const off=capture(false),on=capture();off.pipeline.push(pcm());on.pipeline.push(pcm());assert.equal(off.packets.length,1);assert.equal(off.packets[0].chunk,undefined);assert.equal(on.packets.length,1);assert.equal(on.packets[0].chunk.status,'streaming');assert.equal(on.packets[0].endOnly,false);assert.equal(on.packets[0].chunk.sequence,1);off.pipeline.finish();assert.equal(off.packets.length,1);
 });
@@ -48,11 +57,37 @@ test('diagnósticos de chunk incluem identidade/tempo e nunca PCM, base64, chave
 test('silêncio depois da fala não cria turno vazio; pre-roll conserva início da próxima fala',()=>{
  const e=capture();e.pipeline.push(pcm());for(let i=0;i<5;i++)e.pipeline.push(pcm(100,0));const closed=e.packets.length;for(let i=0;i<20;i++)e.pipeline.push(pcm(100,0));assert.equal(e.packets.length,closed);assert.ok(e.pipeline.idle.length<=CONFIG.preRollMs*32);e.pipeline.push(pcm());const prefix=e.packets[closed];assert.equal(prefix.chunk.sequence,2);assert.equal(prefix.pcm.length,16000);assert.equal(prefix.chunk.overlapMs,0);for(let i=0;i<5;i++)e.pipeline.push(pcm(100,0));for(let i=0;i<7;i++)e.pipeline.push(pcm(100,0));e.pipeline.finish();assert.equal(e.packets.filter(p=>p.endOnly).length,2);assert.ok(e.diagnostics.some(d=>d.stage==='vad-silence'&&d.skippedSilenceMs>0));
 });
+test('pausa após o máximo de 12s não abre bloco composto só de overlap e silêncio',()=>{
+ const e=capture();for(let i=0;i<120;i++)e.pipeline.push(pcm());
+ const closed=e.packets.length;for(let i=0;i<200;i++)e.pipeline.push(pcm(100,0));
+ assert.equal(e.pipeline.closed,false);assert.equal(e.packets.length,closed,'nenhum novo turno sem fala nova depois do corte máximo');
+ e.pipeline.push(pcm());const resumed=e.packets.slice(closed);assert.equal(resumed[0].chunk.sequence,2);assert.equal(resumed[0].chunk.overlapMs,0,'pausa longa não deve tratar fala anterior como sobreposição adjacente');assert.equal(resumed[0].pcm.length,CONFIG.preRollMs*32);assert.equal(resumed.at(-1).chunk.speechAfterOverlap,true);
+ e.pipeline.finish();assert.equal(e.packets.filter(p=>p.endOnly).length,2);
+});
+test('fim do ditado exatamente no corte máximo não envia cauda repetida ao Gemini',()=>{
+ const e=capture();for(let i=0;i<120;i++)e.pipeline.push(pcm());for(let i=0;i<3;i++)e.pipeline.push(pcm(100,0));e.pipeline.finish();
+ assert.equal(e.packets.filter(p=>p.endOnly).length,1);assert.equal(e.packets.at(-1).chunk.cutReason,'maximum');
+});
+test('pausa curta após o máximo conserva overlap adjacente e todo o PCM de fala nova',()=>{
+ const e=capture();for(let i=0;i<120;i++)e.pipeline.push(pcm());e.pipeline.push(pcm(100,0));assert.equal(e.packets.filter(p=>p.chunk.sequence===2).length,0);e.pipeline.push(pcm());e.pipeline.finish();const second=e.packets.filter(p=>p.chunk.sequence===2);assert.equal(second[0].chunk.overlapMs,200);assert.equal(second[0].pcm.length,9600);assert.equal(second[0].chunk.startMs,11800);assert.equal(second.at(-1).chunk.endMs,12200);assert.equal(second.filter(p=>!p.endOnly).reduce((n,p)=>n+p.pcm.length,0),12800);assert.equal(second.at(-1).chunk.speechAfterOverlap,true);
+});
+test('causa de encerramento sanitizada persiste sem aceitar mensagens, chaves ou conteúdo arbitrário',()=>{
+ const diag=require('../live-stt-diagnostics.js'),jobId='12345678-1234-1234-1234-123456789abc';for(const reason of ['user-stop','user-cancel','origin-lost','context-invalidated','chunk-timeout','socket-error','microphone-ended','worklet-error','context-closed']){const safe=diag.sanitize({jobId,scope:'capture',stage:'capture-ending',stopReason:reason,errorKind:'QUOTA',error:'private-error',text:'private-text',apiKey:'private-key'});assert.equal(safe.stopReason,reason);assert.equal(safe.errorKind,'QUOTA');assert.doesNotMatch(JSON.stringify(safe),/private-/);}const safe=diag.sanitize({jobId,scope:'capture',stage:'capture-ending',stopReason:'private-error'});assert.equal(safe.stopReason,undefined);
+});
 test('transcrição de entrada confirma chunk sem esperar resposta falada/turnComplete do assistente',async()=>{
  const e=transport();for(const p of packetsForTwo())e.queue.submitAudioChunk(p);e.queue.receive({inputTranscription:{text:'Primeira.'}});const timer=[...e.timers.values()].find(t=>t.ms===900);e.queue.receive({modelTurn:{parts:[{inlineData:{data:'IGNORADO'}}]}});assert.ok([...e.timers.values()].includes(timer));e.fire(900);assert.equal(e.results.length,1);assert.equal(e.ended.length,2);const final=e.queue.finish();e.queue.receive({inputTranscription:{text:'Segunda.'}});e.fire(900);assert.equal((await final).text,'Primeira. Segunda.');
 });
 test('turnComplete do assistente anterior não conclui próximo chunk sem transcrição de entrada',async()=>{
  const e=transport();for(const p of packetsForTwo())e.queue.submitAudioChunk(p);e.queue.receive({inputTranscription:{text:'Primeiro.'}});e.fire(900);e.queue.receive({turnComplete:true});e.fire(900);assert.equal(e.results.length,1);assert.equal(e.queue.active.sequence,2);const final=e.queue.finish();e.queue.receive({inputTranscription:{text:'Segundo.'}});e.fire(900);assert.equal((await final).text,'Primeiro. Segundo.');
+});
+test('eventos do assistente não prolongam o settle; só texto novo reinicia a janela',()=>{
+ const e=transport();for(const p of packetsForTwo())e.queue.submitAudioChunk(p);e.queue.receive({inputTranscription:{text:'Primeiro.'}});const timer=[...e.timers].find(([,t])=>t.ms===CONFIG.settleMs)[0];e.queue.receive({turnComplete:true});assert.equal(e.timers.has(timer),true);e.queue.receive({inputTranscription:{text:' Complemento.'}});assert.equal(e.timers.has(timer),false);e.fire(CONFIG.settleMs);assert.equal(e.results[0].text,'Primeiro. Complemento.');e.queue.cancel();
+});
+test('Extended cancela settle quando IN_PROGRESS chega tarde e espera IDLE efetivo',()=>{
+ const e=transport();e.queue.requiresIdle=true;for(const p of packetsForTwo())e.queue.submitAudioChunk(p);e.queue.receive({inputTranscription:{text:'Primeiro.'},interactionStatus:'IDLE'});e.queue.receive({interactionStatus:'IN_PROGRESS'});e.fire(CONFIG.settleMs);assert.equal(e.results.length,0);assert.equal(e.ended.length,1);e.queue.receive({interactionStatus:'IDLE'});e.fire(CONFIG.settleMs);assert.equal(e.results.length,1);assert.equal(e.ended.length,2);e.queue.cancel();
+});
+test('dois ditados podem avançar simultaneamente, mas cada sessão mantém só um bloco ativo',()=>{
+ const first=transport(),second=transport();for(const p of packetsForTwo()){first.queue.submitAudioChunk(p);second.queue.submitAudioChunk(p);}assert.equal(first.ended.length,1);assert.equal(second.ended.length,1);assert.equal(first.queue.active.sequence,1);assert.equal(second.queue.active.sequence,1);second.queue.receive({inputTranscription:{text:'Job B.'},inputFinished:true});second.fire(CONFIG.settleMs);assert.equal(second.queue.active.sequence,2);assert.equal(first.queue.active.sequence,1);assert.equal(first.sent.length,6);first.queue.cancel();second.queue.cancel();
 });
 test('overlap curto não apaga duas palavras legítimas iguais nem toda fala nova',()=>{
  assert.equal(mergeTranscriptionChunks([{sequence:1,text:'Sim, sim.'},{sequence:2,text:'sim sim.',overlapMs:200,speechAfterOverlap:true}]),'Sim, sim. sim.');assert.equal(mergeTranscriptionChunks([{sequence:1,text:'Sim.'},{sequence:2,text:'sim.',overlapMs:200,speechAfterOverlap:true}]),'Sim. sim.');assert.equal(mergeTranscriptionChunks([{sequence:1,text:'Sim.'},{sequence:2,text:'sim.',overlapMs:200,speechAfterOverlap:false}]),'Sim.');

@@ -2,17 +2,17 @@
 
 Extensão Chrome Manifest V3 para narração, ditado e seleção visual com Gemini, agentes personalizados e HUD na página.
 
-FalaMermo v1.0.4 consolida os controles de reprodução global e individual, navegação pelo PCM recebido, HUD/Popup compartilhados e janelas por tarefa. Mantém o scheduler STT para até nove contas, narração literal, agentes e ditado realtime com VAD e parciais. A versão pública e a versão do manifest são `1.0.4`, mantendo Manifest V3. O código está na branch `main`; o pacote instalável e seu checksum acompanham a [release v1.0.4](https://github.com/pinguelanarosca/FalaMermo/releases/tag/v1.0.4).
+FalaMermo v1.0.5 corrige o atalho de ditado, a exclusividade da captura de microfone e os controles de reprodução do HUD, popup e cartões. Os ditados anteriores podem continuar em processamento após a liberação do microfone. A versão do manifest é `1.0.5` e o pacote instalável e seu checksum acompanham a [release v1.0.5](https://github.com/pinguelanarosca/FalaMermo/releases/tag/v1.0.5).
 
 ## Instalação no Chrome
 
-1. Baixe e extraia `FalaMermo-v1.0.4.zip` da [release v1.0.4](https://github.com/pinguelanarosca/FalaMermo/releases/tag/v1.0.4), ou clone [este repositório](https://github.com/pinguelanarosca/FalaMermo) na branch `main`.
+1. Baixe e extraia `FalaMermo-v1.0.5.zip` da [release v1.0.5](https://github.com/pinguelanarosca/FalaMermo/releases/tag/v1.0.5), ou clone [este repositório](https://github.com/pinguelanarosca/FalaMermo) na branch `main`.
 2. Mantenha o código em uma pasta permanente. `manifest.json` deve estar diretamente nessa pasta.
 3. Abra `chrome://extensions`, ative **Modo do desenvolvedor** e escolha **Carregar sem compactação**.
 4. Selecione a pasta extraída, abra as opções da extensão e configure sua chave Gemini.
 5. Atualize as páginas que já estavam abertas. Após atualizar/recarregar a extensão, atualize também essas páginas.
 
-Não há etapa de build obrigatória. Para atualizar uma instalação descompactada, feche trabalhos ativos, atualize o código na mesma pasta já carregada e clique **Recarregar** em `chrome://extensions`. Não remova a extensão nem limpe seu armazenamento; mantenha a pasta para preservar a instalação e as preferências. Atualize também as páginas abertas. Pacotes anteriores não contêm as mudanças da v1.0.4.
+Não há etapa de build obrigatória. Para atualizar uma instalação descompactada, feche trabalhos ativos, atualize o código na mesma pasta já carregada e clique **Recarregar** em `chrome://extensions`. Não remova a extensão nem limpe seu armazenamento; mantenha a pasta para preservar a instalação e as preferências. Atualize também as páginas abertas. Pacotes anteriores não contêm as mudanças da v1.0.5.
 
 ## Configuração e utilização
 
@@ -31,13 +31,13 @@ Atalhos internos padrão: `Ctrl+B` para ler seleção, `Ctrl+Shift+Space` para i
 
 Cada narração e ditado tem um cartão próprio, sincronizado entre páginas, popup, opções e janela individual. Novas tarefas aparecem no topo por data de criação; cartões automáticos começam recolhidos, com chevron, maximizar e X. O X apenas oculta o cartão global, sem parar o job nem apagar o resultado. **Parar** é um controle separado. Ao minimizar o HUD, a barra superior mantém os três controles globais, o badge de atividade e restaurar/fechar; popup e opções continuam acessíveis. A lista do popup tem rolagem própria sem esconder cabeçalho, agente ou player. As barras de rolagem são visualmente ocultas, sem desativar teclado, toque ou roda do mouse.
 
-Os controles globais **⏪ ▶/⏸ ⏩** ficam lado a lado: Pause pausa todas as narrações em reprodução; sem nenhuma reproduzindo, Play retoma somente a pausada mais recentemente. Sem pausadas, Play fica desabilitado e nunca inicia uma tarefa concluída. Cada cartão TTS expandido e sua janela têm **⏪ ▶/⏸ ⏩ ■** individuais; Play explícito após conclusão cria nova reprodução. Volume, velocidade e setas globais afetam a tarefa selecionada; as setas individuais afetam somente seu cartão. Em páginas restritas, consulte e controle as tarefas pelo popup ou pelas opções.
+Os controles globais **⏪ ▶/⏸ ⏩** ficam lado a lado: Pause pausa a narração em reprodução; sem nenhuma reproduzindo, Play retoma a narração pausada selecionada ou a mais recente. Sem pausadas, Play fica desabilitado e nunca inicia uma tarefa concluída. Cada cartão TTS expandido e sua janela têm **⏪ ▶/⏸ ⏩ ■** individuais; Play explícito após conclusão cria nova reprodução. O volume global afeta a saída da extensão. Velocidade e setas globais afetam a narração ativa; os controles individuais afetam somente seu cartão. Em páginas restritas, consulte e controle as tarefas pelo popup ou pelas opções.
 
 A pausa silencia a saída final do grafo de áudio, confirma o worklet pausado e aguarda o AudioContext suspenso. Retomar preserva o cursor e o buffer, restaurando o volume selecionado. Comandos têm sequência e validação de job/player/request; confirmações antigas ou de um player inexistente não devem fabricar o estado Pausado. O progresso expandido mostra contexto, estado do worklet, cursor PCM e último ACK confirmado.
 
 Maximizar abre uma janela redimensionável para o mesmo job, sem duplicá-lo. Nela estão texto completo, cópia, edição e controles individuais. Fechar a janela não interrompe a tarefa. TTS permite edição somente após parar/concluir, não durante pausa. No STT, a edição altera uma cópia de trabalho para eventual narração; a transcrição original, o histórico e o texto já inserido no site não são reescritos. Rascunhos e cópias de trabalho ficam no estado de sessão, não são um backup persistente.
 
-Clique em um cartão para torná-lo ativo para navegação, volume e velocidade. O botão central global mantém sua regra de pausar todas/retomar a última pausada, independentemente dessa seleção. A cópia de texto fica na janela individual ou no histórico; ocultar um cartão ativo não interrompe sua reprodução.
+Clique em um cartão para selecionar a tarefa. O botão central global controla a narração ativa ou retoma uma narração pausada. A cópia de texto fica na janela individual ou no histórico; ocultar um cartão ativo não interrompe sua reprodução.
 
 Use **+** para criar uma tarefa manual com o agente ativo, digite ou cole texto e pressione Play. O rascunho é sincronizado no armazenamento de sessão, sem buscar conteúdo da página. Pare ou aguarde a conclusão para editar novamente; pausa preserva a reprodução atual. Play após conclusão gera uma nova narração pelo mesmo motor TTS. Edições concorrentes são recusadas sem sobrescrever o rascunho local.
 
@@ -112,7 +112,7 @@ O seek exato por palavra ainda está indisponível. No ciclo de correção anter
 
 Não há ganho comparativo de latência comprovado para o scheduler nem teto real de TPM conhecido automaticamente. Os testes reais anteriores do scheduler usaram áudio sintético e não substituem homologação física da instalação atual.
 
-Consulte as [notas da v1.0.4](docs/RELEASE-v1.0.4.md), as [notas da v1.0.3](docs/RELEASE-v1.0.3.md), o [histórico v1.0.2](docs/RELEASE-v1.0.2.md), as [notas v1.0.1](docs/RELEASE-v1.0.1.md) e a [release v1.0.0](https://github.com/pinguelanarosca/FalaMermo/releases/tag/v1.0.0).
+Consulte as [notas da v1.0.5](docs/RELEASE-v1.0.5.md), as [notas da v1.0.4](docs/RELEASE-v1.0.4.md), as [notas da v1.0.3](docs/RELEASE-v1.0.3.md), o [histórico v1.0.2](docs/RELEASE-v1.0.2.md), as [notas v1.0.1](docs/RELEASE-v1.0.1.md) e a [release v1.0.0](https://github.com/pinguelanarosca/FalaMermo/releases/tag/v1.0.0).
 
 ## Validação do código
 

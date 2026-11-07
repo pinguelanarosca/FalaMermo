@@ -22,6 +22,7 @@
   .fm-global-text{white-space:pre-wrap;overflow-wrap:anywhere;max-height:150px;overflow:auto;margin:5px 0 7px;user-select:text!important;-webkit-user-select:text!important;cursor:text}
   .fm-global-label{margin-top:7px}.fm-global-partial{color:#cbd5e1}.fm-global-actions{margin-top:7px}.fm-global-settings{margin-top:7px}.fm-global-settings label{display:flex;gap:5px;align-items:center;flex:1;min-width:120px}.fm-global-settings input{width:85px;flex:1;min-width:35px}.fm-global-feedback,.fm-global-message{min-height:1.3em;font-size:11px;color:#cbd5e1;margin-top:4px}.fm-global-message:empty,.fm-global-feedback:empty{display:none}
   .fm-global-empty{color:#94a3b8;padding:9px 0}.fm-global-hud[data-minimized="true"]>:not(.fm-global-head){display:none}
+  .fm-hud-capture-notice{flex:none;padding:0 12px 8px}
   .fm-global-card[data-active="true"]{border-color:#60a5fa;background:#132039}.fm-global-card:focus-visible{outline:2px solid #60a5fa;outline-offset:1px}
   .fm-global-card-tools{display:flex;gap:4px;align-items:center;flex:none}.fm-global-card-tools button{padding:2px 7px;min-width:26px}.fm-global-summary{color:#94a3b8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:4px}
   .fm-global-editor{display:block;resize:vertical;width:100%;min-height:88px;max-height:180px;padding:7px;background:#111827;color:#f1f5f9;border:1px solid #475569;border-radius:6px;font:inherit;user-select:text;-webkit-user-select:text}
@@ -32,8 +33,10 @@
   function text(value){return typeof value==='string'?value:'';}
   function number(value){return typeof value==='number'&&Number.isFinite(value)?value:null;}
   function can(job,action){const c=job.controls;return Array.isArray(c)?c.includes(action):!!(c&&c[action]);}
+  function audioJob(job){return job?.type==='STT'?{...job,type:'TTS',status:'ready',progress:{},pausedAt:0,error:undefined,warning:undefined,...job.narration}:job;}
+  function audioAvailable(job){return job?.type==='TTS'||['ready','completed','cancelled','error'].includes(job?.status);}
   function availableText(job){return text(job.text)||text(job.partialText);}
-  function seekReason(job,delta){if(job?.type!=='TTS')return 'Selecione uma narração TTS para navegar.';if(!can(job,'seek')||!(job.progress?.availableEnd>0))return 'PCM desta reprodução indisponível; inicie ou aguarde o áudio.';const p=job.progress;if(delta<0&&p.currentTime<=p.availableStart)return 'Início do PCM retido alcançado (até 60 s de retrocesso).';if(delta>0&&p.currentTime>=p.availableEnd)return 'Fim do PCM recebido; aguarde mais áudio ou retroceda.';return '';}
+  function seekReason(job,delta){job=audioAvailable(job)?audioJob(job):null;if(job?.type!=='TTS')return 'Selecione uma narração TTS para navegar.';if(!can(job,'seek')||!(job.progress?.availableEnd>0))return 'PCM desta reprodução indisponível; inicie ou aguarde o áudio.';const p=job.progress;if(delta<0&&p.currentTime<=p.availableStart)return 'Início do PCM retido alcançado (até 60 s de retrocesso).';if(delta>0&&p.currentTime>=p.availableEnd)return 'Fim do PCM recebido; aguarde mais áudio ou retroceda.';return '';}
   function progressLabel(progress){
     if(typeof progress==='number'&&Number.isFinite(progress))return `${Math.round(Math.min(1,Math.max(0,progress))*100)}%`;
     if(!progress||typeof progress!=='object')return '';
@@ -87,14 +90,16 @@
       const row=element('div','fm-global-agent-row'),select=element('select'),settings=element('button','','⚙');select.setAttribute('aria-label','Agente ativo');settings.type='button';settings.title='Configurações';settings.setAttribute('aria-label','Configurações');row.append(select,settings);root.insertBefore(row,list);
       const load=async()=>{try{const {agents={}}=await chrome.storage.local.get('agents');if(destroyed)return;select.replaceChildren();for(const[id,name]of [...AGENTS,...(agents.customAgents||[]).map(a=>[a.metadata?.id,'★ '+(a.metadata?.name||a.metadata?.id)])]){if(!id)continue;const option=element('option','',name);option.value=id;select.append(option);}select.value=agents.activeAgentId||'narrator';}catch{setText(message,'Não foi possível ler o agente ativo.');}};
       select.onchange=async()=>{try{const {agents={}}=await chrome.storage.local.get('agents');await chrome.storage.local.set({agents:{...agents,activeAgentId:select.value}});}catch{setText(message,'Não foi possível alterar o agente.');}};
-      settings.onclick=async()=>{try{await chrome.runtime.openOptionsPage();}catch{setText(message,'Não foi possível abrir as configurações.');}};
+      settings.onclick=async event=>{event.stopPropagation();try{await request('HUD_OPEN_OPTIONS');}catch{setText(message,'Não foi possível abrir as configurações.');}};
       agentListener=(changes,area)=>{if(area==='local'&&changes.agents)void load();};chrome.storage.onChanged?.addListener(agentListener);void load();
     }
     const playerControls={};let playerBusy=0;const pendingSettings=new Map();let settingTask=null;
-    function setPlayerSettings(name,value){const job=activeJob();if(!job||job.type!=='TTS'||!Number.isFinite(value)||destroyed)return Promise.resolve();pendingSettings.set(job.jobId,{...pendingSettings.get(job.jobId),...(job.requestId?{requestId:job.requestId}:{}),[name]:value});if(settingTask)return settingTask;settingTask=(async()=>{try{while(pendingSettings.size&&!destroyed){const[id,values]=pendingSettings.entries().next().value;pendingSettings.delete(id);try{await request('HUD_GLOBAL_COMMAND',{jobId:id,action:'set',...values});}catch(error){setText(message,error.message||'Não foi possível ajustar a reprodução.');}}}finally{settingTask=null;}})();return settingTask;}
+    function setPlayerSettings(name,value){if(!Number.isFinite(value)||destroyed)return Promise.resolve();if(name==='volume')return request('HUD_GLOBAL_SET',{volume:value}).catch(error=>setText(message,error.message));const job=playbackJob();if(!job)return Promise.resolve();pendingSettings.set(job.jobId,{...pendingSettings.get(job.jobId),...(job.requestId?{requestId:job.requestId}:{}),[name]:value});if(settingTask)return settingTask;settingTask=(async()=>{try{while(pendingSettings.size&&!destroyed){const[id,values]=pendingSettings.entries().next().value;pendingSettings.delete(id);try{await request('HUD_GLOBAL_COMMAND',{jobId:id,action:'set',...values});}catch(error){setText(message,error.message||'Não foi possível ajustar a reprodução.');}}}finally{settingTask=null;}})();return settingTask;}
     function activeJob(){return state.jobs.find(job=>job.jobId===(options.jobId||state.activeTaskId))||state.jobs.find(job=>job.type==='TTS')||state.jobs[0];}
+    function playbackActive(job){return job?.status==='playing'||job?.status==='connecting'&&job.progress?.outputActive===true;}
+    function playbackJob(){const audio=state.jobs.filter(audioAvailable).map(audioJob);return audio.find(job=>job.status==='playing')||audio.find(playbackActive)||audio.find(job=>job.jobId===state.playback?.selectedJobId&&job.status==='paused')||audio.filter(job=>job.status==='paused').sort((a,b)=>(b.pausedAt||0)-(a.pausedAt||0)||(b.updatedAt||0)-(a.updatedAt||0))[0];}
     async function playerCommand(action,values={}){
-      const job=activeJob();if(!job||playerBusy&&action!=='seek'||destroyed)return;playerBusy++;renderPlayer();
+      const job=playbackJob();if(!job||playerBusy&&action!=='seek'||destroyed)return;playerBusy++;renderPlayer();
       try{const card=cards.get(job.jobId);if(action==='play'&&card?.dirty&&!await saveDraft(card))return;await request('HUD_GLOBAL_COMMAND',{jobId:job.jobId,action,...(job.requestId?{requestId:job.requestId}:{}),...values});setText(message,'');}
       catch(error){if(!destroyed)setText(message,error.message||'Não foi possível controlar esta tarefa.');}
       finally{playerBusy--;if(!destroyed)renderPlayer();}
@@ -102,19 +107,30 @@
     for(const[action,label,title]of [['previous','⏪','Retroceder 5 segundos'],['toggle','▶','Retomar último pausado'],['next','⏩','Avançar 5 segundos'],['create','+','Criar nova tarefa']]){
       const button=element('button','',label);button.type='button';button.dataset.action=action;button.title=title;button.setAttribute('aria-label',title);playerButtons.append(button);playerControls[action]=button;
     }
-    playerControls.toggle.onclick=async()=>{if(playerBusy||destroyed)return;const action=state.jobs.some(job=>job.type==='TTS'&&job.status==='playing')?'pause':'resume';playerBusy++;renderPlayer();try{await request('HUD_GLOBAL_TOGGLE',{action});setText(message,'');}catch(error){setText(message,error.message);}finally{playerBusy--;if(!destroyed)renderPlayer();}};
+    playerControls.toggle.onclick=async()=>{
+      const job=playbackJob();
+      if(!job||playerBusy||destroyed)return;
+      playerBusy++;renderPlayer();
+      try{
+        await request('HUD_GLOBAL_TOGGLE',{action:playbackActive(job)?'pause':'resume',jobId:job.jobId,...(job.requestId?{requestId:job.requestId}:{})});
+        setText(message,'');
+      }catch(error){setText(message,error.message);}
+      finally{playerBusy--;if(!destroyed)renderPlayer();}
+    };
     playerControls.previous.onclick=()=>seekWords(-1);playerControls.next.onclick=()=>seekWords(1);
-    function seekWords(delta){if(!Number.isInteger(delta)||!delta||seekReason(activeJob(),delta))return Promise.resolve(false);return playerCommand('seek',{deltaSeconds:delta<0?-5:5});}
+    function seekWords(delta){if(!Number.isInteger(delta)||!delta||seekReason(playbackJob(),delta))return Promise.resolve(false);return playerCommand('seek',{deltaSeconds:delta<0?-5:5});}
     playerControls.create.onclick=async()=>{if(playerControls.create.disabled)return;playerControls.create.disabled=true;try{await request('HUD_GLOBAL_CREATE');setText(message,'');const card=cards.get(state.activeTaskId);card?.editor.focus?.();}catch(error){setText(message,error.message||'Não foi possível criar a tarefa.');}finally{if(!destroyed)playerControls.create.disabled=false;}};
     for(const[name,title,min,max,step]of [['volume','Volume',0,1,.05],['playbackRate','Velocidade',.5,2,.1]]){
-      const label=element('label','',title),input=element('input');input.type='range';input.min=String(min);input.max=String(max);input.step=String(step);input.dataset.control=name;input.setAttribute('aria-label',title+' da tarefa ativa');label.append(input);playerSettings.append(label);playerControls[name]=input;input.oninput=()=>{input.title=input.value;return setPlayerSettings(name,Number(input.value));};input.onchange=input.oninput;
+      const label=element('label','',title),input=element('input');input.type='range';input.min=String(min);input.max=String(max);input.step=String(step);input.dataset.control=name;input.setAttribute('aria-label',name==='volume'?'Volume global':title+' da narração ativa');label.append(input);playerSettings.append(label);playerControls[name]=input;input.oninput=()=>{input.title=input.value;return setPlayerSettings(name,Number(input.value));};input.onchange=input.oninput;
     }
-    function renderPlayer(){const job=activeJob(),tts=job?.type==='TTS',playing=state.jobs.some(job=>job.type==='TTS'&&job.status==='playing'),resumable=state.jobs.some(job=>job.type==='TTS'&&job.status==='paused');
+    function renderPlayer(){
+      const job=playbackJob(),tts=!!job,playing=playbackActive(job),resumable=job?.status==='paused';
+      const display=job||state.jobs.filter(audioAvailable).map(audioJob).find(item=>item.status==='connecting');
       if(options.compactControls){options.compactControls.hidden=!state.minimized;for(const action of ['previous','toggle','next']){const button=playerControls[action];if(state.minimized){if(button.parentNode!==options.compactControls)options.compactControls.append(button);}else if(button.parentNode!==playerButtons)playerButtons.insertBefore(button,playerControls.create);}}
-      setText(playerState,job?(job.manual?'Tarefa manual · ':tts?'Narração · ':'Ditado · ')+(STATUS[job.status]||'Processando'):'Nenhuma tarefa ativa');
-      setText(playerControls.toggle,playing?'⏸':'▶');const label=playing?'Pausar todas as narrações':'Retomar a narração pausada mais recentemente';playerControls.toggle.title=label;playerControls.toggle.setAttribute('aria-label',label);playerControls.toggle.disabled=playerBusy||!(playing||resumable);
+      setText(playerState,display?(display.manual?'Tarefa manual · ':'Narração · ')+(STATUS[display.status]||'Processando'):'Nenhuma tarefa ativa');
+      setText(playerControls.toggle,playing?'⏸':'▶');const label=playing?'Pausar narração ativa':'Retomar narração pausada';playerControls.toggle.title=label;playerControls.toggle.setAttribute('aria-label',label);playerControls.toggle.disabled=playerBusy||!(playing||resumable);
       for(const [name,delta]of [['previous',-5],['next',5]]){const reason=seekReason(job,delta),label=(delta<0?'Retroceder':'Avançar')+' 5 segundos';playerControls[name].disabled=!!reason;playerControls[name].title=reason||label;playerControls[name].setAttribute('aria-label',reason||label);}setText(seekNote,[seekReason(job,0),SEEK_LIMITATION].filter(Boolean).join(' '));seekNote.hidden=false;player.hidden=!!options.jobId;
-      for(const name of ['volume','playbackRate']){const input=playerControls[name];input.disabled=!tts;if(doc.activeElement!==input)input.value=String(number(job?.[name]??job?.progress?.[name])??1);input.title=input.value;}
+      for(const name of ['volume','playbackRate']){const input=playerControls[name];input.disabled=name!=='volume'&&!tts;if(doc.activeElement!==input)input.value=String(name==='volume'?(number(state.playback?.volume)??1):(number(job?.[name]??job?.progress?.[name])??1));input.title=input.value;}
     }
     async function saveDraft(card){if(!card.dirty)return Promise.resolve(true);if(card.saving)return card.saving;card.saving=(async()=>{try{while(card.dirty&&!destroyed){const value=card.editor.value,expectedText=card.editBase;await request('HUD_GLOBAL_COMMAND',{jobId:card.job.jobId,action:'edit',text:value,expectedText});card.editBase=value;if(card.editor.value===value)card.dirty=false;}return !card.dirty;}catch(error){if(!destroyed)setText(card.feedback,error.message||'Edição não salva. Copie seu texto antes de fechar.');return false;}finally{card.saving=null;if(!destroyed){renderCard(card,card.job);renderPlayer();}}})();return card.saving;}
     function createCard(id){
@@ -133,7 +149,7 @@
         if(destroyed||card.busy.has(action)&&action!=='seek')return;
         if(['remove','maximize'].includes(action)&&card.dirty&&!await saveDraft(card))return;
         card.busy.add(action);renderCard(card,card.job);
-        try{await request('HUD_GLOBAL_COMMAND',{jobId:id,action,...(['stop','pause','resume','seek','set'].includes(action)&&card.job.requestId?{requestId:card.job.requestId}:{}),...(['play','narrate'].includes(action)?{expectedText:card.editBase}:{}),...values});if(!destroyed)setText(feedback,'');}
+        try{await request('HUD_GLOBAL_COMMAND',{jobId:id,action,...(['stop','pause','resume','seek','set'].includes(action)&&audioJob(card.job).requestId?{requestId:audioJob(card.job).requestId}:{}),...(['play','narrate'].includes(action)?{expectedText:card.editBase}:{}),...values});if(!destroyed)setText(feedback,'');}
         catch(error){if(!destroyed)setText(feedback,'Não foi possível aplicar o comando a esta tarefa. '+error.message+' O texto disponível foi preservado.');}
         finally{card.busy.delete(action);if(!destroyed&&cards.has(id))renderCard(card,card.job);}
       }
@@ -150,25 +166,27 @@
         finally{card.busy.delete(action);if(!destroyed&&cards.has(id))renderCard(card,card.job);}
       }
       button('previous','⏪',()=>seekReason(card.job,-5)?undefined:command('seek',{deltaSeconds:-5}));
-      button('playPause','▶',async()=>{if(card.dirty&&!await saveDraft(card))return;return command(card.job.status==='playing'?'pause':card.job.status==='paused'?'resume':'play');});
+      button('playPause','▶',async()=>{if(card.dirty&&!await saveDraft(card))return;const status=audioJob(card.job).status;return command(['playing','connecting'].includes(status)?'pause':status==='paused'?'resume':'play');});
       button('next','⏩',()=>seekReason(card.job,5)?undefined:command('seek',{deltaSeconds:5}));const stop=button('stop','■',()=>command('stop'));stop.title='Parar esta tarefa';stop.setAttribute('aria-label',stop.title);if(options.jobId){button('copy','Copiar texto',()=>copy());button('narrate','Narrar cópia de trabalho',async()=>{if(card.dirty&&!await saveDraft(card))return;return command('narrate');});}
+      const volumeLabel=element('label','','Volume'),volume=element('input');volume.type='range';volume.min='0';volume.max='1';volume.step='.05';volume.dataset.cardControl='volume';volume.setAttribute('aria-label','Volume desta tarefa');volumeLabel.append(volume);settings.append(volumeLabel);card.volume=volume;volume.oninput=()=>{const value=Number(volume.value);card.pendingVolume=value;if(card.volumeTask)return card.volumeTask;card.volumeTask=(async()=>{try{while(card.pendingVolume!==undefined&&!destroyed){const next=card.pendingVolume;card.pendingVolume=undefined;await command('set',{volume:next});}}finally{card.volumeTask=null;}})();return card.volumeTask;};volume.onchange=volume.oninput;
       const collapse=button('collapse','⌃',()=>command('collapse',{collapsed:!card.job.collapsed})),maximize=button('maximize','↗',()=>command('maximize')),remove=button('remove','×',()=>command('remove'));tools.append(collapse,maximize,remove);maximize.title='Abrir janela da tarefa';maximize.setAttribute('aria-label',maximize.title);remove.title='Ocultar cartão sem parar a tarefa';remove.setAttribute('aria-label',remove.title);
       node.onclick=event=>{if(event?.target?.closest?.('button,input,textarea,select,a'))return;return command('select');};node.onkeydown=event=>{if(event.target===node&&(event.key==='Enter'||event.key===' ')){event.preventDefault();void command('select');}};
       editor.oninput=()=>{card.dirty=true;renderPlayer();return saveDraft(card);};editor.onchange=()=>saveDraft(card);
       return card;
     }
     function renderCard(card,job){
-      if(!job)return;card.job=job;
-      setText(card.kind,job.type==='STT'?'🎙 Ditado':job.manual?'✎ Manual':'🔊 Narração');setText(card.status,STATUS[job.status]||'Em andamento');card.node.dataset.active=String(activeJob()?.jobId===job.jobId);card.node.setAttribute('aria-current',String(activeJob()?.jobId===job.jobId));
+      if(!job)return;card.job=job;const audio=audioJob(job),available=audioAvailable(job);
+      setText(card.kind,job.type==='STT'?'🎙 Ditado':job.manual?'✎ Manual':'🔊 Narração');setText(card.status,job.type==='STT'&&job.narration&&!['ready','completed','cancelled','error'].includes(audio.status)?'Narração · '+(STATUS[audio.status]||'Gerando'):(STATUS[job.status]||'Em andamento'));card.node.dataset.active=String(activeJob()?.jobId===job.jobId);card.node.setAttribute('aria-current',String(activeJob()?.jobId===job.jobId));
       const short=availableText(job).replace(/\s+/g,' ').trim().slice(0,80)||(job.manual?'Texto manual':job.type==='STT'?'Microfone':'Gemini Live');setText(card.description,short);card.description.title=short;
       const source=job.origin||{};setText(card.origin,number(source.tabId)!==null&&source.tabId>0?`Origem: aba ${source.tabId}${number(source.frameId)!==null&&source.frameId!==0?' · frame '+source.frameId:''}`:'Origem: painel da extensão');if(options.jobId)setText(card.origin,card.origin.textContent+' · Agente: '+text(job.agentId)+' · Criado: '+(Number.isFinite(job.createdAt)?new Date(job.createdAt).toLocaleString('pt-BR'):'—')+' · ID: '+job.jobId);
-      setText(card.progress,progressLabel(job.progress));card.progress.hidden=!card.progress.textContent;
+      setText(card.progress,progressLabel(job.narration?.progress||job.progress));card.progress.hidden=!card.progress.textContent;
       setText(card.label,job.type==='TTS'?'Texto da narração':'Transcrição confirmada');setText(card.body,text(job.text));card.body.hidden=card.label.hidden=!job.text;
       setText(card.partial,text(job.partialText));card.partial.hidden=card.partialLabel.hidden=!job.partialText;
       card.editor.hidden=!(job.manual||options.jobId);card.editor.disabled=!can(job,'edit');if(!card.dirty){card.editBase=text(job.type==='STT'?job.workingText??job.text:job.text);if(card.editor.value!==card.editBase)card.editor.value=card.editBase;}if(job.type==='STT')card.editor.setAttribute('aria-label','Cópia de trabalho (não altera transcrição nem texto inserido)');else card.editor.setAttribute('aria-label','Texto da narração');if(!card.editor.hidden&&job.type==='TTS')card.body.hidden=true;
       const collapsed=job.collapsed===true&&!options.jobId;card.node.dataset.collapsed=String(collapsed);card.detail.hidden=collapsed;card.origin.hidden=collapsed;card.progress.hidden=collapsed||!card.progress.textContent;card.actions.hidden=collapsed;card.summary.hidden=true;card.feedback.hidden=collapsed;
       const collapse=card.buttons.collapse;setText(collapse,job.collapsed?'⌄':'⌃');collapse.title=job.collapsed?'Expandir tarefa':'Recolher tarefa';collapse.setAttribute('aria-label',collapse.title);collapse.setAttribute('aria-expanded',String(!job.collapsed));
       const notes=[];
+      if(audio.warning||audio.error&&job.type==='STT')notes.push(text(audio.warning||audio.error));
       if(job.status==='error'&&job.error)notes.push(text(job.error));
       if(job.incomplete)notes.push('Resultado incompleto.');
       if(job.historyStatus==='failed')notes.push('Não foi possível salvar o histórico; copie o resultado disponível nesta sessão.');
@@ -176,11 +194,11 @@
       if(job.type==='STT'&&job.originAvailable===false&&!job.insertion?.inserted&&!['options.html'].includes(job.origin?.page))notes.push('Destino original indisponível; nenhum texto será inserido nesta aba.');
       if(job.type==='STT'&&job.insertion&&job.insertion.inserted===false&&job.insertion.reason!=='OPTIONS_PREVIEW')notes.push('Inserção não confirmada. Copie o texto para recuperá-lo.');
       setText(card.note,notes.join(' '));card.note.hidden=collapsed||!notes.length;
-      for(const action of ['stop','remove']){const b=card.buttons[action];b.hidden=action==='stop'&&job.type==='TTS'?false:!can(job,action);b.disabled=!can(job,action)||card.busy.has(action);}collapse.disabled=card.busy.has('collapse');
-      for(const [action,delta]of [['previous',-5],['next',5]]){const b=card.buttons[action],reason=seekReason(job,delta);b.hidden=job.type!=='TTS';b.disabled=!!reason;b.title=reason||(delta<0?'Retroceder':'Avançar')+' 5 segundos nesta tarefa';b.setAttribute('aria-label',b.title);}
+      for(const action of ['stop','remove']){const b=card.buttons[action];b.hidden=action==='stop'&&available?false:!can(job,action);b.disabled=!can(job,action)||card.busy.has(action);}collapse.disabled=card.busy.has('collapse');
+      for(const [action,delta]of [['previous',-5],['next',5]]){const b=card.buttons[action],reason=seekReason(job,delta);b.hidden=!available;b.disabled=!!reason;b.title=reason||(delta<0?'Retroceder':'Avançar')+' 5 segundos nesta tarefa';b.setAttribute('aria-label',b.title);}
       if(card.buttons.copy){card.buttons.copy.hidden=false;card.buttons.copy.disabled=card.busy.has('copy');card.buttons.narrate.hidden=job.type!=='STT';card.buttons.narrate.disabled=!can(job,'edit')||!(job.workingText??job.text).trim();}
-      const toggle=card.buttons.playPause;toggle.hidden=job.type!=='TTS';toggle.disabled=card.busy.has('pause')||card.busy.has('resume')||card.busy.has('play')||!(can(job,'pause')||can(job,'resume')||can(job,'play'));setText(toggle,job.status==='playing'?'⏸':'▶');toggle.title=job.status==='playing'?'Pausar esta tarefa':job.status==='paused'?'Retomar esta tarefa':'Reproduzir esta tarefa do início';toggle.setAttribute('aria-label',toggle.title);card.buttons.maximize.hidden=card.buttons.collapse.hidden=!!options.jobId;
-      card.settings.hidden=true;
+      const toggle=card.buttons.playPause;toggle.hidden=!available;toggle.disabled=card.busy.has('pause')||card.busy.has('resume')||card.busy.has('play')||!(can(job,'pause')||can(job,'resume')||can(job,'play'));setText(toggle,['playing','connecting'].includes(audio.status)?'⏸':'▶');toggle.title=['playing','connecting'].includes(audio.status)?'Pausar esta tarefa':audio.status==='paused'?'Retomar esta tarefa':'Reproduzir esta tarefa do início';toggle.setAttribute('aria-label',toggle.title);card.buttons.maximize.hidden=card.buttons.collapse.hidden=!!options.jobId;
+      card.settings.hidden=collapsed||!available;card.volume.disabled=!can(job,'volume');if(doc.activeElement!==card.volume&&!card.volumeTask)card.volume.value=String(audio.progress?.volume??1);
     }
     function update(next){
       if(destroyed||!next||typeof next!=='object')return false;

@@ -3,7 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
 const root = path.resolve(__dirname, '..');
-const PUBLIC_VERSION = '1.0.4';
+const PUBLIC_VERSION = '1.0.5';
 const runtimeFiles = [
     'manifest.json', 'background.js', 'content.js', 'content.css',
     'popup.html', 'popup.js', 'options.html', 'options.js', 'task.html', 'task.js',
@@ -14,10 +14,10 @@ const runtimeFiles = [
     'icons/icon16.png', 'icons/icon48.png', 'icons/icon128.png',
 ];
 function publicFiles() {
-    return [...runtimeFiles, 'README.md', '.gitignore', 'docs/RELEASE-v1.0.0.md', 'docs/RELEASE-v1.0.1.md', 'docs/RELEASE-v1.0.2.md', 'docs/RELEASE-v1.0.3.md', 'docs/RELEASE-v1.0.4.md',
+    return [...runtimeFiles, 'README.md', '.gitignore', 'docs/RELEASE-v1.0.0.md', 'docs/RELEASE-v1.0.1.md', 'docs/RELEASE-v1.0.2.md', 'docs/RELEASE-v1.0.3.md', 'docs/RELEASE-v1.0.4.md', 'docs/RELEASE-v1.0.5.md',
         'tools/verify-publication.cjs', 'tools/package-release.cjs',
         ...fs.readdirSync(path.join(root, 'tests')).filter(name =>
-            name.endsWith('.test.cjs') || name === 'load-background.cjs').map(name => 'tests/' + name)].sort();
+            name.endsWith('.test.cjs') || ['load-background.cjs', 'controls-chrome.cjs', 'audio-controls-browser.html', 'audio-controls-browser.js', 'stt-native-browser.html', 'AUDIO-CONTROLS.md'].includes(name)).map(name => 'tests/' + name)].sort();
 }
 const secretRules = [
     ['Google API key', /AIza[0-9A-Za-z_-]{35}/g],
@@ -64,7 +64,7 @@ function verify(directory = root, files = publicFiles(), {syntax = true} = {}) {
         if (file.endsWith('.html')) {
             const html = fs.readFileSync(path.join(directory, file), 'utf8');
             for (const match of html.matchAll(/(?:src|href)=["']([^"']+)["']/g)) {
-                if (!/^(?:https?:|#|data:)/.test(match[1])) resources.push(path.posix.join(path.posix.dirname(file), match[1]));
+                if (!/^(?:https?:|#|data:)/.test(match[1])) resources.push(match[1].startsWith('/') ? match[1].slice(1) : path.posix.join(path.posix.dirname(file), match[1]));
             }
         }
         if (file.endsWith('.js')) {

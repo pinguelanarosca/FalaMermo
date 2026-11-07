@@ -148,7 +148,7 @@ test('offscreen separa abas e conserva volume/velocidade e eventos nativos', asy
 test('offscreen ignora comandos atrasados da narração anterior', async () => {
     const env = createOffscreen();
     const request = { tabId: 1, playerId: 'one', requestId: 'r1', operation: 'PLAY', src: 'data:audio/wav;base64,' + base64 };
-    await env.command(request); await env.command({ ...request, requestId: 'r2' });
+    await env.command(request); await env.command({...request,operation:'STOP'});await env.command({ ...request, requestId: 'r2' });
     await env.command({ ...request, operation: 'PAUSE' });
     assert.equal(env.audios[1].paused, false);
 });

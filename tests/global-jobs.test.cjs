@@ -87,17 +87,21 @@ function backgroundEnvironment(options={}){
  const router=load('extension/src/background/messageRouter.ts'),original={tab:{id:1},frameId:2,documentId:'doc-original',url:'https://example.invalid/'};
  return{context,routes,sent,router,original,sessionData,runtimeJobs,history:()=>history,offscreenCloses:()=>offscreenCloses,run:(type,payload,sender=original)=>router.handleExtensionMessage({type,payload},sender)};
 }
+test('STT realtime suspende transformação efetiva sem apagar preferência ou instrução do agente',async()=>{
+ const e=backgroundEnvironment(),agent={metadata:{id:'custom-stt',isBuiltIn:false},instructions:{sttFormattingInstruction:'Formate o texto público.'},live:{stt:{transform:true,preferredModel:'gemini-3.8-live'}}},before=JSON.stringify(agent),sender={url:'chrome-extension://test/options.html'};
+ for(const realtime of [true,false]){const jobId='transform-'+realtime;assert.equal((await e.run('STT_LIVE_START',{jobId,previewAgent:agent,realtime,chunked:true},sender)).success,true);const payload=e.routes.filter(p=>p.operation==='STT_LIVE_START').at(-1);assert.equal(payload.transformInstruction,realtime?null:agent.instructions.sttFormattingInstruction);await e.run('HUD_CAPTURE_STATE',{jobId,microphoneReleased:true},sender);await e.run('STT_LIVE_CANCEL',{jobId},sender);assert.equal(JSON.stringify(agent),before);}
+});
 test('background sincroniza viewers distintos e controles globais só param o job escolhido na origem',async()=>{
  const e=backgroundEnvironment();await e.run('HUD_GLOBAL_GET',{},e.original);await e.run('HUD_GLOBAL_GET',{},{tab:{id:2},frameId:0,documentId:'viewer',url:'https://viewer.invalid/'});
- await e.run('STT_LIVE_START',{jobId:'s1',agentId:'narrator'});await e.run('STT_LIVE_START',{jobId:'s2',agentId:'narrator'});await e.run('TTS_REQUEST',{text:'Narração de teste',agentId:'narrator'});
- const state=(await e.run('HUD_GLOBAL_GET')).state;assert.equal(state.jobs.length,3);assert.ok(e.sent.some(item=>item.tabId===2&&item.message?.type==='HUD_GLOBAL_STATE'));
- const before=e.sent.length;await e.run('HUD_GLOBAL_COMMAND',{jobId:'s1',action:'stop'},{url:'chrome-extension://test/popup.html'});const command=e.sent.slice(before).find(item=>item.message?.type==='STT_GLOBAL_STOP');assert.equal(command.tabId,1);assert.equal(command.options.documentId,'doc-original');assert.equal(command.message.payload.jobId,'s1');assert.equal((await e.run('HUD_GLOBAL_GET')).state.jobs.find(j=>j.jobId==='s2').status,'connecting');
+ await e.run('STT_LIVE_START',{jobId:'s1',agentId:'narrator'});assert.equal((await e.run('STT_LIVE_START',{jobId:'s2',agentId:'narrator'})).success,false);await e.run('TTS_REQUEST',{text:'Narração de teste',agentId:'narrator'});
+ const state=(await e.run('HUD_GLOBAL_GET')).state;assert.equal(state.jobs.length,2);assert.ok(e.sent.some(item=>item.tabId===2&&item.message?.type==='HUD_GLOBAL_STATE'));
+ const before=e.sent.length;await e.run('HUD_GLOBAL_COMMAND',{jobId:'s1',action:'stop'},{url:'chrome-extension://test/popup.html'});const command=e.sent.slice(before).find(item=>item.message?.type==='STT_GLOBAL_STOP');assert.equal(command.tabId,1);assert.equal(command.options.documentId,'doc-original');assert.equal(command.message.payload.jobId,'s1');assert.equal((await e.run('HUD_GLOBAL_GET')).state.jobs.find(j=>j.jobId==='s2'),undefined);
  assert.equal((await e.run('STT_LIVE_AUDIO',{jobId:'s2',audioBase64:'no-private-audio'},{tab:{id:2},frameId:2,documentId:'viewer',url:'https://viewer.invalid/'})).success,false);
 });
 test('background cria manual e X só oculta a tarefa sem parar sua reprodução',async()=>{
  const e=backgroundEnvironment(),sender={url:'chrome-extension://test/popup.html'};const created=await e.run('HUD_GLOBAL_CREATE',{},sender);assert.equal(created.success,true);const jobId=created.state.activeTaskId;assert.equal(created.state.jobs[0].manual,true);assert.equal(e.routes.length,0);await e.run('HUD_GLOBAL_COMMAND',{jobId,action:'edit',text:'Texto público manual.',expectedText:''},sender);
  const played=await e.run('HUD_GLOBAL_COMMAND',{jobId,action:'play'},sender);assert.equal(played.success,true);const start=e.routes.find(p=>p.operation==='TTS_LIVE_START');assert.equal(start.jobId,jobId);assert.equal(start.text,'Texto público manual.');assert.equal(start.agentId,created.state.jobs[0].agentId);
- const duplicate=await e.run('HUD_GLOBAL_COMMAND',{jobId,action:'play'},sender);assert.equal(duplicate.success,false);assert.equal(e.routes.filter(p=>p.operation==='TTS_LIVE_START').length,1);
+ const duplicate=await e.run('HUD_GLOBAL_COMMAND',{jobId,action:'play'},sender);assert.equal(duplicate.success,true);assert.equal(e.routes.filter(p=>p.operation==='TTS_LIVE_START').length,1);
  await e.run('TTS_REQUEST',{text:'Outra narração.'});await e.run('LIVE_OFFSCREEN_EVENT',{jobId,event:'play',eventSeq:1},{url:'chrome-extension://test/offscreen.html'});await e.run('HUD_GLOBAL_COMMAND',{jobId,action:'pause'},sender);await e.run('HUD_GLOBAL_COMMAND',{jobId,action:'resume'},sender);await e.run('HUD_GLOBAL_COMMAND',{jobId,action:'set',volume:.25,playbackRate:1.5},sender);await e.run('HUD_GLOBAL_COMMAND',{jobId,action:'remove'},sender);
  assert.deepEqual(e.routes.filter(p=>['PAUSE','RESUME','SET','STOP'].includes(p.operation)).map(p=>[p.operation,p.jobId]),[['PAUSE',jobId],['RESUME',jobId],['SET',jobId]]);
  const state=(await e.run('HUD_GLOBAL_GET',{},sender)).state;assert.equal(state.jobs.length,2);assert.equal(state.jobs.find(j=>j.jobId===jobId).hidden,true);assert.ok(state.jobs.some(j=>j.text==='Outra narração.'));assert.equal((await e.run('LIVE_OFFSCREEN_EVENT',{jobId,requestId:start.requestId,event:'ended',eventSeq:200},{url:'chrome-extension://test/offscreen.html'})).success,true);assert.equal((await e.run('HUD_GLOBAL_GET')).state.jobs.find(j=>j.jobId===jobId).status,'completed');
@@ -109,8 +113,8 @@ test('menu único Narrar encaminha seleção sem forçar agente; atalhos permane
  const manifest=JSON.parse(fs.readFileSync(require.resolve('../manifest.json'),'utf8'));assert.ok(manifest.commands.read_selection);assert.ok(manifest.commands.start_dictation);assert.ok(manifest.commands.toggle_hud);const source=fs.readFileSync(require.resolve('../content.js'),'utf8');assert.match(source,/cachedShortcuts\.lens/);assert.match(source,/cachedShortcuts\.startDictation/);
 });
 test('X no STT apenas oculta cartão: gravação, origem e inserção permanecem intactas',async()=>{
- const e=backgroundEnvironment();await e.run('STT_LIVE_START',{jobId:'remove-stt'});await e.run('STT_LIVE_START',{jobId:'keep-stt'});const before=e.sent.length;assert.equal((await e.run('HUD_GLOBAL_COMMAND',{jobId:'remove-stt',action:'remove'},{url:'chrome-extension://test/popup.html'})).success,true);
- const sent=e.sent.slice(before);assert.ok(!sent.some(p=>p.message?.type==='STT_LIVE_EVENT'||p.message?.type==='STT_GLOBAL_STOP'));assert.ok(!e.routes.some(p=>p.operation==='STT_LIVE_CANCEL'));const state=(await e.run('HUD_GLOBAL_GET')).state;assert.equal(state.jobs.length,2);assert.equal(state.jobs.find(j=>j.jobId==='remove-stt').hidden,true);assert.equal(state.jobs.find(j=>j.jobId==='remove-stt').status,'connecting');
+ const e=backgroundEnvironment();await e.run('STT_LIVE_START',{jobId:'remove-stt'});const before=e.sent.length;assert.equal((await e.run('HUD_GLOBAL_COMMAND',{jobId:'remove-stt',action:'remove'},{url:'chrome-extension://test/popup.html'})).success,true);
+ const sent=e.sent.slice(before);assert.ok(!sent.some(p=>p.message?.type==='STT_LIVE_EVENT'||p.message?.type==='STT_GLOBAL_STOP'));assert.ok(!e.routes.some(p=>p.operation==='STT_LIVE_CANCEL'));const state=(await e.run('HUD_GLOBAL_GET')).state;assert.equal(state.jobs.length,1);assert.equal(state.jobs.find(j=>j.jobId==='remove-stt').hidden,true);assert.equal(state.jobs.find(j=>j.jobId==='remove-stt').status,'connecting');
 });
 test('background navegação/fechamento finaliza somente STT da origem e nunca manda STOP_TAB/TTS stop',async()=>{
  const e=backgroundEnvironment();await e.run('STT_LIVE_START',{jobId:'s1',agentId:'narrator'});await e.run('TTS_REQUEST',{text:'Texto sintético',agentId:'narrator'});await e.router.originLost({tabId:1});
@@ -146,9 +150,9 @@ test('falha de histórico não impede persistir/confirmar final e mantém texto 
  const e=environment(),warnings=[],r=GlobalJobs.create({...e.services,updateHistory:async()=>{throw Error('quota failure with private details');},warn:message=>warnings.push(message)});await r.start(job('s1'));await r.event({jobId:'s1',event:'stt-final',text:'texto público final',eventSeq:2});await r.insertion({jobId:'s1',inserted:false,reason:'TARGET_REMOVED'},origin);const state=await r.get();assert.equal(state.jobs[0].status,'completed');assert.equal(state.jobs[0].historyStatus,'failed');assert.equal(state.jobs[0].text,'texto público final');assert.equal(state.jobs[0].controls.copy,true);assert.equal(e.data[GlobalJobs.STORAGE_KEY].jobs[0].historyStatus,'failed');assert.ok(warnings.length);assert.ok(!warnings.join(' ').includes('private'));assert.equal((await r.event({jobId:'s1',event:'stt-final',text:'late',eventSeq:2})).changed,false);
 });
 test('Parar aguardando Gemini cancela somente job escolhido e conserva parcial; flush não é interrompido',async()=>{
- const e=backgroundEnvironment();await e.run('STT_LIVE_START',{jobId:'s1',agentId:'narrator'});await e.run('STT_LIVE_START',{jobId:'s2',agentId:'narrator'});await e.run('LIVE_OFFSCREEN_EVENT',{jobId:'s1',event:'stt-partial',text:'parcial recebido',eventSeq:1},{url:'chrome-extension://test/offscreen.html'});await e.run('HUD_CAPTURE_STATE',{jobId:'s1',status:'waiting',microphoneReleased:true});await e.run('HUD_GLOBAL_COMMAND',{jobId:'s1',action:'stop'},{url:'chrome-extension://test/popup.html'});
+ const e=backgroundEnvironment();await e.run('STT_LIVE_START',{jobId:'s1',agentId:'narrator'});await e.run('LIVE_OFFSCREEN_EVENT',{jobId:'s1',event:'stt-partial',text:'parcial recebido',eventSeq:1},{url:'chrome-extension://test/offscreen.html'});await e.run('HUD_CAPTURE_STATE',{jobId:'s1',status:'waiting',microphoneReleased:true});await e.run('HUD_GLOBAL_COMMAND',{jobId:'s1',action:'stop'},{url:'chrome-extension://test/popup.html'});
  assert.ok(e.routes.some(command=>command.operation==='STT_LIVE_CANCEL'&&command.jobId==='s1'));assert.ok(!e.routes.some(command=>command.operation==='STT_LIVE_CANCEL'&&command.jobId==='s2'));let state=(await e.run('HUD_GLOBAL_GET')).state;assert.equal(state.jobs.find(j=>j.jobId==='s1').status,'cancelled');assert.equal(state.jobs.find(j=>j.jobId==='s1').partialText,'parcial recebido');assert.equal(e.history().recentItems[0].incomplete,true);
- await e.run('HUD_CAPTURE_STATE',{jobId:'s2',status:'flushing'});state=(await e.run('HUD_GLOBAL_GET')).state;assert.equal(state.jobs.find(j=>j.jobId==='s2').controls.stop,false);assert.equal((await e.run('HUD_GLOBAL_COMMAND',{jobId:'s2',action:'stop'})).success,false);
+ assert.equal((await e.run('STT_LIVE_START',{jobId:'s2',agentId:'narrator'})).success,true);await e.run('HUD_CAPTURE_STATE',{jobId:'s2',status:'flushing'});state=(await e.run('HUD_GLOBAL_GET')).state;assert.equal(state.jobs.find(j=>j.jobId==='s2').controls.stop,false);assert.equal((await e.run('HUD_GLOBAL_COMMAND',{jobId:'s2',action:'stop'})).success,false);
 });
 test('idle só fecha offscreen após conclusão global e nova checagem de ausência de jobs',async()=>{
  const e=backgroundEnvironment(),offscreen={url:'chrome-extension://test/offscreen.html'};await e.run('TTS_REQUEST',{text:'frase sintética',agentId:'narrator'});const jobId=(await e.run('HUD_GLOBAL_GET')).state.jobs[0].jobId;await e.run('LIVE_OFFSCREEN_IDLE',{},offscreen);assert.equal(e.offscreenCloses(),0);await e.run('LIVE_OFFSCREEN_EVENT',{jobId,event:'ended',eventSeq:1},offscreen);await e.run('LIVE_OFFSCREEN_IDLE',{},offscreen);assert.equal(e.offscreenCloses(),0,'snapshot ainda ativo impede fechamento');e.runtimeJobs.clear();await e.run('LIVE_OFFSCREEN_IDLE',{},offscreen);assert.equal(e.offscreenCloses(),1);
@@ -203,17 +207,17 @@ test('rotação do cache não descarta edição TTS nem cópia STT ainda não ar
  const e=environment({history:{enabled:true,maxEntries:1,recentItems:[]}}),r=e.registry;await r.start(job('audio','TTS',{text:'Já narrado.'}));await r.event({jobId:'audio',event:'ended',eventSeq:1});await r.edit({jobId:'audio',text:'Edição ainda não narrada.'});await r.start(job('speech'));await r.event({jobId:'speech',event:'stt-final',text:'Original.',eventSeq:1});await r.insertion({jobId:'speech',inserted:true},origin);await r.edit({jobId:'speech',text:'Cópia não arquivada.'});await r.start(job('new','TTS',{text:'Novo.'}));await r.event({jobId:'new',event:'ended',eventSeq:1});
  const state=await r.get();assert.equal(state.jobs.find(j=>j.jobId==='audio').text,'Edição ainda não narrada.');assert.equal(state.jobs.find(j=>j.jobId==='speech').workingText,'Cópia não arquivada.');await r.clearHistory();assert.deepEqual((await r.get()).jobs.map(j=>j.jobId),['audio']);
 });
-test('Play global pausa todas, inclusive ocultas/Options, e retoma só a pausada mais recente',async()=>{
+test('Play global pausa a reprodução ativa oculta e retoma a selecionada',async()=>{
  const e=backgroundEnvironment(),offscreen={url:'chrome-extension://test/offscreen.html'},panel={url:'chrome-extension://test/task.html?jobId=anything'};
  for(const [text,sender]of [['um',e.original],['dois',{tab:{id:3},frameId:0,documentId:'other',url:'https://other.invalid/'}],['três',{url:'chrome-extension://test/options.html'}]])await e.run('TTS_REQUEST',{text},sender);
- const jobs=(await e.run('HUD_GLOBAL_GET')).state.jobs;assert.deepEqual(Array.from(jobs,j=>j.origin.tabId).sort(),[0,1,3]);assert.ok(jobs.some(j=>j.origin.page==='options.html'));for(const job of jobs)await e.run('LIVE_OFFSCREEN_EVENT',{jobId:job.jobId,event:'play',eventSeq:1},offscreen);
+ const jobs=(await e.run('HUD_GLOBAL_GET')).state.jobs;assert.deepEqual(Array.from(jobs,j=>j.origin.tabId).sort(),[0,1,3]);assert.ok(jobs.some(j=>j.origin.page==='options.html'));await e.run('LIVE_OFFSCREEN_EVENT',{jobId:jobs[1].jobId,event:'play',eventSeq:1},offscreen);
  await e.run('HUD_GLOBAL_COMMAND',{jobId:jobs[1].jobId,action:'remove'});await e.run('HUD_GLOBAL_TOGGLE',{},panel);
- assert.equal(e.routes.filter(p=>p.operation==='PAUSE').length,3);assert.ok((await e.run('HUD_GLOBAL_GET')).state.jobs.every(j=>j.status==='paused'));
- const paused=(await e.run('HUD_GLOBAL_GET')).state.jobs.sort((a,b)=>b.pausedAt-a.pausedAt||b.updatedAt-a.updatedAt)[0];await e.run('HUD_GLOBAL_TOGGLE',{},panel);assert.deepEqual(e.routes.filter(p=>p.operation==='RESUME').map(p=>p.jobId),[paused.jobId]);
+ assert.deepEqual(e.routes.filter(p=>p.operation==='PAUSE').map(p=>p.jobId),[jobs[1].jobId]);assert.equal((await e.run('HUD_GLOBAL_GET')).state.jobs.find(j=>j.jobId===jobs[1].jobId).status,'paused');
+ const paused=(await e.run('HUD_GLOBAL_GET')).state.jobs.sort((a,b)=>b.pausedAt-a.pausedAt||b.updatedAt-a.updatedAt||b.jobId.localeCompare(a.jobId))[0];await e.run('HUD_GLOBAL_TOGGLE',{},panel);assert.deepEqual(e.routes.filter(p=>p.operation==='RESUME').map(p=>p.jobId),[paused.jobId]);
  for(const job of jobs)await e.run('LIVE_OFFSCREEN_EVENT',{jobId:job.jobId,event:'ended',eventSeq:20},offscreen);const before=e.routes.length;await e.run('HUD_GLOBAL_TOGGLE',{},panel);assert.equal(e.routes.length,before);
 });
 test('ACK do player sincroniza posição da pausa e rejeita progresso antigo em trânsito',async()=>{
- let sequence=9;const e=backgroundEnvironment({controlReply:payload=>{const paused=payload.operation==='PAUSE';return{success:true,operation:payload.operation,eventSeq:++sequence,status:{jobId:payload.jobId,playerId:payload.playerId,requestId:payload.requestId,controlSeq:sequence,contextState:paused?'suspended':'running',workletPaused:paused,outputMuted:paused,currentTime:12.5,duration:30,availableEnd:30,paused}};}}),offscreen={url:'chrome-extension://test/offscreen.html'};await e.run('TTS_REQUEST',{text:'Público.'});const jobId=(await e.run('HUD_GLOBAL_GET')).state.jobs[0].jobId;await e.run('LIVE_OFFSCREEN_EVENT',{jobId,event:'play',eventSeq:1,status:{currentTime:10,duration:30}},offscreen);await e.run('HUD_GLOBAL_COMMAND',{jobId,action:'pause'});let job=(await e.run('HUD_GLOBAL_GET')).state.jobs[0];assert.equal(job.status,'paused');assert.equal(job.progress.currentTime,12.5);assert.equal(job.eventSeq,10);await e.run('LIVE_OFFSCREEN_EVENT',{jobId,event:'position',eventSeq:9,status:{currentTime:11}},offscreen);assert.equal((await e.run('HUD_GLOBAL_GET')).state.jobs[0].progress.currentTime,12.5);await e.run('HUD_GLOBAL_COMMAND',{jobId,action:'resume'});job=(await e.run('HUD_GLOBAL_GET')).state.jobs[0];assert.equal(job.status,'playing');assert.equal(job.eventSeq,11);
+ let sequence=9;const e=backgroundEnvironment({controlReply:payload=>{const paused=payload.operation==='PAUSE';return{success:true,operation:payload.operation,eventSeq:++sequence,status:{jobId:payload.jobId,playerId:payload.playerId,requestId:payload.requestId,controlSeq:sequence,contextState:paused?'suspended':'running',workletPaused:paused,outputMuted:paused,playbackState:paused?'paused':'playing',currentTime:12.5,duration:30,availableEnd:30,paused}};}}),offscreen={url:'chrome-extension://test/offscreen.html'};await e.run('TTS_REQUEST',{text:'Público.'});const jobId=(await e.run('HUD_GLOBAL_GET')).state.jobs[0].jobId;await e.run('LIVE_OFFSCREEN_EVENT',{jobId,event:'play',eventSeq:1,status:{currentTime:10,duration:30}},offscreen);await e.run('HUD_GLOBAL_COMMAND',{jobId,action:'pause'});let job=(await e.run('HUD_GLOBAL_GET')).state.jobs[0];assert.equal(job.status,'paused');assert.equal(job.progress.currentTime,12.5);assert.equal(job.eventSeq,10);await e.run('LIVE_OFFSCREEN_EVENT',{jobId,event:'position',eventSeq:9,status:{currentTime:11}},offscreen);assert.equal((await e.run('HUD_GLOBAL_GET')).state.jobs[0].progress.currentTime,12.5);await e.run('HUD_GLOBAL_COMMAND',{jobId,action:'resume'});job=(await e.run('HUD_GLOBAL_GET')).state.jobs[0];assert.equal(job.status,'playing');assert.equal(job.eventSeq,11);
 });
 test('sucesso sem ACK efetivo, request trocado ou AudioContext ativo nunca fabricam Pausado',async()=>{
  for(const defect of ['missing','request','running','worklet','muted','old']){
@@ -243,4 +247,107 @@ test('seek temporal roteia amostras do próprio job sem gerar nova sessão ou af
  const e=backgroundEnvironment();await e.run('TTS_REQUEST',{text:'Público.'});const jobId=(await e.run('HUD_GLOBAL_GET')).state.jobs[0].jobId;await e.run('LIVE_OFFSCREEN_EVENT',{jobId,event:'position',eventSeq:1,status:{currentTime:10,duration:30,availableStart:0,availableEnd:30}},{url:'chrome-extension://test/offscreen.html'});
  for(const deltaSeconds of [5,5,-5])assert.equal((await e.run('HUD_GLOBAL_COMMAND',{jobId,action:'seek',deltaSeconds})).success,true);assert.deepEqual(e.routes.filter(p=>p.operation==='SEEK_PCM').map(p=>[p.jobId,p.deltaSeconds]),[[jobId,5],[jobId,5],[jobId,-5]]);assert.equal(e.routes.filter(p=>p.operation==='TTS_LIVE_START').length,1);
  await e.run('STT_LIVE_START',{jobId:'speech'});assert.equal((await e.run('HUD_GLOBAL_COMMAND',{jobId:'speech',action:'seek',deltaSeconds:5})).success,false);
+});
+
+test('narração STT pertence ao próprio card e conserva texto, inserção e histórico após Pause/Stop',async()=>{
+ const e=environment(),r=e.registry;await r.start(job('stt-card'));await r.event({jobId:'stt-card',event:'stt-final',text:'Transcrição original.',eventSeq:1});await r.insertion({jobId:'stt-card',inserted:true},origin);await r.edit({jobId:'stt-card',text:'Cópia para narrar.'});const history=structuredClone(e.history());
+ await r.preparePlayback({jobId:'stt-card',requestId:'audio-1',volume:.4});await r.event({jobId:'stt-card',requestId:'audio-1',narration:true,event:'play',eventSeq:1,status:{currentTime:4,volume:.4}});
+ let state=(await r.get()).jobs[0];assert.equal(state.status,'completed');assert.equal(state.narration.status,'playing');assert.equal(state.controls.pause,true);assert.equal(state.text,'Transcrição original.');assert.equal(state.workingText,'Cópia para narrar.');assert.equal(state.insertion.inserted,true);
+ await r.event({jobId:'stt-card',requestId:'audio-1',narration:true,event:'pause',eventSeq:2});await r.stopped('stt-card','flushing',true);state=(await r.get()).jobs[0];assert.equal(state.narration.status,'cancelled');assert.equal(state.controls.play,true);assert.equal(state.narration.progress.currentTime,undefined);assert.deepEqual(e.history(),history);
+ await r.preparePlayback({jobId:'stt-card',requestId:'audio-2'});await r.event({jobId:'stt-card',requestId:'audio-1',narration:true,event:'play',eventSeq:99});assert.equal((await r.get()).jobs[0].narration.status,'connecting');
+ const restarted=GlobalJobs.create(e.services);await restarted.reconcile([{jobId:'stt-card',requestId:'audio-2',narration:true,status:'paused',eventSeq:3,progress:{currentTime:8,volume:.4}}]);state=(await restarted.get()).jobs[0];assert.equal(state.narration.progress.currentTime,8);assert.equal(state.text,'Transcrição original.');assert.equal(state.status,'completed');assert.deepEqual(e.history(),history);
+});
+test('background Play do card STT usa TTS no mesmo job e não cria tarefa auxiliar',async()=>{
+ const e=backgroundEnvironment(),ui={url:'chrome-extension://test/popup.html'},offscreen={url:'chrome-extension://test/offscreen.html'};await e.run('STT_LIVE_START',{jobId:'stt-voice'});await e.run('LIVE_OFFSCREEN_EVENT',{jobId:'stt-voice',event:'stt-final',text:'Texto transcrito.',eventSeq:1},offscreen);await e.run('HUD_INSERTION_RESULT',{jobId:'stt-voice',inserted:true});
+ assert.equal((await e.run('HUD_GLOBAL_COMMAND',{jobId:'stt-voice',action:'play'},ui)).success,true);let state=(await e.run('HUD_GLOBAL_GET')).state;assert.equal(state.jobs.length,1);const audio=e.routes.find(p=>p.operation==='TTS_LIVE_START');assert.equal(audio.text,'Texto transcrito.');assert.equal(audio.jobId,'stt-voice');assert.equal(audio.narration,true);assert.equal(state.jobs[0].status,'completed');
+ await e.run('LIVE_OFFSCREEN_EVENT',{jobId:'stt-voice',requestId:audio.requestId,narration:true,event:'play',eventSeq:1},offscreen);await e.run('HUD_GLOBAL_COMMAND',{jobId:'stt-voice',requestId:audio.requestId,action:'pause'},ui);state=(await e.run('HUD_GLOBAL_GET')).state;assert.equal(state.jobs[0].narration.status,'paused');assert.equal(state.jobs[0].text,'Texto transcrito.');
+ await e.run('HUD_GLOBAL_COMMAND',{jobId:'stt-voice',action:'stop',requestId:audio.requestId},ui);assert.equal((await e.run('HUD_GLOBAL_GET')).state.jobs[0].narration.status,'cancelled');assert.equal(e.history().recentItems.length,1);
+});
+test('volume global tem estado próprio compartilhado e não altera preferências dos cards',async()=>{
+ const e=backgroundEnvironment(),ui={url:'chrome-extension://test/popup.html'};await e.run('TTS_REQUEST',{text:'Primeiro.',agentId:'narrator'});const id=(await e.run('HUD_GLOBAL_GET')).state.jobs[0].jobId;
+ await e.run('HUD_GLOBAL_COMMAND',{jobId:id,action:'set',volume:.3},ui);const result=await e.run('HUD_GLOBAL_SET',{volume:.6},ui);assert.equal(result.success,true);assert.equal(result.state.playback.volume,.6);assert.equal(result.state.jobs[0].progress.volume,.3);assert.ok(e.routes.some(p=>p.operation==='SET_GLOBAL'&&p.volume===.6));
+ const restarted=backgroundEnvironment(e);assert.equal((await restarted.run('HUD_GLOBAL_GET')).state.playback.volume,.6);
+});
+test('selecionar card pausado define alvo global sem ressintetizar nem iniciar concluído',async()=>{
+ const e=backgroundEnvironment(),offscreen={url:'chrome-extension://test/offscreen.html'};for(const text of ['A','B'])await e.run('TTS_REQUEST',{text});const jobs=(await e.run('HUD_GLOBAL_GET')).state.jobs;for(const job of jobs){await e.run('LIVE_OFFSCREEN_EVENT',{jobId:job.jobId,event:'play',eventSeq:1},offscreen);await e.run('HUD_GLOBAL_COMMAND',{jobId:job.jobId,action:'pause'});}await e.run('HUD_GLOBAL_COMMAND',{jobId:jobs[0].jobId,action:'select'});await e.run('HUD_GLOBAL_TOGGLE',{action:'resume'});assert.equal(e.routes.filter(p=>p.operation==='RESUME').at(-1).jobId,jobs[0].jobId);assert.equal(e.routes.filter(p=>p.operation==='TTS_LIVE_START').length,2);
+});
+
+test('reserva STT é exclusiva antes do microfone, atravessa wake do worker e aguarda liberação',async()=>{
+ const e=backgroundEnvironment(),opts={url:'chrome-extension://test/options.html'};
+ const reserve=await Promise.all([
+  e.run('STT_CAPTURE_RESERVE',{jobId:'capture-page'}),
+  e.run('STT_CAPTURE_RESERVE',{jobId:'capture-options'},opts)
+ ]);
+ assert.equal(reserve[0].success,true);assert.equal(reserve[1].success,false);
+ const restarted=backgroundEnvironment({...e,originStatus:{found:true,status:'connecting'}});
+ assert.equal((await restarted.run('STT_CAPTURE_RESERVE',{jobId:'blocked'},opts)).success,false);
+ assert.equal((await restarted.run('STT_LIVE_START',{jobId:'capture-page'})).success,true);
+ const offscreen={url:'chrome-extension://test/offscreen.html'};
+ await restarted.run('LIVE_OFFSCREEN_EVENT',{jobId:'capture-page',event:'stt-error',error:'rede',eventSeq:1},offscreen);
+ assert.equal((await restarted.run('STT_CAPTURE_RESERVE',{jobId:'blocked'},opts)).success,false);
+ await restarted.run('HUD_CAPTURE_STATE',{jobId:'capture-page',microphoneReleased:true});
+ assert.equal((await restarted.run('STT_CAPTURE_RESERVE',{jobId:'capture-options'},opts)).success,true);
+});
+
+test('setup de outro bloco preserva Pause e clique global antigo não muda outro player',async()=>{
+ const e=backgroundEnvironment(),offscreen={url:'chrome-extension://test/offscreen.html'};
+ await e.run('TTS_REQUEST',{text:'A'});const a=(await e.run('HUD_GLOBAL_GET')).state.jobs[0];
+ await e.run('LIVE_OFFSCREEN_EVENT',{jobId:a.jobId,event:'pause',eventSeq:1},offscreen);
+ await e.run('LIVE_OFFSCREEN_EVENT',{jobId:a.jobId,event:'setup-complete',eventSeq:2},offscreen);
+ assert.equal((await e.run('HUD_GLOBAL_GET')).state.jobs[0].status,'paused');
+ await e.run('TTS_REQUEST',{text:'B'});const b=(await e.run('HUD_GLOBAL_GET')).state.jobs[0];
+ await e.run('LIVE_OFFSCREEN_EVENT',{jobId:b.jobId,event:'play',eventSeq:1},offscreen);
+ await e.run('HUD_GLOBAL_TOGGLE',{action:'pause',jobId:a.jobId,requestId:a.requestId});
+ assert.equal(e.routes.filter(route=>route.operation==='PAUSE').length,0);
+ await e.run('HUD_GLOBAL_TOGGLE',{action:'pause',jobId:b.jobId,requestId:b.requestId});
+ assert.deepEqual(e.routes.filter(route=>route.operation==='PAUSE').map(route=>route.jobId),[b.jobId]);
+});
+
+test('ACK de Stop atrasado preserva inserção e libera a reserva STT ao concluir',async()=>{
+ const e=environment(),r=e.registry;
+ await r.start(job('first'),'reserve-stt');
+ await r.start(job('first'),'start-stt');
+ await r.event({jobId:'first',event:'stt-final',text:'Resultado.'});
+ await r.stopped('first','waiting');
+ assert.equal((await r.find({jobId:'first'})).status,'inserting');
+ await r.insertion({jobId:'first',inserted:true},origin);
+ await r.capture({jobId:'first',microphoneReleased:true},origin);
+ assert.equal((await r.find({jobId:'first'})).status,'completed');
+ assert.equal((await r.start(job('next'),'reserve-stt')).status,'connecting');
+});
+
+test('a reserva STT independe de processamento e a liberação não regride com mensagens atrasadas',async()=>{
+ const e=environment(),r=e.registry,secondOrigin={...origin,tabId:2};
+ await r.start(job('first'),'reserve-stt');
+ await r.start(job('first'),'start-stt');
+ await r.capture({jobId:'first',status:'flushing'},origin);
+ await assert.rejects(r.start(job('second','STT',{origin:secondOrigin}),'reserve-stt'),{code:'STT_CAPTURE_BUSY',otherTab:true});
+ await r.capture({jobId:'first',microphoneReleased:true},origin);
+ const [second,third]=await Promise.allSettled([
+  r.start(job('second','STT',{origin:secondOrigin}),'reserve-stt'),
+  r.start(job('third'),'reserve-stt'),
+ ]);
+ assert.equal(second.status,'fulfilled');
+ assert.equal(third.reason.code,'STT_CAPTURE_BUSY');
+ await r.capture({jobId:'first',status:'recording',microphoneReleased:false},origin);
+ await r.event({jobId:'first',event:'setup-complete'});
+ assert.equal((await r.find({jobId:'first'})).status,'flushing');
+ await r.event({jobId:'first',event:'stt-final',text:'Resultado anterior.'});
+ await r.capture({jobId:'second',status:'waiting',microphoneReleased:true},secondOrigin);
+ const restored=GlobalJobs.create(e.services);
+ assert.equal((await restored.start(job('third'),'reserve-stt')).status,'connecting');
+ assert.equal((await restored.find({jobId:'first'})).microphoneReleased,true);
+ assert.equal((await restored.find({jobId:'first'})).status,'inserting');
+ assert.equal((await restored.find({jobId:'second'})).status,'waiting');
+});
+
+test('cancelamento no transporte e navegação iniciada não liberam microfone sem confirmação da origem',async()=>{
+ const e=environment(),r=e.registry;
+ await r.start(job('first'),'reserve-stt');
+ await r.start(job('first'),'start-stt');
+ await r.event({jobId:'first',event:'stt-cancelled'});
+ await r.originLost(origin);
+ await assert.rejects(r.start(job('next'),'reserve-stt'),{code:'STT_CAPTURE_BUSY'});
+ await r.originLost({...origin,captureGone:true});
+ assert.equal((await r.start(job('next'),'reserve-stt')).status,'connecting');
 });

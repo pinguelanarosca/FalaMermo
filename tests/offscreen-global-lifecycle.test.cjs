@@ -6,7 +6,7 @@ function fixture(deliver=()=>({success:true}),customize=()=>({})){
  class Manager{async acquire(options){const s={options,sent:[],socketOpenMs:1,setupCompleteMs:2,sendAudio(bytes){this.sent.push(bytes.length);},endAudio(){this.ended=true;},close(){this.closed=true;},...customize(options)};sessions.push(s);return s;}release(s){s.busy=false;}retire(s){s.closed=true;s.options?.onRetire?.(s);}}
  const context=vm.createContext({console,performance,structuredClone,AbortController,Uint8Array,DataView,Float32Array,
   setTimeout(fn,ms){const id=++nextTimer;timers.set(id,{fn,ms});return id;},clearTimeout:id=>timers.delete(id),SttScheduler:require('../stt-scheduler.js'),LiveConfig,SttRealtime:require('../stt-realtime.js'),
-  LiveSessions:{LiveSessionManager:Manager,decodeBase64:x=>Uint8Array.from(Buffer.from(x,'base64')),classifyLiveError:require('../live-session-manager.js').classifyLiveError},
+  SttRecovery:{async start(){},async append(){},async update(){}},LiveSessions:{LiveSessionManager:Manager,decodeBase64:x=>Uint8Array.from(Buffer.from(x,'base64')),classifyLiveError:require('../live-session-manager.js').classifyLiveError},
   chrome:{runtime:{onMessage:{addListener:fn=>listener=fn},getURL:x=>x,async sendMessage(msg){events.push(structuredClone(msg));return deliver(msg);}}}});
  vm.runInContext(fs.readFileSync(require.resolve('../offscreen.js'),'utf8'),context);
  const command=payload=>new Promise(resolve=>listener({type:'LIVE_OFFSCREEN_COMMAND',target:'offscreen',payload},{},resolve));
@@ -14,13 +14,13 @@ function fixture(deliver=()=>({success:true}),customize=()=>({})){
  return{command,sessions,events,timers,fire};
 }
 const start=id=>({operation:'STT_LIVE_START',jobId:id,modelId:'gemini-3.8-live',apiKeys:['fake-for-unit-test-'+id],tabId:12,frameId:0,documentId:'original-document'});
-test('realtime delimita antes do Stop, atualiza um job e transforma consolidado uma única vez',async()=>{
- let transforms=0;const e=fixture(undefined,options=>options.mode==='agent'?{sendTurn:async text=>{transforms++;assert.equal(text,'Primeira. Segunda.');return{text:'Consolidado.'};}}:{endAudio(){this.endCount=(this.endCount||0)+1;}});await e.command({...start('live-chunks'),realtime:true,transformInstruction:'Instrução original do agente.'});let tail=Promise.resolve();
+test('modo final delimita antes do Stop, atualiza um job e transforma consolidado uma única vez',async()=>{
+ let transforms=0;const e=fixture(undefined,options=>options.mode==='agent'?{sendTurn:async text=>{transforms++;assert.equal(text,'Primeira. Segunda.');return{text:'Consolidado.'};}}:{endAudio(){this.endCount=(this.endCount||0)+1;}});await e.command({...start('live-chunks'),realtime:false,chunked:true,transformInstruction:'Instrução original do agente.'});let tail=Promise.resolve();
  const capture=new(require('../stt-realtime.js').CapturePipeline)({jobId:'live-chunks',realtime:true,submitAudioChunk:p=>{tail=tail.then(()=>e.command({operation:'STT_LIVE_AUDIO',jobId:'live-chunks',chunk:p.chunk,...(p.endOnly?{endOnly:true}:{audioBase64:Buffer.from(p.pcm).toString('base64')})}));}});
  function frame(value){const bytes=new Uint8Array(3200),view=new DataView(bytes.buffer);for(let i=0;i<bytes.length;i+=2)view.setInt16(i,value,true);return bytes;}
- for(let n=0;n<2;n++){capture.push(frame(3000));for(let i=0;i<5;i++)capture.push(frame(0));}capture.finish();await tail;assert.equal(e.sessions.length,1);assert.equal(e.sessions[0].endCount,1);
+ for(let n=0;n<2;n++){capture.push(frame(3000));for(let i=0;i<5;i++)capture.push(frame(0));}capture.finish();await tail;assert.equal(e.sessions.length,1);assert.equal(e.sessions[0].endCount,2,'nenhum bloco aguarda transcrição para ser enviado');
  e.sessions[0].handler({serverContent:{inputTranscription:{text:'Primeira.'},turnComplete:true}});await flush();assert.equal(transforms,0);assert.ok(e.events.some(m=>m.payload?.event==='stt-partial'&&m.payload.jobId==='live-chunks'));await e.fire(900);assert.equal(e.sessions[0].endCount,2);assert.equal(transforms,0);
- await e.command({operation:'STT_LIVE_STOP',jobId:'live-chunks'});e.sessions[0].handler({serverContent:{inputTranscription:{text:'Segunda.'},turnComplete:true}});await e.fire(900);await flush();assert.equal(transforms,1);assert.equal(e.events.filter(m=>m.payload?.event==='stt-final').length,1);assert.equal(e.events.find(m=>m.payload?.event==='stt-final').payload.text,'Consolidado.');assert.equal(new Set(e.events.filter(m=>m.payload?.event?.startsWith('stt-')).map(m=>m.payload.jobId)).size,1);
+ await e.command({operation:'STT_LIVE_STOP',jobId:'live-chunks'});e.sessions[0].handler({serverContent:{inputTranscription:{text:'Segunda.'},turnComplete:true}});await e.fire(15000);await e.fire(900);await flush();assert.equal(transforms,1);assert.equal(e.events.filter(m=>m.payload?.event==='stt-final').length,1);assert.equal(e.events.find(m=>m.payload?.event==='stt-final').payload.text,'Consolidado.');assert.equal(new Set(e.events.filter(m=>m.payload?.event?.startsWith('stt-')).map(m=>m.payload.jobId)).size,1);
 });
 test('cancelar realtime com chunks em fila ignora respostas tardias e não transforma',async()=>{
  let transforms=0;const e=fixture(undefined,options=>options.mode==='agent'?{sendTurn:async()=>{transforms++;return{text:'Nunca.'};}}:{});await e.command({...start('cancel-chunks'),realtime:true,transformInstruction:'Formatação original.'});
@@ -69,9 +69,9 @@ test('scheduler integra nove jobs realtime com afinidade de sessão, cancelament
  for(const id of ids){const packets=[],capture=new(require('../stt-realtime.js').CapturePipeline)({jobId:id,realtime:true,submitAudioChunk:p=>packets.push(p)});for(let turn=0;turn<2;turn++){const pcm=new Uint8Array(3200);new Int16Array(pcm.buffer).fill(3000);capture.push(pcm);for(let n=0;n<5;n++)capture.push(new Uint8Array(3200));}capture.finish();for(const p of packets)assert.equal((await e.command({operation:'STT_LIVE_AUDIO',jobId:id,sampleRate:16000,chunk:p.chunk,...(p.endOnly?{endOnly:true}:{audioBase64:Buffer.from(p.pcm).toString('base64')})})).success,true);}
  const first=e.sessions.find(s=>s.options.jobId===ids[0]);await e.command({operation:'STT_LIVE_CANCEL',jobId:ids[0]});const before=e.events.length;first.handler({serverContent:{inputTranscription:{text:'Nunca inserir.'}}});assert.equal(e.events.length,before);
  // Acquires concorrentes não garantem ordem de criação: identidade vem do jobId, não do índice.
- const active=e.sessions.filter(s=>s.options.jobId!==ids[0]);assert.equal(active.length,8);assert.equal(first.sent.length,6);
+ const active=e.sessions.filter(s=>s.options.jobId!==ids[0]);assert.equal(active.length,8);assert.equal(first.sent.length,12);
  for(const s of active)s.handler({usageMetadata:{promptTokenCount:200},serverContent:{inputTranscription:{text:s.options.jobId+' primeiro.'}}});await e.fire(900);
- for(const s of active){assert.equal(s.sent.length,12);await e.command({operation:'STT_LIVE_STOP',jobId:s.options.jobId});s.handler({serverContent:{inputTranscription:{text:'Segundo.'}}});}await e.fire(900);await flush();
+ for(const s of active){assert.equal(s.sent.length,12);await e.command({operation:'STT_LIVE_STOP',jobId:s.options.jobId});s.handler({serverContent:{inputTranscription:{text:'Segundo.'}}});}await e.fire(15000);await e.fire(900);await flush();
  const finals=e.events.filter(x=>x.payload?.event==='stt-final');assert.equal(finals.length,8);for(const f of finals)assert.equal(f.payload.text,f.payload.jobId+' primeiro. Segundo.');assert.equal(e.sessions.length,9,'nenhuma sessão adicional por chunk');
  const diagnostic=await e.command({operation:'STT_SCHEDULER_SNAPSHOT'});assert.equal(diagnostic.diagnostics.activeJobs,0);assert.ok(diagnostic.diagnostics.accounts.every(a=>a.activeJobs===0));
 });

@@ -11,6 +11,16 @@ class AudioQueue{
  async drain(){await this.tail;if(this.failure)throw this.failure;if(this.closed&&this.metrics.pendingChunks)throw Error('A fila STT foi encerrada antes de confirmar todo o áudio.');}
  close(){this.closed=true;}
 }
+// Apenas captura STT: falhas reais de dispositivo/worklet não podem parecer um Stop.
+function watchCapture(capture,{onFailure,onState=()=>{}}){
+ const removers=[];let failed=false;
+ const listen=(target,event,fn)=>{if(!target?.addEventListener)return;target.addEventListener(event,fn);removers.push(()=>target.removeEventListener(event,fn));};
+ const fail=(reason,message)=>{if(failed||capture.stopping||capture.released)return;failed=true;const error=Object.assign(Error(message),{code:'CAPTURE_FAILURE',stopReason:reason});Promise.resolve().then(()=>onFailure(error)).catch(error=>root.console?.error('[STT capture failure]',error?.name||'Error'));};
+ for(const track of capture.stream?.getTracks()||[])listen(track,'ended',()=>fail('microphone-ended','O dispositivo encerrou o microfone durante o ditado. O resultado pode estar incompleto.'));
+ listen(capture.node,'processorerror',()=>fail('worklet-error','O AudioWorklet do microfone falhou. O ditado foi interrompido; o texto recebido permanece no cartão.'));
+ listen(capture.context,'statechange',()=>{onState();if(capture.context.state==='closed')fail('context-closed','O AudioContext do microfone foi encerrado inesperadamente. O resultado pode estar incompleto.');});
+ return()=>{failed=true;for(const remove of removers)remove();};
+}
 function editable(element){return Boolean(element&&element.isConnected!==false&&!element.disabled&&!element.readOnly&&(element.isContentEditable||typeof element.value==='string'&&typeof element.selectionStart==='number'));}
 // Chromium preserva espaços visuais do contenteditable usando NBSP ao editar. Não é reversão do editor.
 function textOf(element){return typeof element.value==='string'?element.value:(element.textContent||'').replace(/\u00a0/g,' ');}
@@ -70,5 +80,5 @@ class Insertion{
   this.expected=actual;this.expectedVisual=visualText(element);this.applied=actual.slice(start,actual.length-suffix.length);this.currentText=text;this.end=start+this.applied.length;if(final)this.finalized=true;return{inserted:true,reason:'INSERTED',characters:text.length};
  }
 }
-return{AudioQueue,ACK_TIMEOUT_MS,timeout,captureTarget,Insertion,textOf};
+return{AudioQueue,ACK_TIMEOUT_MS,timeout,watchCapture,captureTarget,Insertion,textOf};
 });

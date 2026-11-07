@@ -32,6 +32,24 @@ function createBundle(file, raw = {}, overrides = {}) {
 }
 
 for (const file of ['background.js', 'content.js']) {
+    test(`${file}: normalizador UI preserva modo STT válido nas leituras e escritas reais do adapter`, async () => {
+        const raw={ui:{dictationInsertion:'realtime',theme:'dark',hudPosition:{x:15,y:30},shortcuts:{startDictation:'Pause'}},api:{apiKeys:Array.from({length:9},(_,i)=>'unit-account-'+i)}};
+        const e=createBundle(file,raw),storage=e.load('extension/src/services/storage/chromeStorageAdapter.ts').chromeStorage;
+        assert.equal((await storage.get('ui')).dictationInsertion,'realtime');assert.equal((await storage.getAll()).ui.dictationInsertion,'realtime');assert.equal((await storage.getMany(['ui'])).ui.dictationInsertion,'realtime');
+        await storage.setPartial('ui',{theme:'light'});assert.equal(e.stored.ui.dictationInsertion,'realtime');assert.equal(e.stored.ui.shortcuts.startDictation,'Pause');assert.deepEqual(e.stored.ui.hudPosition,raw.ui.hudPosition);assert.deepEqual(e.stored.api,raw.api);
+        await storage.setMultiple({ui:{...e.stored.ui,dictationInsertion:'final'}});assert.equal((await storage.get('ui')).dictationInsertion,'final');
+        const settings=e.load('shared/constants/defaultSettings.ts');for(const invalid of [undefined,null,'REALTIME',true,'outra'])assert.equal(settings.normalizeStorageNamespace('ui',{dictationInsertion:invalid}).dictationInsertion,'final');
+    });
+    test(`${file}: preferência STT canônica vence alias antigo sem mudar atalhos legados`,async()=>{
+        const e=createBundle(file,{ui:{dictationInsertion:'realtime'},uiPreferences:{dictationInsertion:'final',theme:'dark',shortcuts:{startDictation:'Pause'}}}),ui=await e.load('extension/src/services/storage/chromeStorageAdapter.ts').chromeStorage.get('ui');
+        assert.equal(ui.dictationInsertion,'realtime');assert.equal(ui.theme,'dark');assert.equal(ui.shortcuts.startDictation,'Pause');assert.equal(e.stored.uiPreferences.dictationInsertion,'final');
+        const legacy=createBundle(file,{uiPreferences:{dictationInsertion:'realtime'}});assert.equal((await legacy.load('extension/src/services/storage/chromeStorageAdapter.ts').chromeStorage.get('ui')).dictationInsertion,'realtime');
+    });
+    test(`${file}: onChanged normalizado propaga realtime/final sem mutar o dado salvo`,()=>{
+        const e=createBundle(file),listeners=new Set(),seen=[];e.context.chrome.storage.onChanged={addListener:fn=>listeners.add(fn),removeListener:fn=>listeners.delete(fn)};
+        const storage=e.load('extension/src/services/storage/chromeStorageAdapter.ts').chromeStorage,unsubscribe=storage.subscribe('ui',ui=>seen.push(ui.dictationInsertion));
+        for(const mode of ['realtime','final'])for(const listener of listeners)listener({ui:{newValue:{dictationInsertion:mode}}},'local');assert.deepEqual(seen,['realtime','final']);unsubscribe();assert.equal(listeners.size,0);
+    });
     test(`${file}: storage preserva nove chaves após leitura, atualização e migração`, async () => {
         const keys = Array.from({ length: 9 }, (_, i) => `fake-key-${i + 1}`);
         const raw = {

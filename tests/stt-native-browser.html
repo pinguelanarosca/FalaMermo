@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="pt-BR">
+<meta charset="utf-8">
+<title>STT — regressão de timers nativos</title>
+<style>body{font:16px system-ui;margin:32px;background:#f5f6fa;color:#18243d}textarea{display:block;width:90%;height:64px;margin:12px 0}pre{white-space:pre-wrap}button{padding:12px;font:inherit}</style>
+<h1>STT — timers nativos do Chrome</h1>
+<p>Teste local, sem microfone, Gemini ou chaves. PCM de teste e respostas do servidor simuladas. Usa a pipeline, fila e inserção reais com timers nativos.</p>
+<button id="run">Executar regressão nativa STT</button>
+<label for="realtime">Editor realtime</label><textarea id="realtime"></textarea>
+<label for="final">Editor convencional</label><textarea id="final"></textarea>
+<pre id="result">Não executado.</pre>
+<script src="/stt-realtime.js"></script>
+<script src="/dictation-runtime.js"></script>
+<script>
+'use strict';
+document.querySelector('#run').onclick=async function(){
+ this.disabled=true;const results=[];
+ for(const mode of ['realtime','final']){
+  const editor=document.getElementById(mode);editor.value='';editor.focus();
+  const target=DictationRuntime.captureTarget(),insertion=new DictationRuntime.Insertion(target),metrics={},failures=[],chunks=[],sent=[],timers=[];let transport,committed=0,delivery=Promise.resolve(),ended=0,finalReceived=false;
+  try{
+   transport=new SttRealtime.DictationTransport({jobId:mode,...(mode==='realtime'?{setTimer:window.setTimeout,clearTimer:window.clearTimeout}:{}),sendAudio:bytes=>sent.push(bytes.length),endAudio:()=>{const text=++ended===1?'Primeira frase pública.':' Segunda frase pública.';timers.push(window.setTimeout(()=>transport.receive({inputTranscription:{text}}),30));},onPartial:result=>{if(mode==='realtime')delivery=delivery.then(()=>insertion.apply(result.text));},onChunk:result=>{if(result.sequence){committed++;chunks.push(result.sequence);}},onFailure:error=>failures.push(error.message)});
+   const queue=new DictationRuntime.AudioQueue({metrics,send:async packet=>{await transport.submitAudioChunk(packet);return{success:true};},onFailure:error=>failures.push(error.message)});
+   const capture=new SttRealtime.CapturePipeline({jobId:mode,realtime:true,continuous:true,submitAudioChunk:p=>queue.push(p,p.pcm.byteLength)});
+   const voice=new Uint8Array(3200);new Int16Array(voice.buffer).fill(3000);
+   const voicePackets=mode==='realtime'?26:18;
+   for(let i=0;i<voicePackets;i++)capture.push(voice);
+   for(let i=0;i<5;i++)capture.push(new Uint8Array(3200));
+   try{await queue.drain();}catch(error){error.queueMetrics={ackChunks:metrics.ackChunks,pendingChunks:metrics.pendingChunks};throw error;}
+   // Aguarda a resposta/settle do primeiro bloco, ainda sem Stop.
+   await new Promise(resolve=>window.setTimeout(resolve,1100));await delivery;
+   const beforeStop=editor.value;
+   for(let i=0;i<8;i++)capture.push(voice);
+   for(let i=0;i<5;i++)capture.push(new Uint8Array(3200));
+   capture.finish();await queue.drain();const result=await transport.finish();await delivery;await insertion.apply(result.text,{final:true});finalReceived=true;
+   results.push({mode,passed:result.text==='Primeira frase pública. Segunda frase pública.'&&(mode==='realtime'?beforeStop==='Primeira frase pública.':beforeStop==='')&&metrics.pendingChunks===0&&!failures.length,partialInsertedBeforeStop:!!beforeStop,finalReceived,finalText:editor.value,orderedChunks:chunks,sentPackets:sent.length,ackChunks:metrics.ackChunks,pendingChunks:metrics.pendingChunks,failures});
+  }catch(error){results.push({mode,passed:false,error:error.message,stack:error.stack,ackChunks:metrics.ackChunks,pendingChunks:metrics.pendingChunks,finalReceived,failures});}
+  finally{for(const id of timers)window.clearTimeout(id);try{transport?.cancel();}catch{}insertion.dispose();}
+ }
+ const store=new SttRealtime.RecoveryStore({name:'stt-recovery-native-test',maxJobBytes:128,maxTotalBytes:192}),a=crypto.randomUUID(),b=crypto.randomUUID();
+ try{
+  await store.start(a);await store.start(b);const packet=(sequence)=>({pcm:new Uint8Array(64).fill(7),chunk:{packetSequence:sequence,sequence:1,startMs:0,endMs:2,overlapMs:0}});
+  await store.append(a,packet(1));await store.append(a,packet(2));let jobLimit=false,totalLimit=false;try{await store.append(a,packet(3));}catch(error){jobLimit=error.code==='RECOVERY_LIMIT';}await store.append(b,packet(1));try{await store.append(b,packet(2));}catch(error){totalLimit=error.code==='RECOVERY_LIMIT';}
+  await store.update(a,{state:'incomplete',blocks:1,unresolved:1});await store.update(b,{state:'completed'});const reopened=new SttRealtime.RecoveryStore({name:'stt-recovery-native-test'}),listed=await reopened.list(),packets=await reopened.packets(a),wave=await reopened.wave(a),data=await wave.blob.arrayBuffer(),header=new DataView(data);
+  const passed=jobLimit&&totalLimit&&listed.find(j=>j.jobId===a)?.bytes===128&&listed.find(j=>j.jobId===a)?.unresolved===1&&packets.length===2&&new Uint8Array(packets[0].pcm).every(n=>n===7)&&header.getUint32(24,true)===16000&&header.getUint32(40,true)===128&&data.byteLength===172;
+  results.push({test:'IndexedDB real e WAV de recuperação',passed,jobLimit,totalLimit,persistedBytes:wave.bytes,wavBytes:data.byteLength});
+  await reopened.remove(a);await reopened.remove(b);const stale=crypto.randomUUID();await store.start(stale);let protectedActive=false;try{await store.remove(stale);}catch(error){protectedActive=error.code==='REQUEST';}await store.remove(stale,{force:true});results.push({test:'remoção explícita só de jobs sintéticos e proteção de captura ativa',passed:protectedActive&&!(await reopened.list()).some(j=>j.jobId===a||j.jobId===b||j.jobId===stale)});
+ }catch(error){results.push({test:'IndexedDB/WAV',passed:false,error:error.message});}
+ document.querySelector('#result').textContent=JSON.stringify({browserNativeTimers:true,geminiCalled:false,microphoneOpened:false,results},null,2);this.disabled=false;
+};
+</script>
+</html>

@@ -168,6 +168,33 @@ button.btn{font-size:12px;padding:6px 10px;border-radius:7px}
   <header class="top"><div class="brand"><div class="logo">🔊</div><div><h1>EXT TTS STT <span class="badge">Gemini Multimodal</span></h1><p>Agentes, instruções de sistema, TTS, STT, Lens, atalhos e diagnóstico</p></div></div><span id="storageBadge" class="badge">Storage OK</span></header>
   <section class="card"><h2>Tarefas globais</h2><p class="muted">Consulte e controle cada tarefa, inclusive quando a página não permite mostrar o HUD.</p><div id="globalHudPanel"></div></section>
   <section class="card"><div class="field"><label for="dictationInsertion">Inserção do ditado</label><select id="dictationInsertion"><option value="final">Ao finalizar (padrão)</option><option value="realtime">Em tempo real</option></select><p class="muted">Usa exclusivamente o campo original. Resultados provisórios podem mudar; edições manuais interrompem a inserção automática para proteger seu texto. Em tempo real suspende a transformação do agente; Ao finalizar restaura sua preferência.</p><span id="dictationInsertionStatus" role="status" class="muted"></span></div></section>
+  <section class="card"><div class="field"><label for="sttVadDetector">Detector de voz do ditado no campo</label><select id="sttVadDetector"><option value="hybrid">Híbrido Silero (padrão)</option><option value="rms">RMS</option></select><p class="muted">Silero mantém o contexto da captura. Selecionar RMS troca imediatamente o detector de um ditado ativo. Híbrido será usado na próxima captura.</p><span id="sttVadDetectorStatus" role="status" aria-live="polite" class="muted"></span></div></section>
+  <section class="card" id="sttRecognition">
+    <h2>Reconhecimento STT</h2>
+    <p class="muted">Preferências globais para os próximos ditados, em todos os agentes.</p>
+    <form id="sttRecognitionForm">
+      <div class="field">
+        <label for="sttRecognitionInstructions">Instruções de transcrição</label>
+        <textarea id="sttRecognitionInstructions" rows="8" aria-describedby="sttRecognitionInstructionsHelp"></textarea>
+        <p class="muted" id="sttRecognitionInstructionsHelp">O texto orienta a sessão Live. O reconhecimento de fala tem parâmetros próprios e o Gemini pode ignorar as instruções ao transcrever a entrada.</p>
+      </div>
+      <div class="field">
+        <label for="sttRecognitionLanguage">Idioma preferencial</label>
+        <select id="sttRecognitionLanguage"><option value="pt-BR">Português (Brasil)</option><option value="auto">Detecção automática</option></select>
+      </div>
+      <div class="field">
+        <label for="sttRecognitionVocabulary">Vocabulário personalizado</label>
+        <textarea id="sttRecognitionVocabulary" rows="3" aria-describedby="sttRecognitionVocabularyHelp"></textarea>
+        <p class="muted" id="sttRecognitionVocabularyHelp">Uma expressão por linha, até 1.000 termos. Inclua nomes próprios, siglas e termos técnicos.</p>
+      </div>
+      <p class="muted" id="sttRecognitionCompatibility"></p>
+      <div class="row">
+        <button id="saveSttRecognition" type="submit" class="btn good">Salvar reconhecimento</button>
+        <button id="restoreSttInstructions" type="button" class="btn" title="Restaurar somente as instruções de transcrição">Restaurar padrão</button>
+      </div>
+      <p class="muted" id="sttRecognitionStatus" role="status" aria-live="polite"></p>
+    </form>
+  </section>
   <nav class="tabs">
     <button class="tab" data-tab="api">🔑 Chaves Gemini</button>
     <button class="tab active" data-tab="agents">🤖 Agentes & Personas</button>
@@ -250,7 +277,7 @@ button.btn{font-size:12px;padding:6px 10px;border-radius:7px}
 
         </aside>
       </div>
-      <div data-editor-mode="stt" class="editor-columns hidden"><div class="card compact"><h3>Ditado e transcrição Live</h3><div class="field"><label for="liveSttModel">Modelo STT Live</label><select id="liveSttModel"></select></div><div class="field"><label for="liveSttVocabulary">Vocabulário personalizado (uma expressão por linha)</label><textarea id="liveSttVocabulary" rows="3"></textarea></div><label class="field"><input id="liveSttSmart" type="checkbox"> Transcrição inteligente</label><label class="field"><input id="liveSttTransform" type="checkbox"> Transformar texto com este agente após STT</label><span id="liveSttTransformStatus" role="status" class="muted"></span><div class="field hidden"><label for="agentSttModel">Modelo STT legado</label><select id="agentSttModel"></select></div><div class="field" style="margin-top:14px"><label for="sttInstruction">Instrução da persona</label><textarea id="sttInstruction" rows="5"></textarea><p class="muted">Aplicada à transformação Live após a transcrição.</p></div></div><div class="card compact"><h3>Testar ditado Live</h3><p class="muted">O microfone envia PCM em tempo real.</p><div class="row"><button id="recordStt" class="btn">Iniciar gravação</button><button id="clearStt" class="btn ghost">Limpar resultado</button></div><div id="sttStatus" class="status"></div><div id="sttResult" class="result-box">O texto transcrito aparecerá aqui.</div><div class="row" style="margin-top:14px"><button id="copySttDiagnostics" type="button" class="btn ghost">Copiar diagnóstico STT</button></div><p id="sttDiagnosticsStatus" class="muted" role="status" aria-live="polite"></p><p class="muted">Copia somente contadores e estados desta sessão do navegador, sem chaves, áudio ou texto reconhecido. Inclui ditados do HUD; não precisa abrir o Console.</p></div></div>
+      <div data-editor-mode="stt" class="editor-columns hidden"><div class="card compact"><h3>Ditado e transcrição Live</h3><div class="field"><label for="liveSttModel">Modelo STT Live</label><select id="liveSttModel"></select></div><p class="muted"><a href="#sttRecognition">Instruções, idioma e vocabulário globais do STT</a></p><label class="field"><input id="liveSttTransform" type="checkbox"> Transformar texto com este agente após STT</label><span id="liveSttTransformStatus" role="status" class="muted"></span><div class="field hidden"><label for="agentSttModel">Modelo STT legado</label><select id="agentSttModel"></select></div><div class="field" style="margin-top:14px"><label for="sttInstruction">Instrução da persona</label><textarea id="sttInstruction" rows="5"></textarea><p class="muted">Aplicada à transformação Live após a transcrição.</p></div></div><div class="card compact"><h3>Testar ditado Live</h3><p class="muted">O microfone envia PCM em tempo real.</p><div class="row"><button id="recordStt" class="btn">Iniciar gravação</button><button id="clearStt" class="btn ghost">Limpar resultado</button></div><div id="sttStatus" class="status"></div><div id="sttResult" class="result-box">O texto transcrito aparecerá aqui.</div><div class="row" style="margin-top:14px"><button id="copySttDiagnostics" type="button" class="btn ghost">Copiar diagnóstico STT</button></div><p id="sttDiagnosticsStatus" class="muted" role="status" aria-live="polite"></p><p class="muted">Copia somente contadores e estados desta sessão do navegador, sem chaves, áudio ou texto reconhecido. Inclui ditados do HUD; não precisa abrir o Console.</p></div></div>
       <div data-editor-mode="lens" class="editor-columns hidden"><div class="card compact"><h3>Interpretação visual</h3><div class="grid"><div class="field"><label for="agentVisionModel">Modelo Lens</label><select id="agentVisionModel"></select></div><div class="field"><label for="agentGeneralModel">Modelo geral</label><select id="agentGeneralModel"></select></div></div><div class="field" style="margin-top:14px"><label for="lensInstruction">Instrução da persona</label><textarea id="lensInstruction" rows="5"></textarea><p class="muted">Defina como descrever, extrair, traduzir ou explicar a região selecionada na página.</p></div></div></div>
       <div class="editor-footer"><div><strong id="agentSaveHint">Agente de fábrica protegido.</strong><p class="muted">Criar agente salva uma cópia completa das três modalidades e ativa a nova persona.</p><div id="agentStatus" class="status" aria-live="polite"></div></div><div class="row"><button id="saveAgent" class="btn good hidden">Salvar alterações</button><button id="deleteAgent" class="btn danger hidden">Excluir agente</button><button id="createAgent" class="btn primary">＋ Criar agente com estas personalizações</button></div></div>
     </div>

@@ -1,3 +1,4 @@
+const {voiceFrame,voicePcm}=require('./stt-audio-fixture.cjs');
 const test=require('node:test'),assert=require('node:assert/strict'),vm=require('node:vm'),fs=require('node:fs');
 const config=require('../live-config.js'),sessions=require('../live-session-manager.js'),source=fs.readFileSync(require.resolve('../content.js'),'utf8'),flush=()=>new Promise(r=>setImmediate(r));
 function deferred(){let resolve;const promise=new Promise(r=>resolve=r);return{promise,resolve};}
@@ -8,7 +9,7 @@ function contentEnv({slowMic=false,slowModule=false,slowStart=false,diagnostics=
  const input=new Textarea(),other=new Textarea('outro'),doc={activeElement:input,addEventListener(name,fn){events[name]=fn;},createTextNode:text=>({text}),createRange(){throw Error('range não configurado');}};
  const hud={init(){},setStatus:(kind,label)=>states.push([kind,label]),setTextPreview(text){this.preview=text;},setCaptureNotice(text){this.captureNotice=text;},show(){}};
  function stream(){const track=Object.assign(new EventTarget(),{stopped:false,stop(){this.stopped=true;}});const item={track,getTracks:()=>[track]};streams.push(item);return item;}
- class AudioContext extends EventTarget{constructor(){super();this.sampleRate=48000;this.state='suspended';this.destination={};this.audioWorklet={addModule:()=>slowModule?moduleReady.promise:Promise.resolve()};contexts.push(this);}createMediaStreamSource(){return{connect:x=>x,disconnect(){}};}createGain(){return{gain:{value:1},connect:x=>x,disconnect(){}};}async resume(){this.state='running';this.dispatchEvent(new Event('statechange'));}async close(){this.state='closed';this.dispatchEvent(new Event('statechange'));}}
+ class AudioContext extends EventTarget{constructor(){super();this.sampleRate=48000;this.state='suspended';this.destination={};this.audioWorklet={addModule:()=>slowModule?moduleReady.promise:Promise.resolve()};contexts.push(this);}createMediaStreamSource(){return{connect:x=>{this.sourceConnected=true;return x;},disconnect(){}};}createGain(){return{gain:{value:1},connect:x=>x,disconnect(){}};}async resume(){this.state='running';this.dispatchEvent(new Event('statechange'));}async close(){this.state='closed';this.dispatchEvent(new Event('statechange'));}}
  class Node extends EventTarget{constructor(){super();nodes.push(this);this.port={postMessage:msg=>{if(msg.type==='flush')this.port.onmessage({data:{type:'flushed'}});}};}connect(x){return x;}disconnect(){this.disconnected=true;}}
  const runtime={id:'test-extension',invalid:false,getManifest(){if(this.invalid)throw Error('Extension context invalidated.');return{manifest_version:3};},getURL(x){if(this.invalid)throw Error('Extension context invalidated.');return x;},sendMessage(msg){messages.push(msg);if(this.invalid||this.throwOn===msg.type)throw Error('Extension context invalidated.');if(this.rejectOn===msg.type)return Promise.reject(Error('Extension context invalidated.'));if(msg.type==='STT_LIVE_START'&&slowStart)return startReady.promise;return Promise.resolve({success:true});}};
  const context=vm.createContext({console:{...console,error:(...args)=>errors.push(args)},Event,HTMLInputElement:Input,HTMLTextAreaElement:Textarea,document:doc,window:{getSelection:()=>null,addEventListener(name,fn){events[name]=fn;}},navigator:{mediaDevices:{getUserMedia:async()=>slowMic?micReady.promise:stream()}},AudioContext,AudioWorkletNode:Node,Float32Array,Int16Array,Uint8Array,setTimeout,clearTimeout,setInterval:fn=>{const id=Symbol();timers.set(id,fn);return id;},clearInterval:id=>timers.delete(id),btoa,crypto:require('node:crypto').webcrypto,chrome:{runtime}});
@@ -23,7 +24,7 @@ function contentEnv({slowMic=false,slowModule=false,slowStart=false,diagnostics=
 }
 function assertInvalidated(e){assert.equal(e.stt.liveJobId,null);assert.equal(e.stt.isRecording,false);assert.equal(e.timers.size,0);assert.ok(e.streams.every(s=>s.track.stopped));assert.ok(e.contexts.every(c=>c.state==='closed'));assert.equal(e.states.at(-1)[1],'Atualize a página');assert.match(e.hud.preview,/F5/);}
 test('realtime e final processam blocos VAD antes do Stop, sem confundir modalidade de inserção',async()=>{
- for(const realtime of [false,true]){const e=contentEnv();e.stt.insertionMode=realtime?'realtime':'final';await e.stt.startLiveRecording('custom');const start=e.messages.find(m=>m.type==='STT_LIVE_START');assert.equal(start.payload.realtime,realtime);assert.equal(start.payload.chunked,true);assert.equal(start.payload.agentId,'custom');const input=new Float32Array(4800).fill(.1);e.nodes[0].port.onmessage({data:input.buffer});await flush();const packet=e.messages.find(m=>m.type==='STT_LIVE_AUDIO');assert.ok(packet?.payload.chunk);assert.equal(e.messages.some(m=>m.type==='STT_LIVE_STOP'),false);for(let i=0;i<5;i++)e.nodes[0].port.onmessage({data:new Float32Array(4800).buffer});await flush();await e.stt.liveCapture.audioQueue.drain();assert.ok(e.messages.some(m=>m.payload?.endOnly&&m.payload.chunk.cutReason==='silence'));const jobId=e.stt.liveJobId;await e.stt.handleLiveEvent({jobId,event:'stt-partial',confirmedText:'',partialText:'fala em andamento'});assert.equal(e.input.value,realtime?'Fala em andamentooriginal':'original');assert.equal(e.stt.isRecording,true);e.stt.cancelRecording();await flush();assert.equal(e.streams[0].track.stopped,true);}
+ for(const realtime of [false,true]){const e=contentEnv();e.stt.insertionMode=realtime?'realtime':'final';await e.stt.startLiveRecording('custom');const start=e.messages.find(m=>m.type==='STT_LIVE_START');assert.equal(start.payload.realtime,realtime);assert.equal(start.payload.chunked,true);assert.equal(start.payload.agentId,'custom');const input=voiceFrame();e.nodes[0].port.onmessage({data:input.buffer});await flush();const packet=e.messages.find(m=>m.type==='STT_LIVE_AUDIO');assert.ok(packet?.payload.chunk);assert.equal(e.messages.some(m=>m.type==='STT_LIVE_STOP'),false);for(let i=0;i<5;i++)e.nodes[0].port.onmessage({data:new Float32Array(4800).buffer});await flush();await e.stt.liveCapture.audioQueue.drain();assert.ok(e.messages.some(m=>m.payload?.endOnly&&m.payload.chunk.cutReason==='silence'));const jobId=e.stt.liveJobId;await e.stt.handleLiveEvent({jobId,event:'stt-partial',confirmedText:'',partialText:'fala em andamento'});assert.equal(e.input.value,realtime?'Fala em andamentooriginal':'original');assert.equal(e.stt.isRecording,true);e.stt.cancelRecording();await flush();assert.equal(e.streams[0].track.stopped,true);}
 });
 test('página antiga não abre microfone nem envia mensagens; página nova opera',async()=>{
  const old=contentEnv();old.runtime.invalid=true;await old.stt.toggleRecording('narrator');assertInvalidated(old);assert.equal(old.streams.length,0);assert.equal(old.messages.length,0);
@@ -60,7 +61,7 @@ test('rejeição durante START é tratada sem repetir mensagens em contexto inv�
 });
 test('PCM rejeitado encerra captura e descarta PCM/final tardios sem rejeição não tratada',async()=>{
  const e=contentEnv();await e.stt.startLiveRecording('narrator');const jobId=e.stt.liveJobId,generation=e.stt.liveGeneration,queuedCallback=e.nodes[0].port.onmessage;e.runtime.rejectOn='STT_LIVE_AUDIO';e.runtime.throwOn='STT_LIVE_CANCEL';
- queuedCallback({data:new Float32Array([.1,.2,.3]).buffer});await flush();await flush();assertInvalidated(e);const count=e.messages.length;assert.equal(e.nodes[0].port.onmessage,null);
+ queuedCallback({data:voiceFrame().buffer});await flush();await flush();assertInvalidated(e);const count=e.messages.length;assert.equal(e.nodes[0].port.onmessage,null);
  queuedCallback({data:new Float32Array([.2]).buffer});await e.stt.handleLiveEvent({jobId,generation,event:'stt-final',text:'tardio'});assert.equal(e.messages.length,count);assert.equal(e.input.value,'original');
 });
 test('invalidação silenciosa durante captura encerra microfone sem reconexão',async()=>{
@@ -74,7 +75,7 @@ test('cancelamento enquanto final aguarda close impede inserção atrasada',asyn
  const final=e.stt.handleLiveEvent({jobId:e.stt.liveJobId,generation:e.stt.liveGeneration,event:'stt-final',text:'tardio'});e.stt.cancelRecording();closing.resolve();await final;assert.equal(e.input.value,'original');assert.equal(e.stt.isRecording,false);
 });
 test('STOP rejeitado por invalidação limpa job e não tenta CANCEL inválido',async()=>{
- const e=contentEnv();await e.stt.startLiveRecording('narrator');e.nodes[0].port.onmessage({data:new Float32Array([.1,.2,.3]).buffer});await flush();e.runtime.rejectOn='STT_LIVE_STOP';await e.stt.stopLiveRecording();await flush();assertInvalidated(e);assert.deepEqual(e.messages.filter(m=>m.type.startsWith('STT_LIVE_')).map(m=>m.type),['STT_LIVE_START','STT_LIVE_AUDIO','STT_LIVE_AUDIO','STT_LIVE_STOP']);assert.equal(e.messages.filter(m=>m.type==='STT_LIVE_AUDIO').at(-1).payload.endOnly,true);
+ const e=contentEnv();await e.stt.startLiveRecording('narrator');e.nodes[0].port.onmessage({data:voiceFrame().buffer});await flush();e.runtime.rejectOn='STT_LIVE_STOP';await e.stt.stopLiveRecording();await flush();assertInvalidated(e);assert.deepEqual(e.messages.filter(m=>m.type.startsWith('STT_LIVE_')).map(m=>m.type),['STT_LIVE_START','STT_LIVE_AUDIO','STT_LIVE_AUDIO','STT_LIVE_STOP']);assert.equal(e.messages.filter(m=>m.type==='STT_LIVE_AUDIO').at(-1).payload.endOnly,true);
 });
 test('getURL invalidado entre setup e worklet encerra stream sem reabrir sessão',async()=>{
  const e=contentEnv();e.runtime.getURL=()=>{throw Error('Extension context invalidated.');};await e.stt.startLiveRecording('narrator');await flush();assertInvalidated(e);assert.equal(e.nodes.length,0);assert.deepEqual(e.messages.map(m=>m.type),['STT_CAPTURE_RESERVE','STT_LIVE_START']);
@@ -102,7 +103,7 @@ test('PCM → VAD → transporte → registro → campo original: parcial inseri
  const emit=result=>{delivery=delivery.then(async()=>{const payload={jobId:e.stt.liveJobId,event:'stt-partial',eventSeq:++sequence,...result};await registry.event(payload);await e.stt.handleLiveEvent(payload);});};
  let transport;e.runtime.sendMessage=async message=>{e.messages.push(message);const p=message.payload;if(message.type==='STT_LIVE_START'){await registry.start({...p,type:'STT',origin});transport=new e.context.SttRealtime.LiveChunkTransport({jobId:p.jobId,sendAudio(){},endAudio(){ended++;},onPartial:emit});}if(message.type==='STT_LIVE_AUDIO')transport.submitAudioChunk({pcm:new Uint8Array(Buffer.from(p.audioBase64||'','base64')),chunk:p.chunk,endOnly:p.endOnly});if(message.type==='HUD_CAPTURE_STATE')await registry.capture(p,origin);return{success:true};};
  e.stt.insertionMode='realtime';await e.stt.startLiveRecording('narrator');e.doc.activeElement=e.other;
- for(let i=0;i<7;i++)e.nodes[0].port.onmessage({data:new Float32Array(4800).fill(.1).buffer});for(let i=0;i<5;i++)e.nodes[0].port.onmessage({data:new Float32Array(4800).buffer});await e.stt.liveCapture.audioQueue.drain();assert.equal(ended,1);
+ for(let i=0;i<7;i++)e.nodes[0].port.onmessage({data:voiceFrame().buffer});for(let i=0;i<5;i++)e.nodes[0].port.onmessage({data:new Float32Array(4800).buffer});await e.stt.liveCapture.audioQueue.drain();assert.equal(ended,1);
  transport.receive({inputTranscription:{text:'fala antes do Stop'}});await delivery;assert.equal(e.input.value,'Fala antes do Stoporiginal');assert.equal(e.other.value,'outro');assert.equal(e.stt.isRecording,true);assert.equal(e.streams[0].track.stopped,false);assert.equal(e.messages.some(m=>m.type==='STT_LIVE_STOP'),false);assert.equal((await registry.get()).jobs[0].partialText,'fala antes do Stop');
  transport.cancel();e.stt.cancelRecording();await flush();assert.equal(e.streams[0].track.stopped,true);
 });
@@ -141,7 +142,7 @@ test('final anterior conserva seu alvo enquanto novo job grava em outro campo',a
 });
 test('resultado atrasado no mesmo campo permanece no job sem invalidar a inserção mais recente',async()=>{
  const e=contentEnv();await e.stt.startLiveRecording('narrator');const first=e.stt.liveCapture;
- e.nodes[0].port.onmessage({data:new Float32Array([.1,.2,.3]).buffer});await e.stt.stopLiveRecording();
+ e.nodes[0].port.onmessage({data:voiceFrame().buffer});await e.stt.stopLiveRecording();
  const reserve=deferred(),send=e.runtime.sendMessage.bind(e.runtime);
  e.runtime.sendMessage=message=>message.type==='STT_CAPTURE_RESERVE'?reserve.promise:send(message);
  const starting=e.stt.startLiveRecording('narrator'),second=e.stt.liveCapture;
@@ -193,7 +194,7 @@ test('cancelamento durante setup/worklet impede inicialização atrasada',async(
  for(const phase of ['start','module']){const e=contentEnv({slowStart:phase==='start',slowModule:phase==='module'}),starting=e.stt.startLiveRecording('narrator');await flush();e.stt.cancelRecording();if(phase==='start')e.startReady.resolve({success:true});else e.moduleReady.resolve();await starting;assert.equal(e.streams[0].track.stopped,true);assert.equal(e.stt.isRecording,false);assert.equal(e.nodes.length,0);if(e.contexts.length)assert.equal(e.contexts[0].state,'closed');}
 });
 test('parada envia PCM pendente antes de STOP e libera microfone antes do final',async()=>{
- const e=contentEnv();await e.stt.startLiveRecording('narrator');e.nodes[0].port.onmessage({data:new Float32Array([.1,.2,.3]).buffer});const jobId=e.stt.liveJobId,generation=e.stt.liveGeneration;await e.stt.stopLiveRecording();
+ const e=contentEnv();await e.stt.startLiveRecording('narrator');e.nodes[0].port.onmessage({data:voiceFrame().buffer});const jobId=e.stt.liveJobId,generation=e.stt.liveGeneration;await e.stt.stopLiveRecording();
  assert.deepEqual(e.messages.filter(m=>m.type.startsWith('STT_LIVE_')).map(m=>m.type),['STT_LIVE_START','STT_LIVE_AUDIO','STT_LIVE_AUDIO','STT_LIVE_STOP']);assert.equal(e.messages.filter(m=>m.type==='STT_LIVE_AUDIO').at(-1).payload.endOnly,true);assert.equal(e.streams[0].track.stopped,true);assert.equal(e.contexts[0].state,'closed');assert.equal(e.stt.isRecording,false);assert.equal(e.stt.liveJobId,null);assert.equal(e.stt.liveJobs.has(jobId),true);
  await e.stt.handleLiveEvent({jobId,generation,event:'stt-final',text:'Ditado'});assert.equal(e.stt.liveJobId,null);assert.match(e.states.at(-1)[1],/Parado/);
 });
@@ -209,7 +210,7 @@ function offscreenEnv(acquire,deliver){const events=[],attempts=[],timers=new Ma
  return{events,attempts,retired,timers,diagnostics,recovery,recoveryService:context.SttRecovery,command:p=>new Promise(r=>listener({type:'LIVE_OFFSCREEN_COMMAND',target:'offscreen',payload:p},{},r)),expire(){for(const [id,t]of [...timers]){timers.delete(id);t.fn();}},async advance(ms){const end=clock+ms;let count=0;for(;;){const next=[...timers].filter(([,t])=>t.at<=end).sort((a,b)=>a[1].at-b[1].at)[0];if(!next)break;assert.ok(++count<1000,'timers devem ser finitos');const [id,timer]=next;timers.delete(id);clock=timer.at;timer.fn();await flush();}clock=end;}};
 }
 const base={jobId:'test',modelId:'gemini-3.8-live',operation:'STT_LIVE_START',apiKeys:['fake-only']};
-function preferenceFlow({mode='realtime',legacyMode}={}){
+function preferenceFlow({mode='realtime',legacyMode,distributed=false}={}){
  const e=contentEnv({diagnostics:true}),raw={ui:{dictationInsertion:mode,theme:'dark',shortcuts:{startDictation:'Pause'}},api:{apiKeys:Array.from({length:9},(_,i)=>'unit-account-'+i)},agents:{activeAgentId:'custom',customAgents:[{metadata:{id:'custom',isBuiltIn:false},instructions:{sttFormattingInstruction:'Preserve o sentido da fala e pontue o texto público.'},live:{preferredModel:'gemini-3.8-live',stt:{transform:true,preferredModel:'gemini-3.8-live'}}}]},history:{enabled:false,recentItems:[]},...(legacyMode?{uiPreferences:{dictationInsertion:legacyMode,theme:'dark',shortcuts:{startDictation:'Pause'}}}:{})};
  const changes=new Set(),sessionStore={},deliveries=[],routed=[],liveSessions=[];let router;
  const local={get(keys,callback){const selected=keys===null?structuredClone(raw):Object.fromEntries((Array.isArray(keys)?keys:[keys]).filter(key=>key in raw).map(key=>[key,structuredClone(raw[key])]));if(callback){callback(selected);return;}return Promise.resolve(selected);},set(values,callback){const event={};for(const [key,value]of Object.entries(values)){event[key]={oldValue:structuredClone(raw[key]),newValue:structuredClone(value)};raw[key]=structuredClone(value);}for(const listener of changes)listener(event,'local');callback?.();return Promise.resolve();}};
@@ -218,19 +219,70 @@ function preferenceFlow({mode='realtime',legacyMode}={}){
  const offscreen=offscreenEnv(async options=>{const live={options,id:'live-1793242000000-test',sent:[],sendAudio(bytes){this.sent.push(bytes.slice());},endAudio(){this.endCount=(this.endCount||0)+1;},async sendTurn(){return{text:'Texto público transformado.'};}};liveSessions.push({options,live});return live;},packet=>{const delivery=router.handleExtensionMessage({type:'LIVE_OFFSCREEN_EVENT',payload:packet},{url:'chrome-extension://test/offscreen.html'});deliveries.push(delivery);return delivery;});
  const background=vm.createContext({console,structuredClone,AbortController,setTimeout,clearTimeout,chrome:{storage,runtime:{getURL:x=>'chrome-extension://test/'+x,sendMessage:async()=>({success:true})},tabs:{get:async id=>({id,autoDiscardable:true}),update:async()=>{},sendMessage:async(_tab,message)=>{if(message.type==='STT_LIVE_EVENT')await e.stt.handleLiveEvent(message.payload);return{success:true};}}}});
  vm.runInContext(require('./load-background.cjs')(require.resolve('../background.js')).replace('__require("extension/src/background/index.ts");','globalThis.modules=__modules;'),background);
- const cache={},overrides={'extension/src/services/backgroundPlayback.ts':{hasDocument:async()=>false,handlePlaybackCommand:async payload=>{routed.push(payload);return offscreen.command(payload);}},'extension/src/services/diagnosticLogger.ts':{logDiagnostic:async()=>{}}};
+ // Keep the v1.0.5 transport regression for callers that do not negotiate distributed blocks.
+ const cache={},overrides={'extension/src/services/backgroundPlayback.ts':{hasDocument:async()=>false,handlePlaybackCommand:async payload=>{routed.push(payload);return offscreen.command(distributed?payload:{...payload,distributed:false});}},'extension/src/services/diagnosticLogger.ts':{logDiagnostic:async()=>{}}};
  function load(id){if(overrides[id])return overrides[id];if(cache[id])return cache[id].exports;const module=cache[id]={exports:{}};background.modules[id](module,module.exports,load);return module.exports;}
- router=load('extension/src/background/messageRouter.ts');e.context.chrome.storage=storage;e.runtime.sendMessage=async message=>{e.messages.push(message);return router.handleExtensionMessage(message,sender);};
+ router=load('extension/src/background/messageRouter.ts');e.context.chrome.storage=storage;e.runtime.sendMessage=async message=>{e.messages.push(message);return router.handleExtensionMessage(message.type==='STT_LIVE_START'?{...message,payload:{...message.payload,editorDelivery:false}}:message,sender);};
  const adapter=e.load('extension/src/services/storage/chromeStorageAdapter.ts').chromeStorage;loadEntrypoint(e,adapter);e.events.DOMContentLoaded();
  const optionsSource=fs.readFileSync(require.resolve('../options.js'),'utf8'),options=vm.createContext({state:{ui:structuredClone(raw.ui)},chrome:{storage}});vm.runInContext(optionsSource.slice(optionsSource.indexOf('async function saveDictationInsertion('),optionsSource.indexOf('async function startLiveTtsPreview(')),options);
- return{e,raw,offscreen,routed,liveSessions,saveMode:mode=>options.saveDictationInsertion(mode),diagnostics:()=>router.handleExtensionMessage({type:'LIVE_STT_DIAGNOSTICS_GET'},{url:'chrome-extension://test/options.html'}),async delivered(){for(let i=0;i<12;i++){await flush();const count=deliveries.length;await Promise.all(deliveries);await flush();if(count===deliveries.length)return;}throw Error('Eventos STT não estabilizaram.');}};
+ return{e,raw,offscreen,routed,liveSessions,saveMode:mode=>options.saveDictationInsertion(mode),
+  saveRecognition:payload=>router.handleExtensionMessage({type:'STT_RECOGNITION_SAVE',payload},{url:'chrome-extension://test/options.html'}),
+  diagnostics:()=>router.handleExtensionMessage({type:'LIVE_STT_DIAGNOSTICS_GET'},{url:'chrome-extension://test/options.html'}),async delivered(){for(let i=0;i<12;i++){await flush();const count=deliveries.length;await Promise.all(deliveries);await flush();if(count===deliveries.length)return;}throw Error('Eventos STT não estabilizaram.');}};
 }
+test('STT distribuído fixa o reconhecimento nas nove contas até o próximo ditado, em ambos os modos',async()=>{
+ const first={instructions:'Preserve nomes técnicos.\nMantenha siglas.',language:'pt-BR',customVocabulary:['FalaMermo','Kubernetes']};
+ const next={instructions:'Mantenha nomes próprios.',language:'auto',customVocabulary:['OpenTelemetry']};
+ const pcm=Buffer.alloc(3200,1).toString('base64');
+ for(const mode of ['final','realtime']){
+  const flow=preferenceFlow({mode,distributed:true}),{e,liveSessions,offscreen}=flow;
+  const request=(type,payload)=>e.runtime.sendMessage({type,payload});
+  assert.equal((await request('STT_RECOGNITION_SAVE',first)).success,false,'páginas não podem alterar reconhecimento');
+  assert.equal((await flow.saveRecognition(first)).success,true);
+  async function dictate(jobId,blocks,preferences,expectedHints){
+   const start=await request('STT_LIVE_START',{jobId,agentId:'narrator',distributed:true,chunked:true,realtime:mode==='realtime'});
+   assert.equal(start.success,true,start.error);
+   let packetSequence=0;
+   for(let sequence=1;sequence<=blocks;sequence++){
+    const chunk={jobId,chunkId:jobId+':'+sequence,sequence,startMs:(sequence-1)*100,endMs:sequence*100,overlapMs:0,speechAfterOverlap:true};
+    const audio=await request('STT_LIVE_AUDIO',{jobId,audioBase64:pcm,chunk:{...chunk,packetSequence:++packetSequence,status:'streaming'}});
+    assert.equal(audio.success,true,audio.error);
+    const end=await request('STT_LIVE_AUDIO',{jobId,endOnly:true,chunk:{...chunk,packetSequence:++packetSequence,status:'closed',cutReason:'silence'}});
+    assert.equal(end.success,true,end.error);
+    const lanes=()=>liveSessions.filter(lane=>lane.options.jobId===jobId&&lane.options.blockId===sequence);
+    for(let tick=0;tick<1000&&lanes().filter(lane=>lane.live.endCount===1).length!==2;tick++)await flush();
+    assert.equal(lanes().filter(lane=>lane.live.endCount===1).length,2);
+    assert.notEqual(lanes()[0].options.keyIndex,lanes()[1].options.keyIndex);
+    for(const lane of lanes()){
+     const setup=config.buildLiveSttSessionConfig(lane.options).setup;
+     assert.deepEqual(setup.inputAudioTranscription,expectedHints);
+     assert.ok(setup.systemInstruction.parts[0].text.startsWith(preferences.instructions));
+    }
+    lanes()[1].live.handler({serverContent:{inputTranscription:{text:'Bloco '+sequence+'.',finished:true}}});
+    if(blocks>1&&sequence===1)assert.equal((await flow.saveRecognition(next)).success,true);
+   }
+   assert.equal((await request('HUD_CAPTURE_STATE',{jobId,status:'waiting',microphoneReleased:true})).success,true);
+   assert.equal((await request('STT_LIVE_STOP',{jobId})).success,true);
+   await flow.delivered();
+   assert.equal(offscreen.events.find(event=>event.jobId===jobId&&event.event==='stt-final')?.text,
+    Array.from({length:blocks},(_,index)=>'Bloco '+(index+1)+'.').join(' '));
+  }
+  const firstJob='00000000-0000-4000-8000-000000000001',nextJob='00000000-0000-4000-8000-000000000002';
+  await dictate(firstJob,5,first,{languageCodes:['pt-BR'],customVocabulary:['FalaMermo','Kubernetes']});
+  assert.equal(new Set(liveSessions.filter(lane=>lane.options.jobId===firstJob).map(lane=>lane.options.keyIndex)).size,9);
+  await dictate(nextJob,1,next,{customVocabulary:['OpenTelemetry']});
+  const restored=await flow.saveRecognition({restoreInstructions:true});
+  assert.equal(restored.success,true);
+  assert.deepEqual(flow.raw.sttRecognition,{...next,instructions:config.STT_DEFAULT_INSTRUCTIONS});
+  const publicLog=JSON.stringify([...offscreen.events,...offscreen.diagnostics]);
+  for(const term of [...first.customVocabulary,...next.customVocabulary,first.instructions,next.instructions])assert.ok(!publicLog.includes(term));
+ }
+});
 test('Options → storage normalizado → content → background → offscreen → registro/editor preservam modo e transformação efetivos',async()=>{
  for(const scenario of [{mode:'realtime'},{mode:'final',changeTo:'realtime'},{mode:'realtime',legacyMode:'final'},{mode:'final'}]){
  const flow=preferenceFlow(scenario),{e,raw}=flow,agentBefore=JSON.stringify(raw.agents),keysBefore=JSON.stringify(raw.api),expected=scenario.changeTo||scenario.mode;await e.stt.preferencesReady;if(scenario.changeTo)await flow.saveMode(scenario.changeTo);
  await e.stt.startLiveRecording('custom');const jobId=e.stt.liveJobId;try{assert.ok(jobId);const start=e.messages.find(m=>m.type==='STT_LIVE_START');assert.equal(start.payload.realtime,expected==='realtime');assert.equal(e.stt.liveJobs.get(jobId).mode,expected);assert.equal(e.stt.liveJobs.get(jobId).transform,expected==='final');const routed=flow.routed.find(p=>p.operation==='STT_LIVE_START');assert.equal(routed.realtime,expected==='realtime');assert.equal(routed.transformInstruction,expected==='realtime'?null:raw.agents.customAgents[0].instructions.sttFormattingInstruction);
  e.doc.activeElement=e.other;
- for(const text of ['fala pública','continua em ordem']){for(let i=0;i<7;i++)e.nodes[0].port.onmessage({data:new Float32Array(4800).fill(.1).buffer});for(let i=0;i<5;i++)e.nodes[0].port.onmessage({data:new Float32Array(4800).buffer});await e.stt.liveCapture.audioQueue.drain();flow.liveSessions[0].live.handler({serverContent:{inputTranscription:{text,finished:true}}});await flow.delivered();}
+ for(const text of ['fala pública','continua em ordem']){for(let i=0;i<7;i++)e.nodes[0].port.onmessage({data:voiceFrame().buffer});for(let i=0;i<5;i++)e.nodes[0].port.onmessage({data:new Float32Array(4800).buffer});await e.stt.liveCapture.audioQueue.drain();flow.liveSessions[0].live.handler({serverContent:{inputTranscription:{text,finished:true}}});await flow.delivered();}
  assert.equal(e.input.value,expected==='realtime'?'Fala pública continua em ordemoriginal':'original');assert.equal(e.other.value,'outro');assert.equal(e.stt.isRecording,true);assert.equal(e.messages.some(m=>m.type==='STT_LIVE_STOP'),false);assert.equal(flow.liveSessions.length,1);
  const stateBefore=await e.runtime.sendMessage({type:'HUD_GLOBAL_GET'});assert.equal(stateBefore.state.jobs.find(j=>j.jobId===jobId).text,'fala pública continua em ordem');const stored=(await flow.diagnostics()).diagnostics.jobs.find(j=>j.jobId===jobId);assert.equal(stored.capture.insertionMode,expected);assert.equal(stored.capture.transform,expected==='final');if(expected==='realtime'){assert.equal(stored.result.whileRecording,true);assert.equal(stored.result.finalInsertion,false);}else assert.equal(stored.result,undefined);
  await e.stt.stopLiveRecording();await flow.delivered();assert.equal(e.input.value,expected==='realtime'?'Fala pública continua em ordemoriginal':'Texto público transformado.original');assert.equal(flow.liveSessions.filter(s=>s.options.mode==='agent').length,expected==='final'?1:0);assert.equal(flow.offscreen.events.some(p=>p.event==='stt-transform-attempt'),expected==='final');assert.equal(flow.offscreen.events.some(p=>p.event==='stt-status'&&/Transformando/.test(p.status)),expected==='final');assert.equal(JSON.stringify(raw.agents),agentBefore);assert.equal(JSON.stringify(raw.api),keysBefore);assert.equal(raw.ui.dictationInsertion,expected);
@@ -239,7 +291,7 @@ test('Options → storage normalizado → content → background → offscreen �
  }
 });
 for(const mode of ['final','realtime'])for(const seconds of [20,60,180])for(const pauses of [false,true])test(`estabilidade integrada ${mode}: ${seconds}s PCM ${pauses?'com pausas longas no corte de 12s':'de fala contínua'}, sem Stop automático`,async()=>{
- const flow=preferenceFlow({mode}),{e,offscreen}=flow;await e.stt.preferencesReady;await e.stt.startLiveRecording('narrator');const jobId=e.stt.liveJobId,capture=e.stt.liveCapture;const job=e.stt.liveJobs.get(jobId);job.insertion.settleMs=0;const live=flow.liveSessions[0].live,voice=new Float32Array(4800).fill(.1),silence=new Float32Array(4800),texts=[];let voicedFrames=0;
+ const flow=preferenceFlow({mode}),{e,offscreen}=flow;await e.stt.preferencesReady;await e.stt.startLiveRecording('narrator');const jobId=e.stt.liveJobId,capture=e.stt.liveCapture;const job=e.stt.liveJobs.get(jobId);job.insertion.settleMs=0;capture.chunker.adaptive=false;const live=flow.liveSessions[0].live,voice=voiceFrame(),silence=new Float32Array(4800),texts=[];let voicedFrames=0;
  async function respond(){while(texts.length<(live.endCount||0)){const text=`Bloco ${texts.length+1}.`;texts.push(text);live.handler({serverContent:{inputTranscription:{text,finished:true}}});await flow.delivered();}}
  try{
  for(let i=0;i<seconds*10;i++){const voiced=!pauses||i%440<120||i%440>=320;if(voiced)voicedFrames++;e.nodes[0].port.onmessage({data:(voiced?voice:silence).buffer});await capture.audioQueue.drain();await respond();await offscreen.advance(100);if(i%10===0)for(const callback of e.timers.values())callback();assert.equal(e.stt.liveCapture,capture,`microfone deve permanecer no frame ${i}`);assert.equal(e.stt.isRecording,true);assert.equal(e.streams[0].track.stopped,false);}
@@ -247,13 +299,13 @@ for(const mode of ['final','realtime'])for(const seconds of [20,60,180])for(cons
  assert.equal(e.input.value,mode==='realtime'?texts.join(' ')+'original':'original');
  await e.stt.stopLiveRecording();await respond();await flow.delivered();assert.equal(e.input.value,texts.join(' ')+'original');assert.equal(e.other.value,'outro');assert.equal(e.streams[0].track.stopped,true);assert.equal(e.contexts[0].state,'closed');assert.equal(capture.metrics.pendingChunks,0);assert.equal(e.timers.size,0);assert.equal(offscreen.events.filter(p=>p.event==='stt-final').length,1);assert.equal(offscreen.events.some(p=>p.event==='stt-error'),false);
  const packets=e.messages.filter(m=>m.type==='STT_LIVE_AUDIO').map(m=>m.payload);assert.ok(packets.every((p,i)=>(p.chunk?.packetSequence??p.packetSequence)===i+1));const closed=packets.filter(p=>p.endOnly);assert.ok(closed.every((p,i)=>p.chunk.sequence===i+1));assert.ok(closed.length>=texts.length);assert.equal(live.endCount,texts.length,'cortes máximos locais não criam turnos extras');assert.ok(packets.filter(p=>p.chunk).every(p=>p.chunk.overlapMs===0));
- let voicedSamples=0;for(const bytes of live.sent){const view=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength);for(let i=0;i<bytes.byteLength;i+=2)if(view.getInt16(i,true)!==0)voicedSamples++;}assert.equal(voicedSamples,voicedFrames*1600,'toda fala foi enviada exatamente uma vez, sem overlap ou duplicação');assert.deepEqual(Buffer.concat(offscreen.recovery.get(jobId).packets.map(p=>Buffer.from(p.pcm))),Buffer.concat(live.sent.map(p=>Buffer.from(p))));
+ let voicedSamples=0;for(const bytes of live.sent){const view=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength);for(let i=0;i<bytes.byteLength;i+=2)if(view.getInt16(i,true)!==0)voicedSamples++;}assert.equal(voicedSamples,voicedFrames*voice.filter((sample,i)=>i%3===0&&Math.trunc(sample*(sample<0?32768:32767))!==0).length,'toda fala foi enviada exatamente uma vez, sem overlap ou duplicação');assert.deepEqual(Buffer.concat(offscreen.recovery.get(jobId).packets.map(p=>Buffer.from(p.pcm))),Buffer.concat(live.sent.map(p=>Buffer.from(p))));
  const diagnostic=(await flow.diagnostics()).diagnostics.jobs.find(j=>j.jobId===jobId);assert.equal(diagnostic.capture.stopReason,'user-stop');assert.equal(offscreen.diagnostics.findLast(p=>p.stage==='session-ending').stopReason,'user-stop');assert.equal(diagnostic.capture.released,true);
  }finally{e.stt.cancelRecording();await flush();}
 });
 for(const mode of ['final','realtime'])for(const pause of [30000,300000])test(`Etapa 1B ${mode}: microfone ativo em pausa ${pause/1000}s e retomada no mesmo ditado`,async()=>{
  const flow=preferenceFlow({mode}),{e,offscreen}=flow;await e.stt.preferencesReady;await e.stt.startLiveRecording('narrator');const capture=e.stt.liveCapture,jobId=capture.jobId,live=flow.liveSessions[0].live;e.stt.liveJobs.get(jobId).insertion.settleMs=0;
- async function frames(n,value){const frame=new Float32Array(4800).fill(value);for(let i=0;i<n;i++)e.nodes[0].port.onmessage({data:frame.buffer});await capture.audioQueue.drain();}
+ async function frames(n,value){const frame=voiceFrame(value);for(let i=0;i<n;i++)e.nodes[0].port.onmessage({data:frame.buffer});await capture.audioQueue.drain();}
  try{
   await frames(7,.1);await frames(5,0);live.handler({serverContent:{inputTranscription:{text:'Antes.',finished:true}}});await flow.delivered();const sent=live.sent.length,archived=offscreen.recovery.get(jobId).packets.length;
   await frames(pause/100,0);await offscreen.advance(pause);await flow.delivered();assert.equal(e.stt.liveCapture,capture);assert.equal(e.stt.isRecording,true);assert.equal(e.streams[0].track.stopped,false);assert.equal(e.contexts[0].state,'running');assert.equal(live.sent.length,sent);assert.equal(offscreen.recovery.get(jobId).packets.length,archived);assert.ok(capture.chunker.idle.length<=16000);assert.equal(e.messages.some(m=>['STT_LIVE_STOP','STT_LIVE_CANCEL'].includes(m.type)),false);assert.equal(offscreen.events.some(p=>['stt-error','stt-final'].includes(p.event)),false);
@@ -263,7 +315,7 @@ for(const mode of ['final','realtime'])for(const pause of [30000,300000])test(`E
 });
 for(const mode of ['final','realtime'])test(`Etapa 1B ${mode}: sinal sem fala, blocos sem resultado e fala seguinte não bloqueiam nem encerram captura`,async()=>{
  const flow=preferenceFlow({mode}),{e,offscreen}=flow;await e.stt.preferencesReady;await e.stt.startLiveRecording('narrator');const capture=e.stt.liveCapture,jobId=capture.jobId,live=flow.liveSessions[0].live;e.stt.liveJobs.get(jobId).insertion.settleMs=0;
- async function phrase(){for(let i=0;i<7;i++)e.nodes[0].port.onmessage({data:new Float32Array(4800).fill(.1).buffer});for(let i=0;i<5;i++)e.nodes[0].port.onmessage({data:new Float32Array(4800).buffer});await capture.audioQueue.drain();}
+ async function phrase(){for(let i=0;i<7;i++)e.nodes[0].port.onmessage({data:voiceFrame().buffer});for(let i=0;i<5;i++)e.nodes[0].port.onmessage({data:new Float32Array(4800).buffer});await capture.audioQueue.drain();}
  try{
   await phrase();live.handler({serverContent:{inputTranscription:{text:'Confirmado.',finished:true}}});await flow.delivered();await phrase();const before=live.sent.length;await phrase();assert.ok(live.sent.length>before,'terceiro bloco enviado mesmo sem resultado do segundo');
   live.handler({serverContent:{turnComplete:true,generationComplete:true}});await offscreen.advance(30000);await flow.delivered();assert.equal(e.stt.isRecording,true);assert.equal(e.streams[0].track.stopped,false);assert.equal(offscreen.events.some(p=>p.event==='stt-error'),false);assert.ok(offscreen.events.some(p=>p.event==='stt-warning'));assert.equal(offscreen.recovery.get(jobId).noSpeech,0);
@@ -274,7 +326,7 @@ for(const mode of ['final','realtime'])test(`Etapa 1B ${mode}: sinal sem fala, b
 });
 for(const mode of ['final','realtime'])test(`Etapa 1B ${mode}: expiração remota em pausa não para microfone, retoma contexto/conta sem replay`,async()=>{
  const flow=preferenceFlow({mode}),{e,offscreen}=flow;await e.stt.preferencesReady;await e.stt.startLiveRecording('narrator');const capture=e.stt.liveCapture,jobId=capture.jobId,first=flow.liveSessions[0];e.stt.liveJobs.get(jobId).insertion.settleMs=0;
- async function phrase(){for(let i=0;i<7;i++)e.nodes[0].port.onmessage({data:new Float32Array(4800).fill(.1).buffer});for(let i=0;i<5;i++)e.nodes[0].port.onmessage({data:new Float32Array(4800).buffer});await capture.audioQueue.drain();}
+ async function phrase(){for(let i=0;i<7;i++)e.nodes[0].port.onmessage({data:voiceFrame().buffer});for(let i=0;i<5;i++)e.nodes[0].port.onmessage({data:new Float32Array(4800).buffer});await capture.audioQueue.drain();}
  try{
   await phrase();first.live.handler({serverContent:{inputTranscription:{text:'Antes.',finished:true}}});await flow.delivered();const sent=first.live.sent.length;first.live.resumeHandle='test-opaque-resumption';first.live.handler({error:{cause:Object.assign(Error('WebSocket closed'),{closeCode:1000})}});await flow.delivered();await offscreen.advance(300000);assert.equal(e.stt.isRecording,true);assert.equal(e.streams[0].track.stopped,false);assert.equal(flow.liveSessions.length,1,'não reconecta por temporizador de inatividade');
   await phrase();assert.equal(flow.liveSessions.length,2);const next=flow.liveSessions[1];assert.equal(next.options.resumeHandle,'test-opaque-resumption');assert.equal(next.options.apiKey,first.options.apiKey);assert.equal(next.options.keyIndex,first.options.keyIndex);assert.equal(next.options.modelId,first.options.modelId);assert.equal(next.options.jobId,jobId);assert.equal(first.live.sent.length,sent);assert.ok(next.live.sent.length<sent+10,'somente PCM novo, sem replay do primeiro bloco');next.live.handler({serverContent:{inputTranscription:{text:'Depois.',finished:true}}});await flow.delivered();await e.stt.stopLiveRecording();await flow.delivered();assert.equal(e.input.value,'Antes. Depois.original');assert.equal(offscreen.events.some(p=>p.event==='stt-error'),false);
@@ -295,15 +347,15 @@ test('falhas de dispositivo/worklet/contexto são fatais explícitas; suspensão
  }
 });
 test('origem de Stop, Cancelar, navegação e invalidação é registrada antes da liberação',async()=>{
- for(const kind of ['user-stop','user-cancel','origin-lost','context-invalidated']){const e=contentEnv({diagnostics:true});await e.stt.startLiveRecording('narrator');const capture=e.stt.liveCapture;e.nodes[0].port.onmessage({data:new Float32Array(4800).fill(.1).buffer});await capture.audioQueue.drain();if(kind==='user-stop')await e.stt.stopLiveRecording();if(kind==='user-cancel')e.stt.cancelRecording();if(kind==='origin-lost')e.events.pagehide();if(kind==='context-invalidated')e.stt.invalidateExtensionContext();await flush();await flush();assert.equal(capture.stopReason,kind);assert.equal(e.streams[0].track.stopped,true);assert.equal(e.contexts[0].state,'closed');assert.equal(e.messages.filter(m=>m.type==='LIVE_STT_DIAGNOSTIC'&&m.payload.stage==='capture-ending').length,1);}
+ for(const kind of ['user-stop','user-cancel','origin-lost','context-invalidated']){const e=contentEnv({diagnostics:true});await e.stt.startLiveRecording('narrator');const capture=e.stt.liveCapture;e.nodes[0].port.onmessage({data:voiceFrame().buffer});await capture.audioQueue.drain();if(kind==='user-stop')await e.stt.stopLiveRecording();if(kind==='user-cancel')e.stt.cancelRecording();if(kind==='origin-lost')e.events.pagehide();if(kind==='context-invalidated')e.stt.invalidateExtensionContext();await flush();await flush();assert.equal(capture.stopReason,kind);assert.equal(e.streams[0].track.stopped,true);assert.equal(e.contexts[0].state,'closed');assert.equal(e.messages.filter(m=>m.type==='LIVE_STT_DIAGNOSTIC'&&m.payload.stage==='capture-ending').length,1);}
 });
 test('Cancelar após três minutos de PCM libera o job e não afeta uma captura posterior nos dois modos',async()=>{
- for(const mode of ['final','realtime']){const e=contentEnv({diagnostics:true});e.stt.insertionMode=mode;await e.stt.startLiveRecording('narrator');const jobId=e.stt.liveJobId,capture=e.stt.liveCapture,frame=new Float32Array(4800).fill(.1);for(let i=0;i<1800;i++){e.nodes[0].port.onmessage({data:frame.buffer});await capture.audioQueue.drain();}assert.equal(e.stt.isRecording,true);assert.equal(capture.metrics.capturedBytes,180*32000);e.stt.cancelRecording();await flush();assert.equal(capture.stopReason,'user-cancel');assert.equal(e.contexts[0].state,'closed');assert.equal(e.streams[0].track.stopped,true);assert.equal(capture.audioQueue.closed,true);assert.equal(e.timers.size,0);assert.equal(e.messages.some(m=>m.type==='STT_LIVE_STOP'),false);
+ for(const mode of ['final','realtime']){const e=contentEnv({diagnostics:true});e.stt.insertionMode=mode;await e.stt.startLiveRecording('narrator');const jobId=e.stt.liveJobId,capture=e.stt.liveCapture,frame=voiceFrame();for(let i=0;i<1800;i++){e.nodes[0].port.onmessage({data:frame.buffer});await capture.audioQueue.drain();}assert.equal(e.stt.isRecording,true);assert.equal(capture.metrics.capturedBytes,180*32000);e.stt.cancelRecording();await flush();assert.equal(capture.stopReason,'user-cancel');assert.equal(e.contexts[0].state,'closed');assert.equal(e.streams[0].track.stopped,true);assert.equal(capture.audioQueue.closed,true);assert.equal(e.timers.size,0);assert.equal(e.messages.some(m=>m.type==='STT_LIVE_STOP'),false);
  await e.stt.startLiveRecording('narrator');e.nodes[0].dispatchEvent(new Event('processorerror'));e.streams[0].track.dispatchEvent(new Event('ended'));await e.stt.handleLiveEvent({jobId,event:'stt-final',text:'Evento antigo.'});assert.equal(e.stt.isRecording,true);assert.equal(e.streams[1].track.stopped,false);assert.equal(e.input.value,'original');e.stt.cancelRecording();await flush();}
 });
 test('timeout de bloco é aviso; socket 429 continua fatal sem replay e conserva texto/áudio',async()=>{
  for(const mode of ['final','realtime'])for(const kind of ['chunk-timeout','socket-error']){const flow=preferenceFlow({mode}),{e,offscreen}=flow;await e.stt.preferencesReady;await e.stt.startLiveRecording('narrator');const capture=e.stt.liveCapture,jobId=capture.jobId,live=flow.liveSessions[0].live;e.stt.liveJobs.get(jobId).insertion.settleMs=0;
- for(let turn=0;turn<2;turn++){for(let i=0;i<7;i++)e.nodes[0].port.onmessage({data:new Float32Array(4800).fill(.1).buffer});for(let i=0;i<5;i++)e.nodes[0].port.onmessage({data:new Float32Array(4800).buffer});await capture.audioQueue.drain();if(turn===0){live.handler({serverContent:{inputTranscription:{text:'Trecho confirmado.',finished:true}}});await flow.delivered();}}
+ for(let turn=0;turn<2;turn++){for(let i=0;i<7;i++)e.nodes[0].port.onmessage({data:voiceFrame().buffer});for(let i=0;i<5;i++)e.nodes[0].port.onmessage({data:new Float32Array(4800).buffer});await capture.audioQueue.drain();if(turn===0){live.handler({serverContent:{inputTranscription:{text:'Trecho confirmado.',finished:true}}});await flow.delivered();}}
  const sent=live.sent.length;if(kind==='chunk-timeout'){await offscreen.advance(15001);await flow.delivered();assert.equal(e.stt.isRecording,true);assert.equal(capture.stopReason,undefined);assert.equal(e.streams[0].track.stopped,false);assert.equal(offscreen.events.some(p=>p.event==='stt-error'),false);assert.ok(offscreen.events.some(p=>p.event==='stt-warning'));assert.ok(offscreen.recovery.get(jobId).packets.length);e.stt.cancelRecording();await flow.delivered();continue;}live.handler({error:{message:'Socket encerrado (429).',cause:Object.assign(Error('429'),{httpStatus:429,closeCode:1011})}});await flow.delivered();assert.equal(capture.stopReason,kind);assert.equal(e.stt.isRecording,false);assert.equal(e.streams[0].track.stopped,true);assert.equal(e.contexts[0].state,'closed');assert.equal(e.states.at(-1)[1],'Erro STT');assert.equal(e.input.value,mode==='realtime'?'Trecho confirmado.original':'original');assert.equal(flow.liveSessions.length,1);assert.equal(live.sent.length,sent);assert.equal(offscreen.events.some(p=>p.event==='stt-final'),false);assert.equal(offscreen.recovery.get(jobId).state,'interrupted');
  const job=(await e.runtime.sendMessage({type:'HUD_GLOBAL_GET'})).state.jobs.find(j=>j.jobId===jobId);assert.equal(job.status,'error');assert.equal(job.text,'Trecho confirmado.');assert.equal(job.incomplete,true);const diagnostic=offscreen.diagnostics.findLast(p=>p.stage==='error');assert.equal(diagnostic.stopReason,kind);if(kind==='socket-error')assert.equal(diagnostic.errorKind,'QUOTA');
  live.handler({serverContent:{inputTranscription:{text:'Não inserir.',finished:true}}});await flow.delivered();assert.equal(live.sent.length,sent);assert.equal(e.input.value,mode==='realtime'?'Trecho confirmado.original':'original');}
@@ -311,14 +363,14 @@ test('timeout de bloco é aviso; socket 429 continua fatal sem replay e conserva
 test('offscreen: final e realtime recebem parciais antes do Stop, mesma sessão, transformação suspensa só realtime',async()=>{
  for(const realtime of [false,true]){let ended=0;const transformed=[],session={id:'live-1793242000000-test',sendAudio(){},endAudio(){ended++;}},agentSession={async sendTurn(text){transformed.push(text);return{text:'Texto transformado.'};}},e=offscreenEnv(async o=>o.mode==='agent'?agentSession:session),p={...base,jobId:'00000000-0000-4000-8000-000000000000',chunked:true,realtime,transformInstruction:'Instrução pública.'};
  const started=await e.command(p);assert.equal(started.success,true);assert.equal(started.transform,!realtime);assert.equal(e.attempts[0].vad.disabled,true);
- const packets=[],pipeline=new (require('../stt-realtime.js').CapturePipeline)({jobId:p.jobId,realtime:true,submitAudioChunk:x=>packets.push(x)}),pcm=new Uint8Array(3200);new DataView(pcm.buffer).setInt16(0,10000,true);pipeline.push(pcm);for(let i=0;i<5;i++)pipeline.push(new Uint8Array(3200));
+ const packets=[],pipeline=new (require('../stt-realtime.js').CapturePipeline)({jobId:p.jobId,realtime:true,submitAudioChunk:x=>packets.push(x)}),pcm=voicePcm();pipeline.push(pcm);for(let i=0;i<5;i++)pipeline.push(new Uint8Array(3200));
  for(const packet of packets)assert.equal((await e.command({...p,operation:'STT_LIVE_AUDIO',chunk:packet.chunk,endOnly:packet.endOnly,audioBase64:Buffer.from(packet.pcm).toString('base64')})).success,true);
  assert.equal(ended,1);session.handler({serverContent:{inputTranscription:{text:'Ditado público.',finished:true}}});await flush();assert.ok(e.events.some(x=>x.event==='stt-partial'&&x.text==='Ditado público.'));assert.equal(e.events.some(x=>x.event==='stt-final'),false);assert.equal(e.attempts.length,1);
  await e.command({...p,operation:'STT_LIVE_STOP'});await flush();await flush();assert.equal(e.events.find(x=>x.event==='stt-final')?.text,realtime?'Ditado público.':'Texto transformado.');assert.equal(transformed.length,realtime?0:1);assert.ok(e.diagnostics.some(d=>d.stage==='first-pcm'&&Number.isFinite(d.firstPcmMs)));assert.ok(e.diagnostics.some(d=>d.stage==='input-transcription'&&Number.isFinite(d.firstResponseMs)));assert.ok(e.diagnostics.some(d=>d.stage==='consolidated'&&Number.isFinite(d.stopToFinalMs)));
  }
 });
 test('Stop com fila de blocos conserva só deadline por bloco, sem timeout global prematuro ou nova sessão',async()=>{
- const session={sendAudio(){},endAudio(){}},e=offscreenEnv(async()=>session),p={...base,chunked:true};await e.command(p);const packets=[],pipeline=new(require('../stt-realtime.js').CapturePipeline)({jobId:p.jobId,realtime:true,submitAudioChunk:x=>packets.push(x)}),pcm=new Uint8Array(3200).fill(100);
+ const session={sendAudio(){},endAudio(){}},e=offscreenEnv(async()=>session),p={...base,chunked:true};await e.command(p);const packets=[],pipeline=new(require('../stt-realtime.js').CapturePipeline)({jobId:p.jobId,realtime:true,submitAudioChunk:x=>packets.push(x)}),pcm=voicePcm();
  for(let n=0;n<3;n++){pipeline.push(pcm);for(let i=0;i<5;i++)pipeline.push(new Uint8Array(3200));}for(const packet of packets)await e.command({...p,operation:'STT_LIVE_AUDIO',chunk:packet.chunk,endOnly:packet.endOnly,audioBase64:Buffer.from(packet.pcm).toString('base64')});await e.command({...p,operation:'STT_LIVE_STOP'});
  assert.equal([...e.timers.values()].filter(t=>t.ms===15000).length,4,'três avisos de bloco e um deadline somente após Stop');for(const text of ['Um.',' Dois.',' Três.']){session.handler({serverContent:{inputTranscription:{text,finished:true}}});await flush();}await e.advance(15001);assert.equal(e.events.find(x=>x.event==='stt-final')?.text,'Um. Dois. Três.');assert.equal(e.attempts.length,1);assert.equal(e.retired.length,1);assert.equal(e.events.some(x=>x.event==='stt-error'),false);assert.equal(e.events.find(x=>x.event==='stt-final').incomplete,true);
 });
@@ -339,9 +391,9 @@ test('PCM ausente e PCM enviado sem texto têm mensagens diferentes',async()=>{
  for(const audio of [false,true]){const session={sendAudio(){},endAudio(){}},e=offscreenEnv(async()=>session);await e.command(base);if(audio)await e.command({...base,operation:'STT_LIVE_AUDIO',audioBase64:'AAA='});await e.command({...base,operation:'STT_LIVE_STOP'});e.expire();await flush();assert.match(e.events.find(x=>x.event==='stt-error').error,audio?/PCM enviado ao Gemini/:/Nenhum PCM chegou/);}
 });
 test('diagnóstico HUD diferencia ausência de frames e PCM com sinal, sem áudio/texto privado',async()=>{
- for(const audio of [false,true]){const e=contentEnv({diagnostics:true});await e.stt.startLiveRecording('narrator');const capture=e.stt.liveCapture;if(audio)e.nodes[0].port.onmessage({data:new Float32Array([.1,.2,.3]).buffer});await e.stt.stopLiveRecording();await flush();
+ for(const audio of [false,true]){const e=contentEnv({diagnostics:true});await e.stt.startLiveRecording('narrator');const capture=e.stt.liveCapture;if(audio)e.nodes[0].port.onmessage({data:voiceFrame().buffer});await e.stt.stopLiveRecording();await flush();
  const packets=e.messages.filter(m=>m.type==='LIVE_STT_DIAGNOSTIC').map(m=>m.payload),released=packets.filter(p=>p.stage==='capture-released').at(-1);
- assert.equal(released.released,true);assert.equal(released.flushAcknowledged,true);assert.equal(released.contextState,'closed');assert.equal(released.capturedFrames,audio?3:0);assert.equal(released.ackBytes,audio?2:0);assert.equal(e.streams[0].track.stopped,true);assert.equal(e.messages.some(m=>m.type==='STT_LIVE_STOP'),audio);
+ assert.equal(released.released,true);assert.equal(released.flushAcknowledged,true);assert.equal(released.contextState,'closed');assert.equal(released.capturedFrames,audio?4800:0);assert.equal(released.ackBytes,audio?3200:0);assert.equal(e.streams[0].track.stopped,true);assert.equal(e.messages.some(m=>m.type==='STT_LIVE_STOP'),audio);
  if(audio){assert.ok(released.peak>0);assert.ok(released.maxRms>0);assert.ok(released.signalSamples>0);e.stt.cancelRecording();}else assert.equal(e.states.at(-1)[1],'Nenhum PCM capturado');
  assert.ok(packets.every(p=>!('audioBase64'in p)&&!('text'in p)&&!('apiKey'in p)));await flush();}
 });
@@ -352,6 +404,27 @@ test('diagnóstico persistido é limitado, expira e descarta campos privados arb
  const stale=structuredClone(snapshot);stale.jobs.forEach(j=>j.updatedAt=Date.now()-86400001);assert.equal(diag.clean(stale).jobs.length,0);
  await diag.emit({jobId:'00000000-0000-4000-8000-000000000000',scope:'transport',stage:'audio-sent',sentBytes:3200,audioBase64:'private-audio'});assert.equal(sent[0].payload.sentBytes,3200);assert.equal(sent[0].payload.audioBase64,undefined);
  const event=diag.sanitize({jobId:'00000000-0000-4000-8000-000000000000',scope:'transport',stage:'server-message',serverEventTypes:['serverContent','private-text','serverContent'],serverContentTypes:['inputTranscription','private-instructions'],messagesAfterEnd:2,elapsedMs:900});assert.deepEqual(Array.from(event.serverEventTypes),['serverContent']);assert.deepEqual(Array.from(event.serverContentTypes),['inputTranscription']);assert.equal(event.messagesAfterEnd,2);assert.ok(!JSON.stringify(event).includes('private'));
+});
+test('diagnóstico conserva a primeira divergência do editor após a rotação dos eventos',async()=>{
+ const store={},context=vm.createContext({chrome:{storage:{session:{get:async key=>({[key]:store[key]}),set:async value=>Object.assign(store,value)}}}});
+ vm.runInContext(fs.readFileSync(require.resolve('../live-stt-diagnostics.js'),'utf8'),context);
+ const diag=context.LiveSttDiagnostics,jobId='00000000-0000-4000-8000-000000000000';
+ const base={jobId,scope:'editor',stage:'editor-apply',inserted:false,characters:87,appliedRevision:3};
+ await diag.record({...base,revision:4,editorReason:'SUPERSEDED'});
+ await diag.record({...base,revision:5,editorReason:'TARGET_CHANGED',url:'private-url',text:'private-text',
+  before:{kind:'contenteditable',focused:true,ownedMatches:true,singleTextNode:false,selectionStart:8,writes:1,html:'private-html'},
+  after:{kind:'contenteditable',focused:true,fieldCharacters:17,writes:1,value:'private-value'}});
+ for(let i=0;i<45;i++)await diag.record({...base,revision:6+i,editorReason:'EDITOR_REJECTED'});
+ const result=(await diag.read()).jobs[0];
+ assert.equal(result.events.length,40);
+ assert.ok(!result.events.some(event=>event.revision===5));
+ assert.equal(result.firstEditorDivergence.revision,5);
+ assert.equal(result.firstEditorDivergence.appliedRevision,3);
+ assert.equal(result.firstEditorDivergence.editorReason,'TARGET_CHANGED');
+ assert.equal(result.firstEditorDivergence.before.singleTextNode,false);
+ assert.equal(result.firstEditorDivergence.before.selectionStart,8);
+ assert.equal(result.firstEditorDivergence.after.fieldCharacters,17);
+ assert.doesNotMatch(JSON.stringify(result),/private-/);
 });
 test('PCM do HUD e opções preserva sinal e taxa em chunks a 44,1/48 kHz e Int16 LE',()=>{
  const optionsSource=fs.readFileSync(require.resolve('../options.js'),'utf8'),ctx=vm.createContext({Int16Array,Uint8Array});vm.runInContext(optionsSource.slice(optionsSource.indexOf('function resampleLiveTest('),optionsSource.indexOf('async function releaseLiveSttTest(')),ctx);
@@ -409,6 +482,53 @@ test('eventos repetidos não duplicam ao vivo/final e nunca usam o campo visuali
  const writes=e.input.nativeWrites;await e.stt.handleLiveEvent({jobId,generation,eventSeq:2,event:'stt-partial',text:'duplicado'});assert.equal(e.input.nativeWrites,writes);
  await e.stt.handleLiveEvent({jobId,generation,eventSeq:3,event:'stt-final',text:'fala pronta'});assert.equal(e.input.value,'Fala prontaoriginal');assert.equal(e.input.nativeWrites,writes);assert.equal(e.other.value,'outro');assert.equal(e.stt.getJobState(jobId).inserted,true);await e.stt.handleLiveEvent({jobId,generation,eventSeq:4,event:'stt-final',text:'duplicado'});assert.equal(e.input.nativeWrites,writes);
 });
+test('snapshot final recompõe escrita ausente ou parcial sem repetir e ACK da mesma revisão é idempotente',async()=>{
+ for(const rollback of ['', 'Primeiro.']){
+  const e=contentEnv();e.input.value='';e.stt.insertionMode='realtime';await e.stt.startLiveRecording('narrator');
+  const jobId=e.stt.liveJobId,base={jobId,editorDelivery:true};
+  await e.stt.handleLiveEvent({...base,event:'stt-partial',eventSeq:1,confirmedText:'Primeiro.',partialText:''});
+  await e.stt.handleLiveEvent({...base,event:'stt-partial',eventSeq:3,confirmedText:'Primeiro. Segundo.',partialText:'provisório'});
+  await e.stt.handleLiveEvent({...base,event:'stt-partial',eventSeq:2,confirmedText:'atrasado',partialText:''});
+  e.input.value=rollback;
+  await e.stt.handleLiveEvent({jobId,event:'stt-status',eventSeq:7,status:'Inserindo'});
+  const event={...base,event:'stt-final',eventSeq:6,text:'Primeiro. Segundo. Terceiro.'};
+  const result=await e.stt.handleLiveEvent(event);
+  assert.equal(e.input.value,event.text);
+  assert.equal(result.revision,6);assert.equal(result.inserted,true);
+  const writes=e.input.nativeWrites;
+  assert.equal((await e.stt.handleLiveEvent(event)).revision,6);
+  assert.equal(e.input.nativeWrites,writes);
+ }
+});
+test('revisão final confirma o campo após um render que restaura o valor anterior',async()=>{
+ const text='Primeiro. Segundo.';
+ for(const [mode,interim] of [['final',''],['realtime','Primeiro.'],['realtime',text]]){
+  const e=contentEnv(),field=e.input;
+  field.value='Antes [seleção] depois';field.selectionStart=6;field.selectionEnd=15;
+  e.stt.insertionMode=mode;
+  await e.stt.startLiveRecording('narrator');
+  const base={jobId:e.stt.liveJobId,editorDelivery:true};
+  if(interim)await e.stt.handleLiveEvent({...base,event:'stt-partial',eventSeq:1,confirmedText:interim});
+  const previous=interim===text?'Antes Primeiro. depois':field.value;
+  let restored=false;
+  const dispatch=field.dispatchEvent.bind(field);
+  field.dispatchEvent=event=>{
+   dispatch(event);
+   if(event.type==='change'&&!restored){restored=true;setTimeout(()=>{field._value=previous;},0);}
+  };
+  const final={...base,event:'stt-final',eventSeq:2,text};
+  const result=await e.stt.handleLiveEvent(final);
+  assert.equal(restored,true);
+  assert.equal(result.inserted,true,mode+' '+interim+': '+result.reason);
+  assert.equal(result.revision,2);
+  assert.equal(result.final,true);
+  assert.equal(field.value,'Antes '+text+' depois');
+  const writes=field.nativeWrites;
+  const repeated=await e.stt.handleLiveEvent(final);
+  assert.deepEqual({...repeated},{...result,status:'completed',microphoneReleased:true});
+  assert.equal(field.nativeWrites,writes);
+ }
+});
 test('tempo real ignora ACK/evento legado de transformação e insere parcial antes do Stop',async()=>{
  const e=contentEnv(),send=e.runtime.sendMessage.bind(e.runtime);e.runtime.sendMessage=message=>message.type==='STT_LIVE_START'?Promise.resolve({success:true,transform:true}):send(message);e.stt.insertionMode='realtime';await e.stt.startLiveRecording('editor');const jobId=e.stt.liveJobId,generation=e.stt.liveGeneration;await e.stt.handleLiveEvent({jobId,generation,event:'stt-transform-attempt'});await e.stt.handleLiveEvent({jobId,generation,event:'stt-partial',text:'provisório bruto'});assert.equal(e.input.value,'Provisório brutooriginal');assert.equal(e.stt.isRecording,true);await e.stt.handleLiveEvent({jobId,generation,event:'stt-final',text:'provisório bruto'});assert.equal(e.input.value,'Provisório brutooriginal');
 });
@@ -417,10 +537,10 @@ test('diagnóstico confirma primeira inserção antes do Stop sem texto/chave e 
  await e.stt.handleLiveEvent({jobId,eventSeq:1,event:'stt-partial',text:'fala pública'});const inserted=e.messages.filter(m=>m.type==='LIVE_STT_DIAGNOSTIC'&&m.payload.stage==='inserted').at(-1).payload;assert.equal(inserted.finalInsertion,false);assert.equal(inserted.whileRecording,true);assert.ok(Number.isFinite(inserted.firstInsertionMs));assert.ok(Number.isFinite(inserted.insertionDurationMs));assert.equal('text'in inserted,false);assert.equal('apiKey'in inserted,false);e.input.value='Edição manual preservada';await e.stt.handleLiveEvent({jobId,eventSeq:2,event:'stt-partial',text:'fala pública completa'});assert.equal(e.input.value,'Edição manual preservada');await e.stt.handleLiveEvent({jobId,eventSeq:3,event:'stt-final',text:'fala pública completa'});assert.equal(e.input.value,'Edição manual preservada');assert.equal(e.stt.getJobState(jobId).inserted,false);assert.equal(e.streams[0].track.stopped,true);
 });
 test('navegação invalida alvo, finaliza áudio já capturado e não insere em documento novo',async()=>{
- const e=contentEnv();await e.stt.startLiveRecording('narrator');const jobId=e.stt.liveJobId,generation=e.stt.liveGeneration;e.nodes[0].port.onmessage({data:new Float32Array([.1,.2,.3]).buffer});e.events.pagehide();await flush();await flush();assert.equal(e.streams[0].track.stopped,true);assert.ok(e.messages.some(message=>message.type==='STT_LIVE_STOP'));await e.stt.handleLiveEvent({jobId,generation,event:'stt-final',text:'resultado recuperável'});assert.equal(e.input.value,'original');assert.equal(e.stt.getJobState(jobId).reason,'TARGET_DOCUMENT_LOST');
+ const e=contentEnv();await e.stt.startLiveRecording('narrator');const jobId=e.stt.liveJobId,generation=e.stt.liveGeneration;e.nodes[0].port.onmessage({data:voiceFrame().buffer});e.events.pagehide();await flush();await flush();assert.equal(e.streams[0].track.stopped,true);assert.ok(e.messages.some(message=>message.type==='STT_LIVE_STOP'));await e.stt.handleLiveEvent({jobId,generation,event:'stt-final',text:'resultado recuperável'});assert.equal(e.input.value,'original');assert.equal(e.stt.getJobState(jobId).reason,'TARGET_DOCUMENT_LOST');
 });
 test('cancelamento global individual limpa job antigo sem parar captura posterior ou reinserir final',async()=>{
- const e=contentEnv();await e.stt.startLiveRecording('narrator');const jobId=e.stt.liveJobId,generation=e.stt.liveGeneration;e.nodes[0].port.onmessage({data:new Float32Array([.1,.2,.3]).buffer});await e.stt.stopLiveRecording();e.doc.activeElement=e.other;await e.stt.startLiveRecording('narrator');const latest=e.stt.liveJobId;await e.stt.handleLiveEvent({jobId,generation,event:'stt-cancelled'});await e.stt.handleLiveEvent({jobId,generation,event:'stt-final',text:'não inserir'});assert.equal(e.input.value,'original');assert.equal(e.other.value,'outro');assert.equal(e.stt.liveJobId,latest);assert.equal(e.streams[1].track.stopped,false);assert.equal(e.stt.getJobState(jobId).status,'cancelled');e.stt.cancelRecording();await flush();
+ const e=contentEnv();await e.stt.startLiveRecording('narrator');const jobId=e.stt.liveJobId,generation=e.stt.liveGeneration;e.nodes[0].port.onmessage({data:voiceFrame().buffer});await e.stt.stopLiveRecording();e.doc.activeElement=e.other;await e.stt.startLiveRecording('narrator');const latest=e.stt.liveJobId;await e.stt.handleLiveEvent({jobId,generation,event:'stt-cancelled'});await e.stt.handleLiveEvent({jobId,generation,event:'stt-final',text:'não inserir'});assert.equal(e.input.value,'original');assert.equal(e.other.value,'outro');assert.equal(e.stt.liveJobId,latest);assert.equal(e.streams[1].track.stopped,false);assert.equal(e.stt.getJobState(jobId).status,'cancelled');e.stt.cancelRecording();await flush();
 });
 test('Extended STT aguarda IDLE sem fechar durante IN_PROGRESS',async()=>{
  const session={endAudio(){}},e=offscreenEnv(async()=>session),payload={...base,modelId:'gemini-3.8-live-extended-thinking'};await e.command(payload);
@@ -445,7 +565,7 @@ test('fallback STT esgota nove chaves por modelo e respeita modelos compatíveis
 });
 test('offscreen não abre sessão especializada mesmo em payload antigo direto',async()=>{const e=offscreenEnv(async()=>{throw Error('não deve conectar');}),result=await e.command({...base,modelId:'gemini-3.5-transcribe-live',models:['gemini-3.5-transcribe-live']});assert.equal(result.success,false);assert.equal(e.attempts.length,0);});
 test('cancelamento STT durante acquire retira sessão tardia e não anuncia setup',async()=>{
- const pending=deferred(),session={},e=offscreenEnv(()=>pending.promise),started=e.command(base);for(let n=0;n<1000&&!e.attempts.length;n++)await flush();assert.equal(e.attempts.length,1);await e.command({...base,operation:'STT_LIVE_CANCEL'});pending.resolve(session);assert.equal((await started).success,false);assert.equal(e.retired[0],session);assert.equal(e.events.some(x=>x.event==='setup-complete'),false);
+ const pending=deferred(),session={},e=offscreenEnv(()=>pending.promise),started=e.command(base);for(let n=0;n<1000&&!e.attempts.length;n++)await flush();assert.equal(e.attempts.length,1);await e.command({...base,operation:'STT_LIVE_CANCEL'});pending.resolve(session);assert.equal((await started).success,false);await flush();assert.equal(e.retired[0],session);assert.equal(e.events.some(x=>x.event==='setup-complete'),false);
 });
 test('worklet flush entrega cauda menor que 100 ms antes da confirmação',()=>{
  let Processor;const messages=[],context=vm.createContext({sampleRate:48000,Float32Array,AudioWorkletProcessor:class{constructor(){this.port={postMessage:x=>messages.push(x)};}},registerProcessor(_id,cls){Processor=cls;}});vm.runInContext(fs.readFileSync(require.resolve('../mic-capture-worklet.js'),'utf8'),context);const p=new Processor();p.process([[new Float32Array([.2,.4,.6])]]);assert.equal(messages.length,0);p.port.onmessage({data:{type:'flush'}});assert.equal(new Float32Array(messages[0]).length,3);assert.equal(messages[1].type,'flushed');p.port.onmessage({data:{type:'flush'}});assert.equal(messages.length,3);
@@ -460,7 +580,7 @@ test('repetições não reiniciam o STT, mas novo acionamento abre captura com A
   e.events.keydown(key);e.events.keyup(key);await flush();
   assert.equal(e.stt.isRecording,true);
   const first=e.stt.liveCapture;
-  e.nodes[0].port.onmessage({data:new Float32Array(4800).fill(.1).buffer});
+  e.nodes[0].port.onmessage({data:voiceFrame().buffer});
   const send=e.runtime.sendMessage.bind(e.runtime),stop=deferred();
   e.runtime.sendMessage=message=>message.type==='STT_LIVE_STOP'
    ?(e.messages.push(message),stop.promise):send(message);
@@ -486,4 +606,118 @@ test('repetições não reiniciam o STT, mas novo acionamento abre captura com A
   assert.equal(e.stt.isRecording,false);
   assert.equal(e.messages.filter(m=>m.type==='STT_LIVE_START').length,2);
  }
+});
+
+test('segmento enviado fecha a cauda PCM e mantém job, microfone e contexto na próxima fala',async()=>{
+ const e=contentEnv();e.input.value='';e.stt.insertionMode='realtime';await e.stt.startLiveRecording('narrator');
+ const capture=e.stt.liveCapture,jobId=capture.jobId,job=e.stt.liveJobs.get(jobId);
+ job.insertion.settleMs=0;
+ const frame=voiceFrame();
+ e.nodes[0].port.onmessage({data:frame.buffer});await capture.audioQueue.drain();
+ await e.stt.handleLiveEvent({jobId,editorDelivery:true,eventSeq:1,event:'stt-partial',confirmedText:'Primeira.',sequence:1,textBoundaries:[[1,9]]});
+ job.insertion.armSend();e.input.value='';await flush();await capture.audioQueue.drain();
+ assert.equal(capture.chunker.sequence,1);assert.equal(capture.chunker.chunk,null);
+ assert.ok(e.messages.some(m=>m.type==='STT_LIVE_AUDIO'&&m.payload.endOnly&&m.payload.chunk.sequence===1));
+ assert.equal(e.stt.liveCapture,capture);assert.equal(e.stt.liveJobId,jobId);assert.equal(e.streams[0].track.stopped,false);assert.equal(e.contexts[0].state,'running');
+ e.nodes[0].port.onmessage({data:frame.buffer});await capture.audioQueue.drain();
+ await e.stt.handleLiveEvent({jobId,editorDelivery:true,eventSeq:2,event:'stt-partial',confirmedText:'Primeira. Nova.',sequence:2,textBoundaries:[[1,9],[2,15]]});
+ assert.equal(e.input.value,'Nova.');
+ await e.stt.handleLiveEvent({jobId,editorDelivery:true,eventSeq:1,event:'stt-partial',confirmedText:'Primeira.',sequence:1,textBoundaries:[[1,9]]});
+ assert.equal(e.input.value,'Nova.','resposta antiga não reinseriu mensagem enviada');
+ assert.equal(e.messages.filter(m=>m.type==='STT_LIVE_START').length,1);
+ e.stt.cancelRecording();await flush();
+ assert.equal(e.streams[0].track.stopped,true);
+});
+
+test('cancelamento libera fronteira PCM pendente e impede escrita posterior',async()=>{
+ const e=contentEnv();e.input.value='';e.stt.insertionMode='realtime';await e.stt.startLiveRecording('narrator');
+ const capture=e.stt.liveCapture,jobId=capture.jobId;
+ const insertion=e.stt.liveJobs.get(jobId).insertion;insertion.settleMs=0;
+ await insertion.apply('Enviada.',{sequence:1,textBoundaries:[[1,8]]});
+ e.nodes[0].port.postMessage=()=>{};
+ insertion.armSend();e.input.value='';await flush();
+ assert.ok(capture.segmentCut);
+ const next=insertion.apply('Enviada. Tardia.',{sequence:2,textBoundaries:[[1,8],[2,16]]});
+ await e.stt.cancelGlobalJob(jobId);await next;
+ assert.equal(capture.segmentCut,null);assert.equal(e.input.value,'');assert.equal(e.streams[0].track.stopped,true);
+});
+
+test('dispose da sessão invalida escrita que aguardava o escritor anterior',async()=>{
+ const e=contentEnv();e.input.value='';const gate=deferred();
+ const insertion=new e.context.DictationRuntime.SessionInsertion(e.injector.captureDictationTarget(),{settleMs:0});
+ insertion.writer.serial=gate.promise;
+ const pending=insertion.apply('não inserir');await flush();
+ insertion.dispose();gate.resolve();const result=await pending;
+ assert.equal(result.inserted,false);assert.equal(e.input.value,'');
+});
+
+test('edição sobre provisório corta PCM para a fala nova não sumir em revisão tardia',async()=>{
+ const e=contentEnv();e.input.value='';e.stt.insertionMode='realtime';await e.stt.startLiveRecording('narrator');
+ const capture=e.stt.liveCapture,jobId=capture.jobId,insertion=e.stt.liveJobs.get(jobId).insertion;
+ insertion.settleMs=0;const frame=voiceFrame();
+ e.nodes[0].port.onmessage({data:frame.buffer});await capture.audioQueue.drain();
+ await insertion.apply('Provisório',{sequence:1,confirmedText:'',partialText:'Provisório',textBoundaries:[]});
+ e.input.value='MEU';e.input.selectionStart=e.input.selectionEnd=3;insertion.protectManual();await flush();await capture.audioQueue.drain();
+ assert.equal(capture.chunker.chunk,null,'edição deve separar o áudio anterior da fala seguinte');
+ e.nodes[0].port.onmessage({data:frame.buffer});await capture.audioQueue.drain();
+ const prior='Provisório corrigido.',text=prior+' Nova.';
+ await e.stt.handleLiveEvent({jobId,editorDelivery:true,eventSeq:2,event:'stt-partial',confirmedText:text,sequence:2,textBoundaries:[[1,prior.length],[2,text.length]]});
+ assert.equal(e.input.value,'MEU Nova.');assert.equal(capture.chunker.sequence,2);assert.equal(e.streams[0].track.stopped,false);
+ e.stt.cancelRecording();await flush();
+});
+
+
+function enableLocalVad(e,openResponse){
+ e.context.performance=performance;
+ vm.runInContext(fs.readFileSync(require.resolve('../stt-vad-client.js'),'utf8'),e.context);
+ e.context.chrome.storage={local:{get:async()=>({})},onChanged:{addListener(){},removeListener(){}}};
+ const send=e.runtime.sendMessage.bind(e.runtime);
+ e.runtime.sendMessage=async message=>{
+  if(message.type==='STT_LIVE_START'){e.messages.push(message);return{success:true,localVad:true};}
+  if(message.type==='STT_LOCAL_VAD'){
+   e.messages.push(message);
+   return message.payload.operation==='open'?openResponse:{ok:true};
+  }
+  return send(message);
+ };
+}
+test('Silero aguarda preparo antes de conectar PCM e anunciar Gravando',async()=>{
+ const e=contentEnv(),opening=deferred();
+ enableLocalVad(e,opening.promise);
+ const started=e.stt.startLiveRecording('narrator');
+ await flush();
+ assert.equal(e.contexts[0].sourceConnected,undefined);
+ assert.equal(e.stt.isRecording,false);
+ opening.resolve({ok:true});
+ await started;
+ assert.equal(e.contexts[0].sourceConnected,true);
+ assert.equal(e.stt.liveCapture.vad.ready,true);
+ assert.equal(e.stt.isRecording,true);
+ e.stt.cancelRecording();await flush();
+});
+test('falha de preparo Silero mantém gravação RMS funcional e aviso explícito',async()=>{
+ const e=contentEnv();
+ enableLocalVad(e,{ok:false,code:'VAD_WORKER_ERROR'});
+ await e.stt.startLiveRecording('narrator');
+ assert.equal(e.stt.isRecording,true);
+ assert.equal(e.stt.liveCapture.vad.mode,'rms');
+ assert.equal(e.stt.liveCapture.vad.metrics.fallback,'prepare');
+ assert.equal(e.stt.liveCapture.vad.metrics.fallbackAt.responseValidation.code,'VAD_WORKER_ERROR');
+ assert.match(e.hud.captureNotice,/RMS ativo/);
+ assert.equal(e.stt.liveCapture.chunker.config.preRollMs,500);
+ e.stt.cancelRecording();await flush();
+});
+test('cancelar Silero durante registro só fecha após confirmação do open',async()=>{
+ const e=contentEnv(),opening=deferred();
+ enableLocalVad(e,opening.promise);
+ const started=e.stt.startLiveRecording('narrator');
+ await flush();
+ e.stt.cancelRecording();
+ await flush();
+ assert.equal(e.messages.filter(m=>m.type==='STT_LOCAL_VAD'&&m.payload.operation==='close').length,0);
+ opening.resolve({ok:true});
+ await started;await flush();
+ assert.equal(e.messages.filter(m=>m.type==='STT_LOCAL_VAD'&&m.payload.operation==='close').length,1);
+ assert.equal(e.streams[0].track.stopped,true);
+ assert.equal(e.contexts[0].state,'closed');
 });

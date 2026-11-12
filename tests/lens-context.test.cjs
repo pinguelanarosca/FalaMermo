@@ -158,7 +158,7 @@ test('leitura de lastError que lança exceção não escapa do callback', () => 
     assertRecovery(env);
 });
 
-test('resposta saudável preserva retângulo, persona e narração automática', () => {
+test('resposta saudável mantém resultado da tarefa sem iniciar outra narração na página', () => {
     const env = createLens();
     env.lens.submitSelection(rect, 'custom-agent');
     const request = env.state.sends[0];
@@ -166,9 +166,9 @@ test('resposta saudável preserva retângulo, persona e narração automática',
     assert.equal(request.payload.agentId, 'custom-agent');
     assert.deepEqual(request.payload.rect, rect);
     assert.equal(request.payload.instruction, undefined);
-    env.state.reply({ success: true, data: '  Texto detectado  ' });
+    env.state.reply({ success: true, data: '  Texto detectado  ', jobId: 'lens-job' });
     assert.equal(env.state.preview, 'Texto detectado');
-    assert.deepEqual(env.state.speeches, [{ text: 'Texto detectado', agentId: 'custom-agent' }]);
+    assert.deepEqual(env.state.speeches, []);
     assert.equal(env.timers.size, 0);
 });
 
@@ -195,16 +195,12 @@ test('erros de conexão e API continuam mostrando o motivo original', () => {
     }
 });
 
-test('timeout saudável permanece em 30s e ignora resposta tardia', () => {
+test('timeout é controlado pelo background e seu erro é exibido sem narração tardia', () => {
     const env = createLens();
     env.lens.submitSelection(rect);
-    const [id, timer] = [...env.timers][0];
-    assert.equal(timer.milliseconds, 30000);
-    env.timers.delete(id);
-    timer.callback();
-    assert.equal(env.state.status.label, 'Timeout Lens');
-    env.state.reply({ success: true, data: 'Resposta tardia' });
-    assert.equal(env.state.status.label, 'Timeout Lens');
+    assert.equal(env.timers.size, 0);
+    env.state.reply({success:false,error:'Timeout global de 30s excedido no fluxo do Gemini Lens.'});
+    assert.match(env.state.preview,/Timeout global de 30s/);
     assert.equal(env.state.speeches.length, 0);
 });
 test('autorização Lens e troca de aba dão orientação sem narrar nem erro interno', () => {
@@ -219,12 +215,10 @@ test('autorização Lens e troca de aba dão orientação sem narrar nem erro in
     }
 });
 
-test('contexto invalidado enquanto aguarda recebe recuperação ao vencer timeout', () => {
+test('contexto invalidado enquanto aguarda recebe recuperação na resposta', () => {
     const env = createLens();
     env.lens.submitSelection(rect);
     env.state.invalid = true;
-    const [id, timer] = [...env.timers][0];
-    env.timers.delete(id);
-    timer.callback();
+    env.state.reply({success:false,error:'Timeout global de 30s excedido no fluxo do Gemini Lens.'});
     assertRecovery(env);
 });

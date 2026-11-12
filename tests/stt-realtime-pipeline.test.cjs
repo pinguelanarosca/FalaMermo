@@ -2,7 +2,8 @@
 const test=require('node:test'),assert=require('node:assert/strict');
 const {CONFIG,CapturePipeline,TranscriptionMerger,mergeTranscriptionChunks,LiveChunkTransport}=require('../stt-realtime.js');
 const {AudioQueue}=require('../dictation-runtime.js');
-function pcm(ms=100,amplitude=.1){const bytes=new Uint8Array(ms*32),view=new DataView(bytes.buffer);for(let i=0;i<bytes.length;i+=2)view.setInt16(i,Math.round(amplitude*32767),true);return bytes;}
+const {voicePcm}=require('./stt-audio-fixture.cjs');
+function pcm(ms=100,amplitude=.1){return voicePcm(ms,Math.round(amplitude*32767));}
 function capture(realtime=true,config={}){const packets=[],diagnostics=[],pipeline=new CapturePipeline({jobId:'job',realtime,config,submitAudioChunk:p=>packets.push(p),onDiagnostic:p=>diagnostics.push(p)});return{pipeline,packets,diagnostics};}
 function transport(config={}){let now=100,number=0;const timers=new Map(),sent=[],ended=[],partials=[],results=[],errors=[],diagnostics=[];
  const queue=new LiveChunkTransport({jobId:'job',config,sendAudio:bytes=>sent.push(bytes.slice()),endAudio:()=>ended.push(true),onPartial:p=>partials.push(p),onChunk:p=>results.push(p),onFailure:e=>errors.push(e),onDiagnostic:p=>diagnostics.push(p),now:()=>now,setTimer:(fn,ms)=>{timers.set(++number,{fn,ms});return number;},clearTimer:id=>timers.delete(id)});

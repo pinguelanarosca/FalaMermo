@@ -13,13 +13,17 @@ function environment(acquire,slowInit=false,cacheLimit){
  return{command,events,contexts,nodes,attempts};
 }
 function pendingSession(){const done=deferred();let callback;return{done,get callback(){return callback;},session:{socketOpenMs:1,setupCompleteMs:2,sendTurn(_text,onMessage,signal){callback=onMessage;signal?.addEventListener('abort',()=>done.reject(Object.assign(new Error('Cancelado'),{cancelled:true})),{once:true});return done.promise;}},finish(value){callback({type:'pcm',bytes:new Uint8Array([value&255,value>>8]),mimeType:'audio/pcm;rate=24000'});done.resolve({metrics:{}});}};}
+const shortTurn={async sendTurn(_text,onMessage){
+ onMessage({type:'pcm',bytes:new Uint8Array([0,64]),mimeType:'audio/pcm;rate=24000'});
+ return{metrics:{}};
+}};
 const base={operation:'TTS_LIVE_START',tabId:1,playerId:'p',requestId:'r',jobId:'j',modelId:'gemini-3.8-live',models:['gemini-3.8-live','gemini-3.8-live-extended-thinking'],apiKeys:Array.from({length:9},(_,i)=>'fake-'+i),text:'Teste.',maxParallelLiveSessions:1};
 test('cadeia completa ordena modelos, esgota chaves e nunca aciona convencionais',async()=>{
  const models=config.LIVE_MODEL_PRIORITY,env=environment(async()=>{throw Error('Quota exceeded');});await env.command({...base,models:[models[0],models[3],models[2],models[1],'gemini-3.8-flash-tts']});await flush();await flush();
  assert.deepEqual(env.attempts.map(x=>[x.modelId,x.keyIndex]),models.flatMap(model=>Array.from({length:9},(_,i)=>[model,i+1])));assert.ok(env.events.some(e=>e.event==='error'&&/Fallback Live esgotado/.test(e.error)));
 });
 test('ranking passivo só altera chaves do modelo atual, respeitando cooldown',async()=>{
- const env=environment(async o=>{if(o.modelId===base.modelId)throw Error('WebSocket closed');return{sendTurn:async()=>({metrics:{}})};});
+ const env=environment(async o=>{if(o.modelId===base.modelId)throw Error('WebSocket closed');return shortTurn;});
  await env.command({...base,keyOrderByModel:{[base.modelId]:[7,2],['gemini-3.8-live-extended-thinking']:[4]}});await flush();await flush();assert.deepEqual(env.attempts.map(x=>[x.modelId,x.keyIndex]),[[base.modelId,8],[base.modelId,3],['gemini-3.8-live-extended-thinking',5]]);
 });
 test('modelo convencional/Translate ou JSON incompatível não cria player/sessão',async()=>{
@@ -32,7 +36,7 @@ test('turno sem PCM não anuncia sucesso e esgota somente os pares Live',async()
 });
 test('offscreen esgota nove chaves por modelo em AUTH/QUOTA/TRANSIENT',async()=>{
  for(const message of ['Invalid API key','Quota exceeded','WebSocket closed']){
-  const env=environment(async o=>{if(o.modelId==='gemini-3.8-live')throw new Error(message);return{sendTurn:async()=>({metrics:{}})};});await env.command(base);await flush();await flush();
+  const env=environment(async o=>{if(o.modelId==='gemini-3.8-live')throw new Error(message);return shortTurn;});await env.command(base);await flush();await flush();
   assert.deepEqual(env.attempts.map(x=>[x.modelId,x.keyIndex]),[...Array.from({length:9},(_,i)=>['gemini-3.8-live',i+1]),['gemini-3.8-live-extended-thinking',1]]);
  }
 });
@@ -123,6 +127,89 @@ test('configuração antiga enviada com novo TTS não reverte volume global já 
 test('limite do cache pausa e informa condição sem descartar PCM previamente recebido',async()=>{
  const session=pendingSession(),e=environment(async()=>session.session,false,256),p=playbackPayload('limited');await e.command(p);await flush();session.callback({type:'pcm',bytes:new Uint8Array(64),mimeType:'audio/pcm;rate=24000'});await flush();await flush();session.callback({type:'pcm',bytes:new Uint8Array(256),mimeType:'audio/pcm;rate=24000'});await flush();await flush();
  const state=await e.command({operation:'GLOBAL_JOBS_SNAPSHOT'});assert.equal(state.jobs[0].status,'paused');assert.match(state.jobs[0].warning,/cache|128 MB/);assert.equal(e.contexts[0].state,'suspended');assert.equal(e.nodes[0].processor.queue.length,1);assert.equal(e.nodes[0].sent.some(p=>p.type==='flush'),false);assert.equal((await e.command({...p,operation:'RESUME'})).success,true);e.nodes[0].processor.process([],[[new Float32Array(32)]]);await flush();assert.equal(e.contexts[0].state,'closed');
+});
+test('PCM recebido durante Pause reserva espaço para a conversão antes do Resume', async () => {
+ const session = pendingSession();
+ const e = environment(async () => session.session, false, 256);
+ const payload = playbackPayload('paused-budget');
+ await e.command(payload);
+ await e.command({...payload, operation:'PAUSE'});
+ for (let i = 0; i < 2; i++) {
+  session.callback({type:'pcm',bytes:new Uint8Array(80),mimeType:'audio/pcm;rate=24000'});
+ }
+ await flush();
+ assert.match((await e.command({operation:'GLOBAL_JOBS_SNAPSHOT'})).jobs[0].warning || '', /128 MB/);
+ await e.command({...payload, operation:'RESUME'});
+ const enqueued = e.nodes[0].sent.filter(packet => packet.type === 'enqueue');
+ assert.deepEqual(enqueued.map(packet => packet.buffer.byteLength), [160]);
+ assert.equal(e.attempts.length, 1);
+ await e.command({...payload, operation:'STOP'});
+});
+test('PCM é dimensionado pela taxa do contexto antes de ser aceito', async () => {
+ const session = pendingSession();
+ const e = environment(async () => session.session, false, 256);
+ await e.command(playbackPayload('resample-budget'));
+ await flush();
+ session.callback({type:'pcm',bytes:new Uint8Array(80),mimeType:'audio/pcm;rate=12000'});
+ await flush();
+ const state = await e.command({operation:'GLOBAL_JOBS_SNAPSHOT'});
+ assert.deepEqual(Array.from(state.activeJobIds), []);
+ assert.match(state.jobs[0].error || '', /128 MB/);
+ assert.equal(e.nodes[0].processor.queue.length, 0);
+});
+test('queda de conexão após enfileirar bloco antes fora de ordem não repete seu início', async () => {
+ const lanes = [];
+ const e = environment(async () => {
+  const lane = pendingSession();
+  lanes.push(lane);
+  return lane.session;
+ });
+ const payload = {...playbackPayload('out-of-order'), apiKeys:['fixture-a','fixture-b'], maxParallelLiveSessions:2,
+  chunkSize:120, text:['Primeiro.','Segundo.'].map(name => name+' '+ 'palavra '.repeat(12)+'Fim.').join('\n\n')};
+ await e.command(payload);
+ await flush();
+ assert.equal(lanes.length, 2);
+ lanes[1].callback({type:'pcm',bytes:new Uint8Array([0,64]),mimeType:'audio/pcm;rate=24000'});
+ lanes[0].finish(3000);
+ await flush();
+ const rendered = new Float32Array(2);
+ e.nodes[0].processor.process([],[[rendered]]);
+ assert.equal(rendered[1], .5);
+ lanes[1].done.reject(Error('WebSocket closed'));
+ await flush();
+ const state = await e.command({operation:'GLOBAL_JOBS_SNAPSHOT'});
+ assert.equal(lanes.length, 2, 'nenhuma segunda síntese do bloco já tocado');
+ assert.equal(state.jobs[0].status, 'paused');
+ await e.command({...payload, operation:'STOP'});
+});
+test('falha do worklet encerra só a narração afetada e libera seu PCM', async () => {
+ const e = await playbackFixture();
+ await e.start('preserved');
+ await e.pcm('preserved');
+ await e.start('worklet-failed');
+ await e.pcm('worklet-failed');
+ e.nodes[1].onprocessorerror?.({});
+ await flush();
+ const state = await e.snapshot();
+ assert.deepEqual(Array.from(state.activeJobIds), ['preserved']);
+ assert.equal(state.jobs.find(job => job.jobId === 'worklet-failed').status, 'error');
+ assert.equal(e.contexts[1].state, 'closed');
+ assert.equal(e.nodes[1].processor.queue.length, 0);
+ assert.equal(e.contexts[0].state, 'suspended');
+ await e.control('preserved', 'STOP');
+});
+test('falha ao pausar após erro remoto libera recursos e publica erro terminal', async () => {
+ const e = await playbackFixture();
+ const session = await e.start('pause-failed');
+ await e.pcm('pause-failed');
+ e.contexts[0].suspend = async () => { throw Error('Contexto não suspendeu'); };
+ session.done.reject(Error('WebSocket closed'));
+ await flush();
+ const state = await e.snapshot();
+ assert.equal(state.jobs[0].status, 'error');
+ assert.equal(state.activeJobIds.length, 0);
+ assert.equal(e.contexts[0].state, 'closed');
+ assert.equal(e.nodes[0].processor.queue.length, 0);
 });
 test('falha de geração com cache disponível usa Pause e mantém trecho recebido para retomada',async()=>{
  const e=await playbackFixture();await e.start('partial');await e.pcm('partial');e.sessions.get('partial').done.reject(Error('Falha remota sintética.'));await flush();await flush();const state=await e.snapshot();assert.equal(state.jobs[0].status,'paused');assert.match(state.jobs[0].warning,/Falha remota/);assert.equal(e.nodes[0].processor.queue.length,1);assert.equal(e.nodes[0].sent.some(p=>p.type==='flush'),false);await e.control('partial','RESUME');assert.equal(e.contexts[0].state,'running');await e.control('partial','STOP');

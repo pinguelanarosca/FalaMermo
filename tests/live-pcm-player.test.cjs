@@ -37,7 +37,7 @@ test('ACK velho/errado não confirma comando e Stop rejeita espera sem publicar 
  const e=environment(),p=new e.OrderedPlaybackBuffer({jobId:'ack'});await p.init();const node=e.nodes[0];node.port.postMessage=data=>node.sent.push(data);
  const pausing=p.pause(true);await new Promise(r=>setImmediate(r));const sent=node.sent.at(-1),ack={type:'control-ack',command:'pause',controlSeq:sent.controlSeq,paused:true,frame:0,availableStart:0};
  node.port.onmessage({data:{...ack,controlSeq:sent.controlSeq-1}});node.port.onmessage({data:{...ack,command:'seek'}});node.port.onmessage({data:{...ack,paused:false}});assert.equal(p.ackSeq,0);assert.equal(p.paused,false);
- const rejected=assert.rejects(pausing,/encerrado/);p.stop();await rejected;node.port.onmessage({data:ack});assert.equal(e.events.some(event=>event.event==='pause'),false);assert.equal(p.ctx.state,'closed');
+ const deliver=node.port.onmessage,rejected=assert.rejects(pausing,/encerrado/);p.stop();await rejected;assert.equal(node.port.onmessage,null);deliver({data:ack});assert.equal(e.events.some(event=>event.event==='pause'),false);assert.equal(p.ctx.state,'closed');
 });
 test('pausa durante inicialização espera o contexto e eventos first-played atrasados não retomam',async()=>{
  const e=environment(),p=new e.OrderedPlaybackBuffer({jobId:'early-pause'});let release;const original=e.context.AudioContext.prototype.resume;e.context.AudioContext.prototype.resume=async function(){await new Promise(r=>release=r);return original.call(this);};
@@ -62,8 +62,8 @@ test('fila usa sampleRate real, transfere Float32 sem perder fonte, play só ap�
  e.nodes[0].port.onmessage({data:{type:'first-played',blockId:0,frames:4}});await new Promise(r=>setImmediate(r));assert.equal(e.events.filter(x=>x.event==='play').length,1);
  assert.equal(e.events.find(x=>x.stage==='destination-connected').volume,.4);
  await p.pause(true);assert.equal(p.ctx.state,'suspended');p.add(1,bytes);assert.equal(e.nodes[0].sent.filter(x=>x.type==='enqueue').length,1);
- await p.pause(false);assert.equal(p.ctx.state,'running');p.stop();assert.equal(p.ctx.state,'closed');assert.equal(p.pending,0);
- await new Promise(r=>setImmediate(r));const count=e.events.length;e.nodes[0].port.onmessage({data:{type:'first-played'}});await new Promise(r=>setImmediate(r));assert.equal(e.events.length,count);
+ await p.pause(false);assert.equal(p.ctx.state,'running');const deliver=e.nodes[0].port.onmessage;p.stop();assert.equal(p.ctx.state,'closed');assert.equal(p.pending,0);
+ await new Promise(r=>setImmediate(r));const count=e.events.length;assert.equal(e.nodes[0].port.onmessage,null);deliver({data:{type:'first-played'}});await new Promise(r=>setImmediate(r));assert.equal(e.events.length,count);
 });
 test('alterar volume/rate emite status público para sincronizar os outros HUDs',async()=>{
  const e=environment(),p=new e.OrderedPlaybackBuffer({jobId:'settings',playerId:'player'});await p.init();p.set(.35,1.4);await new Promise(r=>setImmediate(r));const event=e.events.find(x=>x.event==='settings');assert.equal(event.status.volume,.35);assert.equal(event.status.playbackRate,1.4);p.stop();
@@ -72,8 +72,8 @@ test('sliders antes do AudioContext ficar pronto não falham e conservam valores
  const e=environment(),p=new e.OrderedPlaybackBuffer({jobId:'early-settings',playerId:'player'});assert.doesNotThrow(()=>p.set(.2,1.5));await p.init();assert.equal(p.gain.gain.value,.2);assert.equal(p.rate,1.5);p.stop();
 });
 test('replay do mesmo card reseta snapshot offscreen com request novo e texto editado',async()=>{
- const e=environment(),resolvers=[];e.context.LiveSessions.LiveSessionManager.prototype.acquire=async()=>({sendTurn:()=>new Promise(resolve=>resolvers.push(resolve))});e.context.LiveSessions.LiveSessionManager.prototype.release=()=>{};e.context.LiveSessions.LiveSessionManager.prototype.retire=()=>{};
- const payload={operation:'TTS_LIVE_START',jobId:'manual-replay',playerId:'manual-replay',requestId:'first',text:'Primeiro texto.',modelId:'gemini-3.8-live',apiKeys:['fake-only']};await e.command(payload);await new Promise(r=>setImmediate(r));resolvers[0]({});await new Promise(r=>setImmediate(r));assert.equal((await e.command({operation:'GLOBAL_JOBS_SNAPSHOT'})).jobs[0].status,'completed');
+ const e=environment(),resolvers=[];e.context.LiveSessions.LiveSessionManager.prototype.acquire=async()=>({sendTurn:(_text,onMessage)=>new Promise(resolve=>resolvers.push(()=>{onMessage({type:'pcm',bytes:new Uint8Array([0,64]),mimeType:'audio/pcm;rate=24000'});resolve({});}))});e.context.LiveSessions.LiveSessionManager.prototype.release=()=>{};e.context.LiveSessions.LiveSessionManager.prototype.retire=()=>{};
+ const payload={operation:'TTS_LIVE_START',jobId:'manual-replay',playerId:'manual-replay',requestId:'first',text:'Primeiro texto.',modelId:'gemini-3.8-live',apiKeys:['fake-only']};await e.command(payload);await new Promise(r=>setImmediate(r));resolvers[0]();await new Promise(r=>setImmediate(r));e.nodes[0].processor.process([],[[new Float32Array(128)]]);await new Promise(r=>setImmediate(r));assert.equal((await e.command({operation:'GLOBAL_JOBS_SNAPSHOT'})).jobs[0].status,'completed');
  await e.command({...payload,requestId:'second',text:'Texto editado.'});await new Promise(r=>setImmediate(r));const state=await e.command({operation:'GLOBAL_JOBS_SNAPSHOT'});assert.equal(state.jobs[0].requestId,'second');assert.equal(state.jobs[0].text,'Texto editado.');assert.equal(state.jobs[0].status,'connecting');await e.command({...payload,requestId:'second',operation:'STOP'});resolvers[1]({});
 });
 test('efeitos configurados chegam ao grafo Live e pitch chega ao worklet, fora do schema Gemini',async()=>{

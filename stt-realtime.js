@@ -2,13 +2,28 @@
 'use strict';
 const CONFIG=Object.freeze({sampleRate:16000,minChunkMs:600,maxChunkMs:12000,silenceMs:500,rmsThreshold:.004,preRollMs:500,overlapMs:200,maxQueuedChunks:8,maxQueuedBytes:960000,maxPendingPackets:320,settleMs:900});
 const failure=(message,code='STT_PIPELINE')=>Object.assign(new Error(message),{code});
-function pcmRms(bytes){const view=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength);let sum=0;for(let i=0;i<bytes.byteLength;i+=2){const value=view.getInt16(i,true)/32768;sum+=value*value;}return Math.sqrt(sum/(bytes.byteLength/2||1));}
+function pcmRms(bytes,forVad=false){
+ const view=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength),count=bytes.byteLength/2||1;
+ let sum=0,squares=0,min=Infinity,max=-Infinity,minCount=0,maxCount=0;
+ for(let i=0;i<bytes.byteLength;i+=2){
+  const sample=view.getInt16(i,true);squares+=sample*sample;
+  if(!forVad)continue;
+  sum+=sample;
+  if(sample<min){min=sample;minCount=1;}else if(sample===min)minCount++;
+  if(sample>max){max=sample;maxCount=1;}else if(sample===max)maxCount++;
+ }
+ // Uma amostra isolada num nível constante é um impulso digital, não uma vocalização.
+ if(forVad&&count>=3&&Math.max(minCount,maxCount)>=count-1)return 0;
+ const mean=forVad?sum/count:0;
+ return Math.sqrt(Math.max(0,squares/count-mean*mean))/32768;
+}
 class CapturePipeline{
- constructor({jobId,realtime=false,continuous=false,submitAudioChunk,onDiagnostic=()=>{},config={}}){this.jobId=jobId;this.realtime=realtime;this.continuous=continuous;this.submitAudioChunk=submitAudioChunk;this.onDiagnostic=onDiagnostic;this.config={...CONFIG,...config,...(continuous?{overlapMs:0}:{})};const c=this.config;if(!jobId||typeof submitAudioChunk!=='function'||![c.minChunkMs,c.maxChunkMs,c.silenceMs,c.preRollMs,c.overlapMs,c.rmsThreshold].every(Number.isFinite)||c.minChunkMs<0||c.maxChunkMs<c.minChunkMs||c.maxChunkMs<=0||c.silenceMs<=0||c.preRollMs<0||c.preRollMs>c.maxChunkMs||c.overlapMs<0||c.overlapMs>=c.minChunkMs||c.rmsThreshold<=0)throw failure('Configuração VAD inválida.');this.sequence=0;this.packetSequence=0;this.samples=0;this.noise=0;this.closed=false;this.chunk=null;this.tail=new Uint8Array();this.idle=new Uint8Array();this.skippedSilenceBytes=0;this.prefix=null;}
+ constructor({jobId,realtime=false,continuous=false,adaptive=false,submitAudioChunk,onDiagnostic=()=>{},config={}}){this.jobId=jobId;this.realtime=realtime;this.continuous=continuous;this.adaptive=adaptive;this.submitAudioChunk=submitAudioChunk;this.onDiagnostic=onDiagnostic;this.config={...CONFIG,...config,...(continuous?{overlapMs:0}:{})};const c=this.config;if(!jobId||typeof submitAudioChunk!=='function'||![c.minChunkMs,c.maxChunkMs,c.silenceMs,c.preRollMs,c.overlapMs,c.rmsThreshold].every(Number.isFinite)||c.minChunkMs<0||c.maxChunkMs<c.minChunkMs||c.maxChunkMs<=0||c.silenceMs<=0||c.preRollMs<0||c.preRollMs>c.maxChunkMs||c.overlapMs<0||c.overlapMs>=c.minChunkMs||c.rmsThreshold<=0)throw failure('Configuração VAD inválida.');this.sequence=0;this.packetSequence=0;this.samples=0;this.noise=0;this.closed=false;this.chunk=null;this.tail=new Uint8Array();this.idle=new Uint8Array();this.skippedSilenceBytes=0;this.prefix=null;}
  diagnostic(stage,extra={}){this.onDiagnostic({stage,...extra});}
  emit(pcm,endOnly=false,cutReason){const c=this.chunk,meta={jobId:this.jobId,chunkId:c.chunkId,sequence:c.sequence,packetSequence:++this.packetSequence,startMs:c.startMs,endMs:this.samples/16,durationMs:this.samples/16-c.startMs,overlapMs:c.overlapMs,speechAfterOverlap:c.speechAfterOverlap,status:endOnly?'closed':'streaming',...(cutReason?{cutReason}:{})};this.submitAudioChunk({pcm,endOnly,chunk:meta});if(endOnly)this.diagnostic('chunk-created',meta);}
- push(bytes){if(this.closed)return false;if(!(bytes instanceof Uint8Array)||!bytes.length||bytes.byteLength%2)throw failure('PCM STT inválido.');if(!this.realtime){this.submitAudioChunk({pcm:bytes});return true;}
-  const ms=bytes.byteLength/32,rms=pcmRms(bytes),threshold=Math.max(this.config.rmsThreshold,this.noise*3),voiced=rms>=(this.chunk?.speech?threshold*.7:threshold);if(!voiced)this.noise=this.noise*.98+rms*.02;
+ push(bytes,decision){if(this.closed)return false;if(!(bytes instanceof Uint8Array)||!bytes.length||bytes.byteLength%2)throw failure('PCM STT inválido.');if(!this.realtime){this.submitAudioChunk({pcm:bytes});return true;}
+  const ms=bytes.byteLength/32,rms=pcmRms(bytes,true),threshold=Math.max(this.config.rmsThreshold,this.noise*3),rmsVoiced=rms>=(this.chunk?.speech?threshold*.7:threshold);if(!rmsVoiced)this.noise=this.noise*.98+rms*.02;
+  const voiced=decision??rmsVoiced;
   // O overlap já foi enviado no bloco anterior. Sozinho ele não é fala nova:
   // aguarde a próxima voz em vez de criar um turno vazio que expiraria no transporte.
   if(!this.chunk&&!voiced){const joined=new Uint8Array(this.idle.length+bytes.length);joined.set(this.idle);joined.set(bytes,this.idle.length);const keep=Math.min(joined.length,Math.round(this.config.preRollMs*32));this.skippedSilenceBytes+=joined.length-keep;this.idle=joined.slice(joined.length-keep);this.gapMs=(this.gapMs||0)+ms;if(this.gapMs>=this.config.silenceMs){this.prefix=null;if(this.pendingActivityEnd){this.pendingActivityEnd=false;this.submitAudioChunk({pcm:new Uint8Array(),activityEndOnly:true,packetSequence:++this.packetSequence});}}this.samples+=bytes.length/2;return true;}
@@ -16,7 +31,12 @@ class CapturePipeline{
   const c=this.chunk;if(voiced){c.speech=true;c.speechAfterOverlap=true;c.silenceMs=0;}else c.silenceMs+=ms;
   this.samples+=bytes.byteLength/2;this.emit(bytes);
   const retained=Math.round(this.config.overlapMs*32);if(retained){const joined=new Uint8Array(this.tail.length+bytes.length);joined.set(this.tail);joined.set(bytes,this.tail.length);this.tail=joined.slice(-retained);}
-  const duration=this.samples/16-c.startMs;if(duration>=this.config.maxChunkMs)this.closeChunk('maximum');else if(c.speech&&duration>=this.config.minChunkMs&&c.silenceMs>=this.config.silenceMs)this.closeChunk('silence');return true;
+  const duration=this.samples/16-c.startMs;
+  const target=this.sequence===1?3500:5200;
+  const adaptiveCut=this.adaptive&&duration>=target&&(c.silenceMs>=160||duration>=target+1800);
+  if(c.speech&&duration>=this.config.minChunkMs&&c.silenceMs>=this.config.silenceMs)this.closeChunk('silence');
+  else if(duration>=this.config.maxChunkMs||adaptiveCut)this.closeChunk('maximum');
+  return true;
  }
  closeChunk(reason){if(!this.chunk)return;this.emit(new Uint8Array(),true,reason);this.pendingActivityEnd=reason==='maximum'&&this.continuous;this.prefix=reason==='maximum'&&this.tail.length?this.tail.slice():null;this.tail=new Uint8Array();this.chunk=null;}
  finish(){if(this.closed)return;this.closeChunk('finalization');this.skippedSilenceBytes+=this.idle.length;if(this.skippedSilenceBytes)this.diagnostic('vad-silence',{skippedSilenceMs:this.skippedSilenceBytes/32});this.closed=true;this.idle=new Uint8Array();this.prefix=null;}
@@ -65,7 +85,7 @@ class RecoveryStore{
  async transaction(stores,work){const db=await this.open();return new Promise((resolve,reject)=>{const tx=db.transaction(stores,'readwrite');let value,reason;tx.oncomplete=()=>resolve(value);tx.onabort=tx.onerror=()=>reject(reason||failure('Falha ao preservar áudio STT local.','RECOVERY_STORAGE'));const fail=e=>{reason=e;tx.abort();};try{work(tx,v=>value=v,fail);}catch(e){fail(e);}});}
  start(jobId){return this.transaction(['jobs'],(tx,done,fail)=>{const store=tx.objectStore('jobs'),r=store.getAll();r.onsuccess=()=>{if(r.result.some(j=>j.jobId===jobId))return fail(failure('Recuperação STT já existe para este job; nenhum replay foi iniciado.','REQUEST'));if(r.result.length>=129)return fail(failure('Limite de ditados retidos atingido. Exporte/remova recuperações antigas em Opções.','RECOVERY_LIMIT'));const job={jobId,createdAt:Date.now(),state:'recording',bytes:0,packets:0,blocks:0,unresolved:0};store.add(job);done(job);};});}
  append(jobId,packet){return this.transaction(['jobs','audio'],(tx,done,fail)=>{const jobs=tx.objectStore('jobs'),r=jobs.get(jobId);r.onsuccess=()=>{const job=r.result;if(!job||job.state!=='recording')return fail(failure('Recuperação STT não está disponível para gravação.','RECOVERY_STORAGE'));const b=jobs.get('__budget');b.onsuccess=()=>{const budget=b.result||{jobId:'__budget',bytes:0},size=packet.pcm.byteLength;if(job.bytes+size>this.maxJobBytes||budget.bytes+size>this.maxTotalBytes)return fail(failure('Limite do áudio de recuperação STT atingido. O material anterior foi preservado; exporte/remova recuperações em Opções.','RECOVERY_LIMIT'));tx.objectStore('audio').add({jobId,packetSequence:packet.chunk.packetSequence,sequence:packet.chunk.sequence,startMs:packet.chunk.startMs,endMs:packet.chunk.endMs,overlapMs:packet.chunk.overlapMs,pcm:packet.pcm.slice().buffer});job.bytes+=size;job.packets++;budget.bytes+=size;jobs.put(job);jobs.put(budget);done(job);};};});}
- update(jobId,patch){return this.transaction(['jobs'],(tx,done)=>{const store=tx.objectStore('jobs'),r=store.get(jobId);r.onsuccess=()=>{if(!r.result)return;const job=r.result;for(const key of ['state','blocks','unresolved','transcribed','noSpeech','ambiguous'])if(patch[key]!==undefined)job[key]=patch[key];store.put(job);done(job);};});}
+ update(jobId,patch){return this.transaction(['jobs'],(tx,done)=>{const store=tx.objectStore('jobs'),r=store.get(jobId);r.onsuccess=()=>{if(!r.result)return;const job=r.result;for(const key of ['state','blocks','unresolved','transcribed','noSpeech','ambiguous','unresolvedSequences'])if(patch[key]!==undefined)job[key]=patch[key];store.put(job);done(job);};});}
  async list(){const db=await this.open();return new Promise((resolve,reject)=>{const tx=db.transaction('jobs'),r=tx.objectStore('jobs').getAll();r.onsuccess=()=>resolve(r.result.filter(j=>j.jobId!=='__budget'));r.onerror=()=>reject(failure('Falha ao ler recuperações STT.','RECOVERY_STORAGE'));});}
  async packets(jobId,sequence){const db=await this.open();return new Promise((resolve,reject)=>{const r=db.transaction('audio').objectStore('audio').index('jobId').getAll(jobId);r.onsuccess=()=>resolve(r.result.filter(p=>sequence===undefined||p.sequence===sequence).sort((a,b)=>a.packetSequence-b.packetSequence));r.onerror=()=>reject(failure('Falha ao ler PCM STT retido.','RECOVERY_STORAGE'));});}
  async wave(jobId,sequence){const packets=await this.packets(jobId,sequence),size=packets.reduce((sum,p)=>sum+p.pcm.byteLength,0);if(!size)throw failure('Nenhum PCM retido para este ditado/bloco.','REQUEST');const header=new ArrayBuffer(44),v=new DataView(header),ascii=(at,s)=>{for(let i=0;i<s.length;i++)v.setUint8(at+i,s.charCodeAt(i));};ascii(0,'RIFF');v.setUint32(4,36+size,true);ascii(8,'WAVEfmt ');v.setUint32(16,16,true);v.setUint16(20,1,true);v.setUint16(22,1,true);v.setUint32(24,16000,true);v.setUint32(28,32000,true);v.setUint16(32,2,true);v.setUint16(34,16,true);ascii(36,'data');v.setUint32(40,size,true);return{blob:new Blob([header,...packets.map(p=>p.pcm)],{type:'audio/wav'}),bytes:size,packets:packets.length,silencesCompacted:true};}
@@ -144,5 +164,297 @@ class DictationTransport{
  fail(error){if(this.cancelled)return;this.diagnostic('error',this.openBlock,{outcome:'CONNECTION'});this.cancel(error);this.onFailure(error);}
  cancel(error=failure('Ditado cancelado.','CANCELLED')){if(this.cancelled)return;this.cancelled=true;for(const c of this.blocks.values()){this.clearTimer(c.deadline);this.clearTimer(c.settle);}this.clearTimer(this.stopDeadline);this.clearTimer(this.finalSettle);this.reject?.(error);}
 }
-return{CONFIG,pcmRms,CapturePipeline,mergeTranscriptionChunks,TranscriptionMerger,LiveChunkTransport,DictationTransport,RecoveryStore,recovery:new RecoveryStore()};
+// One Live session carries one local block. Its responses need no remote block ID.
+class DistributedDictation {
+ constructor({jobId,retain,openLane,budget={take:()=>true,release:()=>{}},copies=2,
+   onPartial=()=>{},onChunk=()=>{},onWarning=()=>{},onFailure=()=>{},config={},
+   setTimer=setTimeout,clearTimer=clearTimeout,now=Date.now}){
+  Object.assign(this,{jobId,retain,openLane,budget,copies,onPartial,onChunk,onWarning,onFailure,now});
+  this.setTimer=setTimer.bind(globalThis);
+  this.clearTimer=clearTimer.bind(globalThis);
+  this.config={...CONFIG,...config};
+  this.work=Promise.resolve();
+  this.blocks=new Map();
+  this.counts={blocks:0,unresolved:0,transcribed:0,noSpeech:0};
+  this.gaps=[];
+  this.packetSequence=0;
+  this.nextPublish=1;
+  this.textBoundaries=[];
+  this.queuedPackets=0;
+  this.queuedBytes=0;
+  this.bufferedBytes=0;
+  this.pendingBlocks=0;
+  this.text='';
+  this.tail=new Uint8Array();
+ }
+ get stats(){return {...this.counts,unresolvedSequences:[...this.gaps].sort((a,b)=>a-b)};}
+ snapshot(partialText=''){
+  return {text:this.text,confirmedText:this.text,partialText,textBoundaries:this.textBoundaries.map(boundary=>[...boundary]),incomplete:this.counts.unresolved>0,...this.stats};
+ }
+ submitAudioChunk(packet){
+  if(this.stopping||this.cancelled)return Promise.reject(failure('Tarefa STT encerrada.','CANCELLED'));
+  const bytes=packet.pcm?.byteLength||0;
+  if(this.queuedPackets>=this.config.maxPendingPackets||this.queuedBytes+bytes>this.config.maxQueuedBytes){
+   const error=failure('Fila de persistência STT excedida; áudio anterior preservado.','BACKPRESSURE');
+   this.fail(error);
+   return Promise.reject(error);
+  }
+  this.queuedPackets++;
+  this.queuedBytes+=bytes;
+  const work=this.work.then(()=>this.accept(packet)).finally(()=>{
+   this.queuedPackets--;
+   this.queuedBytes-=bytes;
+  });
+  this.work=work.catch(error=>this.fail(error));
+  return work;
+ }
+ async accept(packet){
+  if(this.cancelled)return;
+  const {pcm,chunk,endOnly=false,activityEndOnly=false}=packet;
+  if(!(pcm instanceof Uint8Array)||pcm.byteLength%2||(chunk?.packetSequence??packet.packetSequence)!==this.packetSequence+1){
+   throw failure('PCM ou ordem de pacote STT inválida.');
+  }
+  this.packetSequence++;
+  if(activityEndOnly){
+   if(pcm.length||chunk||this.current)throw failure('Fim de atividade STT inválido.');
+   this.tail=new Uint8Array();
+   return;
+  }
+  if(!chunk||chunk.jobId!==this.jobId||chunk.chunkId!==this.jobId+':'+chunk.sequence||
+     !Number.isSafeInteger(chunk.sequence)||chunk.status!==(endOnly?'closed':'streaming')||
+     ![chunk.startMs,chunk.endMs,chunk.overlapMs].every(n=>Number.isFinite(n)&&n>=0)||
+     chunk.endMs<chunk.startMs||(endOnly?pcm.length||!['silence','maximum','finalization'].includes(chunk.cutReason):!pcm.length)){
+   throw failure('Identidade ou fronteira do bloco STT inválida.');
+  }
+  const previous=this.current;
+  if(previous?(chunk.sequence!==previous.sequence||chunk.startMs!==previous.startMs||
+     chunk.overlapMs!==previous.sourceOverlapMs||chunk.endMs<previous.endMs):
+     (endOnly||chunk.sequence!==this.counts.blocks+1||this.counts.blocks>=10000)){
+   throw failure('Sequência de blocos STT inválida.');
+  }
+  if(endOnly){
+   this.close(previous,chunk.cutReason);
+   return;
+  }
+  await this.retain(packet);
+  if(this.cancelled)return;
+  const block=previous||this.createBlock(chunk);
+  block.endMs=chunk.endMs;
+  // O primeiro pacote pode ser só pre-roll; a fala nova chega nos seguintes.
+  if(chunk.speechAfterOverlap===true)block.speechAfterOverlap=true;
+  const keep=Math.round(this.config.overlapMs*32);
+  if(keep){
+   const suffix=pcm.subarray(Math.max(0,pcm.length-keep));
+   const prefix=this.tail.subarray(Math.max(0,this.tail.length-(keep-suffix.length)));
+   this.tail=new Uint8Array(prefix.length+suffix.length);
+   this.tail.set(prefix);
+   this.tail.set(suffix,prefix.length);
+  }
+  this.enqueue(block,pcm,chunk.speechAfterOverlap!==false);
+ }
+ createBlock(chunk){
+  const context=chunk.startMs===this.previousEnd&&chunk.overlapMs===0?this.tail:new Uint8Array();
+  this.tail=new Uint8Array();
+  const block={sequence:chunk.sequence,startMs:chunk.startMs,endMs:chunk.endMs,
+   sourceOverlapMs:chunk.overlapMs,overlapMs:chunk.overlapMs+context.length/32,speechAfterOverlap:chunk.speechAfterOverlap,
+   lanes:[],packets:[],offset:0,admitted:0};
+  this.blocks.set(block.sequence,block);
+  this.current=block;
+  this.counts.blocks++;
+  if(this.pendingBlocks>=this.config.maxQueuedChunks)return block;
+  block.processing=true;
+  this.pendingBlocks++;
+  const accounts=new Set();
+  for(let copy=1;copy<=this.copies;copy++){
+   const lane={copy,cursor:0,text:'',interim:'',controller:new AbortController()};
+   block.lanes.push(lane);
+   void this.connect(block,lane,accounts);
+  }
+  if(context.length)this.enqueue(block,context);
+  return block;
+ }
+ async connect(block,lane,accounts){
+  try{
+   const session=await this.openLane({
+    sequence:block.sequence,copy:lane.copy,accounts,signal:lane.controller.signal,
+    receive:(content,afterAudioEnd,afterNewSpeech)=>this.receive(block,lane,content,afterAudioEnd,afterNewSpeech),
+    fail:error=>this.endLane(block,lane,error)
+   });
+   if(lane.done){session.close();return;}
+   lane.session=session;
+   block.admitted++;
+   this.flushLane(block,lane);
+  }catch(error){this.endLane(block,lane,error);}
+ }
+ enqueue(block,pcm,hasNewSpeech=false){
+  if(block.lanes.every(lane=>lane.done))return;
+  if(this.bufferedBytes+pcm.length>this.config.maxQueuedBytes||!this.budget.take(pcm.length)){
+   // Only lanes still waiting for setup hold PCM after the other lane has sent it.
+   for(const lane of block.lanes)if(!lane.session&&!lane.done)this.endLane(block,lane,failure('Buffer STT cheio.','BACKPRESSURE'));
+   for(const lane of block.lanes)if(!lane.done)this.send(block,lane,{pcm,hasNewSpeech});
+   return;
+  }
+  this.bufferedBytes+=pcm.length;
+  block.packets.push({pcm,hasNewSpeech});
+  for(const lane of block.lanes)this.flushLane(block,lane);
+  this.trim(block);
+ }
+ send(block,lane,{pcm,hasNewSpeech}){
+  if(hasNewSpeech)lane.sentNewSpeech=true;
+  try{lane.session.send(pcm,hasNewSpeech);}catch(error){this.endLane(block,lane,error);}
+ }
+ flushLane(block,lane){
+  if(lane.done||!lane.session)return;
+  while(!lane.done&&lane.cursor<block.offset+block.packets.length){
+   this.send(block,lane,block.packets[lane.cursor++-block.offset]);
+  }
+  this.trim(block);
+  if(lane.done||!block.closed||lane.ended)return;
+  lane.ended=true;
+  lane.deadline=this.setTimer(()=>this.endLane(block,lane,failure('Prazo de resposta STT esgotado.','CHUNK_TIMEOUT')),lane.session.timeoutMs);
+  try{lane.session.end();}catch(error){this.endLane(block,lane,error);}
+ }
+ trim(block){
+  const consumed=Math.min(block.offset+block.packets.length,...block.lanes.filter(lane=>!lane.done).map(lane=>lane.cursor));
+  for(const {pcm} of block.packets.splice(0,consumed-block.offset)){
+   this.bufferedBytes-=pcm.length;
+   this.budget.release(pcm.length);
+  }
+  block.offset=consumed;
+ }
+ receive(block,lane,content,afterAudioEnd,afterNewSpeech){
+  // Setup, pre-roll e overlap não contêm a primeira fala nova desta réplica.
+  if(lane.done||!lane.session||!lane.sentNewSpeech||afterNewSpeech===false)return;
+  const input=content.inputTranscription;
+  if(typeof input?.text==='string'&&input.text){
+   if(lane.text.length+input.text.length>100000){
+    this.endLane(block,lane,failure('Limite de texto do bloco STT.','BACKPRESSURE'));
+    return;
+   }
+   lane.text+=input.text;
+   lane.interim='';
+  }
+  if(typeof content.interimInputTranscription?.text==='string')lane.interim=content.interimInputTranscription.text.slice(0,100000);
+  if(block.sequence===this.nextPublish&&(input?.text||content.interimInputTranscription)){
+   this.publishPartial(block);
+  }
+  if(!lane.ended)return;
+  if(afterAudioEnd!==false){
+   if(content.interactionStatus)lane.interactionStatus=content.interactionStatus;
+   if(content.turnComplete||content.interactionStatus==='IDLE')lane.turnEnded=true;
+   if(input?.finished===true)lane.inputFinished=true;
+  }
+  if(lane.session.requiresIdle&&lane.interactionStatus!=='IDLE'){
+   this.clearTimer(lane.settle);
+   lane.settle=null;
+   return;
+  }
+  if(lane.inputFinished&&lane.text.trim()){this.complete(block,lane);return;}
+  // inputTranscription may arrive after turnComplete. Accept nonempty input after a quiet window.
+  if(lane.turnEnded&&lane.text.trim()&&(lane.settle==null||input?.text)){
+   this.clearTimer(lane.settle);
+   lane.settle=this.setTimer(()=>this.complete(block,lane),this.config.settleMs);
+  }
+ }
+ publishPartial(block){
+  if(!block||block.settled||this.cancelled)return;
+  const source=block.lanes.find(lane=>!lane.done&&(lane.text||lane.interim));
+  let partial=source?[source.text.trim(),source.interim.trim()].filter(Boolean).join(' '):'';
+  if(partial&&block.overlapMs&&this.previousResolved){
+   const prior=this.text.slice(-240).trimStart();
+   const merged=mergeTranscriptionChunks([{sequence:1,text:prior},{...block,sequence:2,text:partial}]);
+   const suffix=merged.slice(prior.length).trimStart();
+   // Só remove a correspondência literal; ausência de repetição não invalida a prévia.
+   partial=suffix;
+  }
+  if(partial!==this.partial){this.partial=partial;this.onPartial({...this.snapshot(partial),sequence:block.sequence});}
+ }
+ close(block,reason){
+  block.closed=true;
+  block.closedAt=this.now();
+  this.previousEnd=reason==='maximum'?block.endMs:undefined;
+  if(reason!=='maximum')this.tail=new Uint8Array();
+  this.current=null;
+  for(const lane of block.lanes)this.flushLane(block,lane);
+  if(block.lanes.every(lane=>lane.done))this.complete(block);
+ }
+ endLane(block,lane,error){
+  if(lane.done)return;
+  lane.done=true;
+  this.clearTimer(lane.deadline);
+  this.clearTimer(lane.settle);
+  if(lane.session)lane.session.close(error);
+  lane.controller.abort();
+  this.trim(block);
+  if(block.closed&&block.lanes.every(copy=>copy.done))this.complete(block);
+  else if(block.sequence===this.nextPublish)this.publishPartial(block);
+ }
+ complete(block,winner){
+  if(block.settled||this.cancelled)return;
+  block.settled=true;
+  block.text=winner?.text.trim()||'';
+  if(block.processing)this.pendingBlocks--;
+  if(winner){
+   this.counts.transcribed++;
+   winner.session.confirm(this.now()-block.closedAt);
+  }else{
+   this.counts.unresolved++;
+   this.gaps.push(block.sequence);
+  }
+  for(const lane of block.lanes)this.endLane(block,lane);
+  if(!winner||block.admitted<2)this.onWarning({sequence:block.sequence,gap:!winner});
+  this.publish();
+ }
+ publish(){
+  let advanced=false;
+  while(this.blocks.get(this.nextPublish)?.settled){
+   const block=this.blocks.get(this.nextPublish);
+   this.blocks.delete(this.nextPublish++);
+   if(block.text){
+    // A janela só permite remover correspondência literal na fronteira acústica.
+    const prior=this.text.slice(-240).trimStart();
+    const merged=mergeTranscriptionChunks([{sequence:1,text:prior},{...block,sequence:2,overlapMs:this.previousResolved?block.overlapMs:0}]);
+    const suffix=prior?merged.slice(prior.length):merged;
+    if(this.text.length+suffix.length>1000000){
+     this.fail(failure('Limite de texto STT; áudio local preservado.','BACKPRESSURE'));
+     return;
+    }
+    this.text+=suffix;
+   }
+   this.textBoundaries.push([block.sequence,this.text.length]);
+   this.previousResolved=!!block.text;
+   advanced=true;
+  }
+  if(advanced){
+   this.partial='';
+   this.onChunk({...this.snapshot(),sequence:this.nextPublish-1});
+   this.publishPartial(this.blocks.get(this.nextPublish));
+  }
+  if(this.inputClosed&&!this.blocks.size)this.resolve?.(this.snapshot());
+ }
+ finish(){
+  if(this.finishing)return this.finishing;
+  this.stopping=true;
+  this.finishing=new Promise((resolve,reject)=>{this.resolve=resolve;this.reject=reject;});
+  if(this.cancelled)this.reject(failure('Ditado cancelado.','CANCELLED'));
+  else void this.work.then(()=>{
+   if(this.cancelled)return;
+   if(this.current)this.close(this.current,'finalization');
+   this.tail=new Uint8Array();
+   this.inputClosed=true;
+   this.publish();
+  }).catch(error=>this.fail(error));
+  return this.finishing;
+ }
+ fail(error){if(!this.cancelled){this.cancel(error);this.onFailure(error);}}
+ cancel(error=failure('Ditado cancelado.','CANCELLED')){
+  if(this.cancelled)return;
+  this.cancelled=true;
+  for(const block of this.blocks.values())for(const lane of block.lanes)this.endLane(block,lane);
+  this.blocks.clear();
+  this.tail=new Uint8Array();
+  this.reject?.(error);
+ }
+}
+return{CONFIG,pcmRms,CapturePipeline,mergeTranscriptionChunks,TranscriptionMerger,LiveChunkTransport,DictationTransport,DistributedDictation,RecoveryStore,recovery:new RecoveryStore()};
 });

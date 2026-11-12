@@ -2,17 +2,17 @@
 
 Extensão Chrome Manifest V3 para narração, ditado e seleção visual com Gemini, agentes personalizados e HUD na página.
 
-FalaMermo v1.0.5 corrige o atalho de ditado, a exclusividade da captura de microfone e os controles de reprodução do HUD, popup e cartões. Os ditados anteriores podem continuar em processamento após a liberação do microfone. A versão do manifest é `1.0.5` e o pacote instalável e seu checksum acompanham a [release v1.0.5](https://github.com/pinguelanarosca/FalaMermo/releases/tag/v1.0.5).
+FalaMermo v1.0.6 integra VAD híbrido Silero local, continuidade do ditado e leitura literal da Seleção (Lens), com redundância competitiva entre contas. A versão do manifesto é `1.0.6`; ZIP e checksum acompanham a [release v1.0.6](https://github.com/pinguelanarosca/FalaMermo/releases/tag/v1.0.6).
 
 ## Instalação no Chrome
 
-1. Baixe e extraia `FalaMermo-v1.0.5.zip` da [release v1.0.5](https://github.com/pinguelanarosca/FalaMermo/releases/tag/v1.0.5), ou clone [este repositório](https://github.com/pinguelanarosca/FalaMermo) na branch `main`.
+1. Baixe e extraia `FalaMermo-v1.0.6.zip` da [release v1.0.6](https://github.com/pinguelanarosca/FalaMermo/releases/tag/v1.0.6), ou clone [este repositório](https://github.com/pinguelanarosca/FalaMermo) na branch `main`.
 2. Mantenha o código em uma pasta permanente. `manifest.json` deve estar diretamente nessa pasta.
 3. Abra `chrome://extensions`, ative **Modo do desenvolvedor** e escolha **Carregar sem compactação**.
 4. Selecione a pasta extraída, abra as opções da extensão e configure sua chave Gemini.
 5. Atualize as páginas que já estavam abertas. Após atualizar/recarregar a extensão, atualize também essas páginas.
 
-Não há etapa de build obrigatória. Para atualizar uma instalação descompactada, feche trabalhos ativos, atualize o código na mesma pasta já carregada e clique **Recarregar** em `chrome://extensions`. Não remova a extensão nem limpe seu armazenamento; mantenha a pasta para preservar a instalação e as preferências. Atualize também as páginas abertas. Pacotes anteriores não contêm as mudanças da v1.0.5.
+Não há etapa de build obrigatória. Para atualizar uma instalação descompactada, feche trabalhos ativos, atualize o código na mesma pasta já carregada e clique **Recarregar** em `chrome://extensions`. Não remova a extensão nem limpe seu armazenamento; mantenha a pasta para preservar a instalação e as preferências. Atualize também as páginas abertas. Pacotes anteriores não contêm as mudanças da v1.0.6.
 
 ## Configuração e utilização
 
@@ -20,8 +20,8 @@ Nas opções, salve sua chave Gemini e escolha o agente ativo. É possível conf
 
 - **Narração:** selecione texto na página e use o atalho ou o item direto **Narrar** no menu de contexto. HUD e popup controlam tarefas já criadas; não iniciam leitura de uma nova seleção da página.
 - **Ditado:** posicione o cursor em um campo editável, use o atalho de ditado, autorize o microfone e aguarde “Gravando” antes de falar. Use novamente o atalho ou **Parar** no cartão daquele ditado para concluir. O Gemini 3.8 Live usa VAD manual por padrão para delimitar a fala; preferências explícitas de VAD são preservadas. A inserção usa o campo/seleção original; não deve acompanhar uma mudança de foco para outro campo. Se o campo desaparecer, copie o resultado mostrado no HUD. Nas opções, o botão **Copiar diagnóstico STT** fornece contadores e estados sem exigir Console.
-- **Lens:** use o atalho Lens e selecione uma região. Quando necessário, a extensão abre sua própria interface para pedir autorização opcional de captura. A autorização exige acesso a todos os sites por uma limitação da API de captura do Chrome. Pode ser recusada ou revogada; não é concedida permanentemente na instalação. A captura depende de uma ação explícita do usuário.
-- **Personalização:** agentes compartilham identidade e mantêm instruções próprias para narração, ditado e Lens. Há configurações por modelo e editor avançado com painel, override JSON, JSON completo e preview. Parâmetros incompatíveis não devem ser enviados indiscriminadamente entre STT e TTS.
+- **Lens:** extrai apenas o texto legível da área e o narra literalmente, preservando palavras, pontuação e quebras relevantes, sem análise da persona. Duas contas disputam a primeira resposta válida; há substituição progressiva, fallback e Stop, com uma tarefa e uma narração. Sem texto legível, o cartão informa a ausência e não gera áudio. Use o atalho Lens e selecione uma região. Quando necessário, a extensão abre sua própria interface para pedir autorização opcional de captura. A autorização exige acesso a todos os sites por uma limitação da API de captura do Chrome. Pode ser recusada ou revogada; não é concedida permanentemente na instalação. A captura depende de uma ação explícita do usuário.
+- **Personalização:** agentes compartilham identidade e mantêm instruções próprias para narração e ditado; o Lens usa um contrato fixo de OCR literal. Há configurações por modelo e editor avançado com painel, override JSON, JSON completo e preview. Parâmetros incompatíveis não devem ser enviados indiscriminadamente entre STT e TTS.
 
 A narração separa o texto-fonte literal das instruções de estilo do agente. A transcrição do áudio gerado usa `outputTranscription`, sem misturar pensamentos do modelo. Volume, velocidade, pitch, equalização e ambiência são processados localmente; pitch por resampling também altera a duração. A literalidade é um contrato enviado ao modelo, não garantia absoluta de reconhecimento ou geração.
 
@@ -43,7 +43,9 @@ Use **+** para criar uma tarefa manual com o agente ativo, digite ou cole texto 
 
 As setas deslocam **5 segundos de PCM recebido**, acumulando cliques e respeitando o buffer disponível. O player retém uma janela recente de aproximadamente 60 segundos de PCM consumido enquanto o job está ativo; os limites de posição reais são sincronizados. Avançar não pula para áudio ainda não recebido. Ao parar/concluir, o PCM é liberado; reproduzir novamente é uma ação explícita de nova narração. Não há seek exato por palavra, timestamps inventados, ressíntese oculta ou nova chamada Gemini ao navegar.
 
-Em **Inserção do ditado**, escolha **Ao finalizar** (padrão) ou **Em tempo real**. O modo em tempo real substitui somente o intervalo pertencente ao ditado, distingue texto confirmado de provisório e interrompe a inserção se detectar edição manual conflitante. Agentes que transformam o transcript aguardam o resultado transformado. O destino continua sendo exclusivamente o campo capturado no início, mesmo que o HUD seja aberto em outra aba.
+Em **Inserção do ditado**, escolha **Ao finalizar** (padrão) ou **Em tempo real**. O modo em tempo real substitui somente o intervalo pertencente ao ditado e distingue texto confirmado de provisório. Uma edição manual protege o trecho alterado e abre outro intervalo para as próximas falas. O vínculo permanece com o editor original, mesmo sem foco ou em outra aba/janela. Agentes que transformam o transcript aguardam o resultado transformado, conforme o modo Ao finalizar.
+
+Durante a inserção em tempo real, uma ação de envio associada ao editor (submit, Enter ou botão Enviar), seguida do esvaziamento do campo, encerra o segmento sem reiniciar o microfone. Enter sem limpeza não é envio; edição, seleção e limpeza manual não submetem mensagens. A cauda PCM é delimitada pelo AudioWorklet, e os números/offsets dos blocos separam respostas atrasadas do texto da próxima mensagem. O card conserva a transcrição completa, inclusive confirmações de trechos já enviados ou editados. A recriação do editor exige identidade única dentro dos contêineres originais; destino ausente ou ambíguo impede a inserção, mantendo o resultado no card. A observação do campo não confirma aceitação da mensagem pelo servidor do site.
 
 O PCM é enviado continuamente, sem acumular toda a gravação até Parar. Em tempo real, o VAD local delimita turnos em pausas de 500 ms ou ao atingir 12 s, com pre-roll e overlap de 200 ms nos cortes por limite. Parciais e texto confirmado são consolidados por sequência no mesmo cartão. As filas são limitadas: congestionamento encerra o ditado com erro explícito, em vez de descartar áudio silenciosamente. Cancelar interrompe captura, filas e respostas tardias; a transformação do agente ocorre somente após a consolidação final. O merge de overlap é heurístico, sem timestamps por palavra.
 
@@ -112,7 +114,7 @@ O seek exato por palavra ainda está indisponível. No ciclo de correção anter
 
 Não há ganho comparativo de latência comprovado para o scheduler nem teto real de TPM conhecido automaticamente. Os testes reais anteriores do scheduler usaram áudio sintético e não substituem homologação física da instalação atual.
 
-Consulte as [notas da v1.0.5](docs/RELEASE-v1.0.5.md), as [notas da v1.0.4](docs/RELEASE-v1.0.4.md), as [notas da v1.0.3](docs/RELEASE-v1.0.3.md), o [histórico v1.0.2](docs/RELEASE-v1.0.2.md), as [notas v1.0.1](docs/RELEASE-v1.0.1.md) e a [release v1.0.0](https://github.com/pinguelanarosca/FalaMermo/releases/tag/v1.0.0).
+Consulte as [notas da v1.0.6](docs/RELEASE-v1.0.6.md), as [notas da v1.0.5](docs/RELEASE-v1.0.5.md), as [notas da v1.0.4](docs/RELEASE-v1.0.4.md), as [notas da v1.0.3](docs/RELEASE-v1.0.3.md), o [histórico v1.0.2](docs/RELEASE-v1.0.2.md), as [notas v1.0.1](docs/RELEASE-v1.0.1.md) e a [release v1.0.0](https://github.com/pinguelanarosca/FalaMermo/releases/tag/v1.0.0).
 
 ## Validação do código
 

@@ -3,7 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
 const root = path.resolve(__dirname, '..');
-const PUBLIC_VERSION = '1.0.5';
+const PUBLIC_VERSION = '1.0.6';
 const runtimeFiles = [
     'manifest.json', 'background.js', 'content.js', 'content.css',
     'popup.html', 'popup.js', 'options.html', 'options.js', 'task.html', 'task.js',
@@ -11,13 +11,16 @@ const runtimeFiles = [
     'tts-config.js', 'tts-adaptive.js', 'live-config.js', 'live-session-manager.js',
     'live-tts-diagnostics.js', 'live-stt-diagnostics.js', 'mic-capture-worklet.js', 'pcm-player-worklet.js',
     'global-jobs.js', 'global-hud.js', 'dictation-runtime.js', 'stt-realtime.js', 'stt-scheduler.js',
+    'stt-vad-client.js', 'stt-vad-host.js', 'stt-vad-worker.js',
+    'vad-assets/hybrid.js', 'vad-assets/rescue.js', 'vad-assets/model.onnx', 'vad-assets/LICENSES.txt',
+    'vad-assets/ort.wasm.min.js', 'vad-assets/ort-wasm-simd-threaded.mjs', 'vad-assets/ort-wasm-simd-threaded.wasm',
     'icons/icon16.png', 'icons/icon48.png', 'icons/icon128.png',
 ];
 function publicFiles() {
-    return [...runtimeFiles, 'README.md', '.gitignore', 'docs/RELEASE-v1.0.0.md', 'docs/RELEASE-v1.0.1.md', 'docs/RELEASE-v1.0.2.md', 'docs/RELEASE-v1.0.3.md', 'docs/RELEASE-v1.0.4.md', 'docs/RELEASE-v1.0.5.md',
+    return [...runtimeFiles, 'README.md', '.gitignore', 'docs/RELEASE-v1.0.0.md', 'docs/RELEASE-v1.0.1.md', 'docs/RELEASE-v1.0.2.md', 'docs/RELEASE-v1.0.3.md', 'docs/RELEASE-v1.0.4.md', 'docs/RELEASE-v1.0.5.md', 'docs/RELEASE-v1.0.6.md',
         'tools/verify-publication.cjs', 'tools/package-release.cjs',
         ...fs.readdirSync(path.join(root, 'tests')).filter(name =>
-            name.endsWith('.test.cjs') || ['load-background.cjs', 'controls-chrome.cjs', 'audio-controls-browser.html', 'audio-controls-browser.js', 'stt-native-browser.html', 'AUDIO-CONTROLS.md'].includes(name)).map(name => 'tests/' + name)].sort();
+            name.endsWith('.test.cjs') || ['selection-chrome.cjs', 'stt-editors-chrome.cjs', 'stt-editors-browser.html', 'stt-continuous-browser.html', 'load-background.cjs', 'stt-audio-fixture.cjs', 'controls-chrome.cjs', 'stt-vad-chrome-cases.cjs', 'vad-go-sintetico.pcm', 'vad-oh-sintetico.pcm', 'audio-controls-browser.html', 'audio-controls-browser.js', 'stt-native-browser.html', 'AUDIO-CONTROLS.md'].includes(name)).map(name => 'tests/' + name)].sort();
 }
 const secretRules = [
     ['Google API key', /AIza[0-9A-Za-z_-]{35}/g],
@@ -36,14 +39,14 @@ function verify(directory = root, files = publicFiles(), {syntax = true} = {}) {
             throw Error('Arquivo proibido na publicação: ' + file);
         const absolute = path.join(directory, file), stat = fs.lstatSync(absolute);
         if (!stat.isFile() || stat.isSymbolicLink()) throw Error('Não é arquivo regular: ' + file);
-        if (!file.endsWith('.png')) {
+        if (/\.(?:js|cjs|mjs|html|css|json|md|txt)$/.test(file) || file==='.gitignore') {
             const text = fs.readFileSync(absolute, 'utf8');
             for (const [rule, pattern] of secretRules) {
                 pattern.lastIndex = 0;
                 for (const match of text.matchAll(pattern)) findings.push({file, line: text.slice(0, match.index).split('\n').length, rule});
             }
         }
-        if (syntax && /\.(?:js|cjs)$/.test(file)) {
+        if (syntax && /\.(?:js|cjs|mjs)$/.test(file)) {
             const checked = cp.spawnSync(process.execPath, ['--check', absolute], {encoding: 'utf8'});
             if (checked.status !== 0) throw Error('Sintaxe JavaScript inválida: ' + file);
         }
@@ -55,6 +58,11 @@ function verify(directory = root, files = publicFiles(), {syntax = true} = {}) {
     const manifest = JSON.parse(fs.readFileSync(path.join(directory, 'manifest.json'), 'utf8'));
     if (manifest.manifest_version !== 3 || !/^\d+(\.\d+){0,3}$/.test(manifest.version)) throw Error('Manifest inválido');
     if (manifest.version !== PUBLIC_VERSION) throw Error('Versão do manifest deve corresponder à versão pública ' + PUBLIC_VERSION);
+    for (const file of runtimeFiles.filter(name => name.startsWith('vad-assets/'))) {
+        if (!selected.has(file) || fs.statSync(path.join(directory,file)).size === 0) throw Error('Dependência VAD ausente ou vazia: '+file);
+    }
+    const wasm=fs.readFileSync(path.join(directory,'vad-assets/ort-wasm-simd-threaded.wasm'));
+    if (!wasm.subarray(0,8).equals(Buffer.from([0,97,115,109,1,0,0,0]))) throw Error('Cabeçalho WASM inválido');
     if (manifest.background?.type !== 'module') throw Error('Background deve permanecer módulo');
     const resources = [manifest.background.service_worker, manifest.action.default_popup, manifest.options_page,
         ...Object.values(manifest.icons || {}), ...Object.values(manifest.action.default_icon || {}),
@@ -74,7 +82,7 @@ function verify(directory = root, files = publicFiles(), {syntax = true} = {}) {
         }
     }
     for (const resource of resources) if (!selected.has(resource)) throw Error('Recurso ausente: ' + resource);
-    return {files: files.length, javascript: files.filter(file => /\.(?:js|cjs)$/.test(file)).length,
+    return {files: files.length, javascript: files.filter(file => /\.(?:js|cjs|mjs)$/.test(file)).length,
         manifestVersion: manifest.version, manifestName: manifest.name, secretFindings: 0, referencesChecked: resources.length};
 }
 module.exports = {root, PUBLIC_VERSION, runtimeFiles, publicFiles, verify};

@@ -65,3 +65,17 @@ Abra `http://127.0.0.1:8766/tests/audio-controls-browser.html` no Chrome. A pág
 A página nativa confirma processamento PCM, suspensão/retomada de AudioContext, ganho, controles, concorrência e liberação. Ela não comprova a escuta física nem o transporte Gemini real de uma extensão MV3 instalada. Esses cenários dependem da homologação acima.
 
 O orçamento de 128 MB se aplica ao cache gerenciado de reprodução, não ao consumo total do processo Chrome. Ao atingir o limite, a geração é interrompida com aviso e o trecho recebido permanece pausado para recuperação. Liberar outra tarefa com Stop não completa automaticamente a geração interrompida; para obter a narração integral, execute Stop e Play nessa tarefa.
+
+## Homologação da Etapa 2 de STT
+
+1. Carregue o diretório da extensão no Chrome e use as chaves já configuradas. No modo convencional, dite por 20, 60 e 180 segundos. Alterne frases e fala contínua. Confirme a ordem e leia as transições entre blocos.
+2. Repita em tempo real. Faça uma pausa de cinco minutos sem parar a gravação. Confirme que os blocos anteriores são inseridos antes do Stop e que a fala seguinte entra na mesma tarefa.
+3. Pare e inicie outro ditado em outra aba enquanto o primeiro aguarda resultado. Confirme que o primeiro resultado e o novo microfone pertencem a tarefas diferentes. Teste também Cancelar durante o processamento.
+4. Em Opções, use **Copiar diagnóstico STT**. Compare eventos `chunk-send` de uma mesma `sequence`. Os campos `copy`, `keyLabel` e `sessionId` permitem conferir as duas sessões. `chunk-degraded` indica proteção reduzida. `chunk-unresolved` identifica um bloco inconclusivo.
+5. Se houver lacuna, use o console das Opções. `await SttRealtime.recovery.list()` mostra `unresolvedSequences`. Exporte o bloco com `await SttRealtime.recovery.download(jobId, sequence)`.
+
+O teste `node --test --experimental-test-isolation=none tests/stt-distributed.test.cjs` usa o scheduler real com nove credenciais fictícias e respostas controladas. A integração `FALAMERMO_HEADED=1 FALAMERMO_NATIVE_SHORTCUT=1 xvfb-run -a node tests/controls-chrome.cjs` usa a extensão e o IndexedDB do Chrome com WebSockets e microfone de teste.
+
+Cada sessão recebe um bloco. A primeira transcrição válida encerra as duas tentativas e a publicação segue a ordem local. Em cortes forçados, até 200 ms do bloco anterior oferecem contexto acústico. A reconciliação usa correspondências literais na fronteira. A referência do Live não garante timestamps por palavra para esta rota, portanto a continuidade na fronteira precisa de avaliação auditiva. A compatibilidade usa uma janela de 900 ms após o fim do turno quando o servidor entrega texto sem confirmação explícita de entrada.
+
+O scheduler conserva os limites configurados de sessões, orçamento e cooldown. Distinção de chaves é verificável localmente. A associação de cada chave a uma conta ou projeto independente depende da configuração do provedor. O PCM é gravado uma vez, com os limites atuais de recuperação. Sob saturação, a redução de réplicas ou a lacuna é sinalizada.

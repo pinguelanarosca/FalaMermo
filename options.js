@@ -179,7 +179,23 @@ function agentAction(action){return async()=>{try{pullAgentFromFields();validate
 function initTabs(){$$('.tab').forEach(b=>b.onclick=()=>{$$('.tab').forEach(x=>x.classList.toggle('active',x===b));$$('.panel').forEach(p=>p.classList.toggle('active',p.dataset.panel===b.dataset.tab))})}
 function fillSelect(el,ids,selected){el.innerHTML='';ids.forEach(id=>el.add(new Option(modelName(id),id)));if(selected&&!ids.includes(selected))el.add(new Option(selected+' (personalizado)',selected));el.value=selected||ids[0]}
 function initModelSelects(){const tts=LiveConfig.eligibleModels('tts'),stt=[...LiveConfig.LIVE_STT_MODELS],vision=[...CHAINS.vision],general=[...CHAINS.general];fillSelect($('#globalTts'),LiveConfig.LIVE_TTS_MODELS,LiveConfig.LIVE_TTS_MODELS.includes(state.models.ttsModelId)?state.models.ttsModelId:LiveConfig.DEFAULTS.ttsModelId);fillSelect($('#globalStt'),LiveConfig.LIVE_STT_MODELS,LiveConfig.LIVE_STT_MODELS.includes(state.models.sttModelId)?state.models.sttModelId:LiveConfig.DEFAULTS.sttModelId);fillSelect($('#globalVision'),vision,state.models.visionModelId);fillSelect($('#globalGeneral'),general,state.models.generalModelId);fillSelect($('#agentTtsModel'),tts,LiveConfig.migrateAgent(currentAgent,state.models).live.preferredModel);fillSelect($('#agentSttModel'),stt,LiveConfig.migrateAgent(currentAgent,state.models).live.stt.preferredModel);fillSelect($('#agentVisionModel'),vision,currentAgent.modelPreferences.visionModelId||state.models.visionModelId);fillSelect($('#agentGeneralModel'),general,currentAgent.modelPreferences.generalModelId||state.models.generalModelId)}
-function renderAgentSelect(){const sel=$('#agentSelect');sel.innerHTML='';const built=document.createElement('optgroup');built.label='Agentes de fábrica';DEFAULT_AGENTS.forEach(a=>built.append(new Option(a.metadata.name+' — '+a.voice.preferredVoice,a.metadata.id)));sel.append(built);if(state.agents.customAgents.length){const custom=document.createElement('optgroup');custom.label='Agentes personalizados';state.agents.customAgents.forEach(a=>custom.append(new Option('★ '+a.metadata.name+' — '+a.voice.preferredVoice,a.metadata.id)));sel.append(custom)}sel.value=selectedAgentId}
+function renderAgentSelect(){
+ const select=$('#agentSelect');
+ select.innerHTML='';
+ for(const [label,agents,prefix] of [
+  ['Agentes de fábrica',DEFAULT_AGENTS,''],
+  ['Agentes personalizados',state.agents.customAgents,'★ ']
+ ]){
+  if(!agents.length)continue;
+  const group=document.createElement('optgroup');group.label=label;
+  for(const agent of agents){
+   const voice=agent.live?.voiceName||agent.voice?.preferredVoice||'Kore';
+   group.append(new Option(prefix+agent.metadata.name+' — '+voice,agent.metadata.id));
+  }
+  select.append(group);
+ }
+ select.value=selectedAgentId;
+}
 function bindCurrentAgentToFields(){$('#agentName').value=currentAgent.metadata.name||'';$('#agentCategory').value=currentAgent.metadata.category||'custom';$('#agentIcon').value=currentAgent.metadata.icon||'Bot';$('#agentColor').value=/^#[0-9a-f]{6}$/i.test(currentAgent.metadata.color||'')?currentAgent.metadata.color:'#3b82f6';$('#agentDescription').value=currentAgent.metadata.description||'';$('#ttsInstruction').value=currentAgent.instructions.ttsSystemInstruction||'';$('#sttInstruction').value=currentAgent.instructions.sttFormattingInstruction||'';$('#lensInstruction').value=currentAgent.instructions.lensInspectionInstruction||'';$('#voice').value=currentAgent.voice.preferredVoice||'Puck';$('#ambience').value=currentAgent.voice.ambience||'none';$('#rate').value=currentAgent.voice.rateMultiplier??1;$('#pitch').value=currentAgent.voice.pitchMultiplier??1;$('#volume').value=currentAgent.voice.volume??1;$('#bass').value=currentAgent.voice.bass??0;$('#mid').value=currentAgent.voice.mid??0;$('#treble').value=currentAgent.voice.treble??0;$('#ambienceIntensity').value=currentAgent.voice.ambienceIntensity??30;bindTtsFields();updateRangeLabels();initModelSelects();renderLiveEditor();renderColors();renderAgentDashboard();$('#agentAvatar').textContent=(currentAgent.metadata.name||'AG').slice(0,2).toUpperCase();$('#agentAvatar').style.background=currentAgent.metadata.color||'#3b82f6';$('#agentKind').textContent=isCustom?'Personalizado':'De fábrica';$('#saveAgent').classList.toggle('hidden',!isCustom);$('#deleteAgent').classList.toggle('hidden',!isCustom);$('#agentSaveHint').textContent=isCustom?'Este agente é personalizado e pode ser salvo.':'Agente de fábrica protegido.'}
 function pullAgentFromFields(){currentAgent.live=LiveConfig.migrateAgent(currentAgent,state.models).live;currentAgent.metadata.name=$('#agentName').value.trim()||'Agente sem nome';currentAgent.metadata.category=$('#agentCategory').value;currentAgent.metadata.icon=$('#agentIcon').value.trim()||'Bot';currentAgent.metadata.color=$('#agentColor').value;currentAgent.metadata.description=$('#agentDescription').value.trim();currentAgent.instructions.ttsSystemInstruction=$('#ttsInstruction').value;currentAgent.instructions.sttFormattingInstruction=$('#sttInstruction').value;currentAgent.instructions.lensInspectionInstruction=$('#lensInstruction').value;currentAgent.voice.preferredVoice=$('#voice').value;currentAgent.voice.ambience=$('#ambience').value;currentAgent.voice.rateMultiplier=clamp($('#rate').value,.5,2,1);currentAgent.voice.pitchMultiplier=clamp($('#pitch').value,.5,2,1);currentAgent.voice.volume=clamp($('#volume').value,0,1,1);currentAgent.voice.bass=clamp($('#bass').value,-10,10,0);currentAgent.voice.mid=clamp($('#mid').value,-10,10,0);currentAgent.voice.treble=clamp($('#treble').value,-10,10,0);currentAgent.voice.ambienceIntensity=clamp($('#ambienceIntensity').value,0,100,30);currentAgent.live.preferredModel=$('#liveModel').value||$('#agentTtsModel').value||currentAgent.live.preferredModel;currentAgent.live.stt.preferredModel=$('#liveSttModel').value||$('#agentSttModel').value||currentAgent.live.stt.preferredModel;currentAgent.modelPreferences.visionModelId=$('#agentVisionModel').value;currentAgent.modelPreferences.generalModelId=$('#agentGeneralModel').value;pullTtsFields();$('#agentAvatar').textContent=currentAgent.metadata.name.slice(0,2).toUpperCase();$('#agentAvatar').style.background=currentAgent.metadata.color;updateRangeLabels();renderColors()}
 function selectAgent(id){selectedAgentId=id;currentAgent=clone(getAgent(id));isCustom=!currentAgent.metadata.isBuiltIn;state.agents.activeAgentId=id;chrome.storage.local.set({agents:state.agents});renderAgentSelect();bindCurrentAgentToFields()}
@@ -243,7 +259,7 @@ async function saveTtsTiming(trace){
 function createImpulse(ctx,ambience,intensity){if(ambience==='none'||intensity<=0)return null;const secs={studio:.35,room:.75,warm:1.1,hall:1.8}[ambience]||.6,len=Math.floor(ctx.sampleRate*secs),buf=ctx.createBuffer(2,len,ctx.sampleRate);for(let c=0;c<2;c++){const d=buf.getChannelData(c);for(let i=0;i<len;i++)d[i]=(Math.random()*2-1)*Math.pow(1-i/len,ambience==='hall'?2:3)}return buf}
 async function playWithAgent(bytes,trace){if(activeAudioSource){try{activeAudioSource.stop()}catch{}}if(activeAudioCtx){try{await activeAudioCtx.close()}catch{}}const ctx=new AudioContext();activeAudioCtx=ctx;trace?.mark("AUDIO_LOAD_START");const resumed=ctx.resume();const arr=bytes.buffer.slice(bytes.byteOffset,bytes.byteOffset+bytes.byteLength),buffer=await ctx.decodeAudioData(arr),src=ctx.createBufferSource();await resumed;trace?.mark("AUDIO_LOAD_END");activeAudioSource=src;src.buffer=buffer;src.playbackRate.value=currentAgent.voice.rateMultiplier||1;if(src.detune)src.detune.value=1200*Math.log2(currentAgent.voice.pitchMultiplier||1);const bass=ctx.createBiquadFilter();bass.type='lowshelf';bass.frequency.value=250;bass.gain.value=currentAgent.voice.bass||0;const mid=ctx.createBiquadFilter();mid.type='peaking';mid.frequency.value=1200;mid.Q.value=.8;mid.gain.value=currentAgent.voice.mid||0;const treble=ctx.createBiquadFilter();treble.type='highshelf';treble.frequency.value=3500;treble.gain.value=currentAgent.voice.treble||0;const gain=ctx.createGain();activePreviewGain=gain;gain.gain.value=currentAgent.voice.volume??1;src.connect(bass);bass.connect(mid);mid.connect(treble);const intensity=(currentAgent.voice.ambienceIntensity??30)/100,impulse=createImpulse(ctx,currentAgent.voice.ambience||'none',intensity);if(impulse){const dry=ctx.createGain(),wet=ctx.createGain(),conv=ctx.createConvolver();dry.gain.value=1-Math.min(.75,intensity*.7);wet.gain.value=Math.min(.75,intensity*.75);conv.buffer=impulse;treble.connect(dry);treble.connect(conv);conv.connect(wet);dry.connect(gain);wet.connect(gain)}else treble.connect(gain);gain.connect(ctx.destination);src.onended=()=>{$('#ttsStatus').textContent='Concluído.'};trace?.mark('PLAY_CALLED',{reason:'AudioBufferSourceNode.start; esta rota não usa audio.play nem Blob'});const scheduledAt=ctx.currentTime;src.start();if(trace?.enabled){const audible=async()=>{if(activeAudioSource!==src||ctx.state==='closed')return;const stamp=ctx.getOutputTimestamp?.();if(ctx.state==='running'&&(stamp?stamp.contextTime>=scheduledAt&&stamp.contextTime>0:ctx.currentTime>scheduledAt)){trace.mark('AUDIO_STARTED',{reason:'relógio de saída WebAudio ativo; não é medição de som físico'});renderTtsTiming(trace);void saveTtsTiming(trace);return;}requestAnimationFrame(audible);};requestAnimationFrame(audible);}}
 function setupTtsTest(){
-  $('#testTts').onclick=async()=>{try{await synthesizeCurrent();$('#ttsStatus').textContent='Gerando via Gemini Live.';}catch(error){$('#ttsStatus').textContent='❌ '+error.message;}};
+  $('#testTts').onclick=async()=>{try{if(await synthesizeCurrent())$('#ttsStatus').textContent='Gerando via Gemini Live.';}catch(error){$('#ttsStatus').textContent='❌ '+error.message;}};
   $('#ttsDiagnosticTest').onclick=()=>$('#liveTest').click();
   $('#ttsDebugEnabled').checked=state.ttsDebugEnabled===true;
   if(state.logs?.ttsTraces?.[0])renderTtsTiming({enabled:true,snapshot:()=>state.logs.ttsTraces[0]});
@@ -324,15 +340,70 @@ const completedSttPreviews=new Map();
 const pendingSttPreviews=new Map();
 function rememberSttPreview(jobId){completedSttPreviews.set(jobId,{status:'completed',inserted:false,reason:'OPTIONS_PREVIEW',microphoneReleased:true});while(completedSttPreviews.size>32)completedSttPreviews.delete(completedSttPreviews.keys().next().value);void chrome.runtime.sendMessage({type:'HUD_INSERTION_RESULT',payload:{jobId,inserted:false,reason:'OPTIONS_PREVIEW'}}).catch(error=>console.error('[STT preview result]',error?.name||'Error'));}
 async function saveDictationInsertion(value){const mode=value==='realtime'?'realtime':'final',current=(await chrome.storage.local.get('ui')).ui||{};await chrome.storage.local.set({ui:{...current,dictationInsertion:mode}});state.ui={...current,dictationInsertion:mode};return mode;}
+function setupSttRecognition(){
+ const instructions=$('#sttRecognitionInstructions'),language=$('#sttRecognitionLanguage'),vocabulary=$('#sttRecognitionVocabulary');
+ const save=$('#saveSttRecognition'),restore=$('#restoreSttInstructions'),status=$('#sttRecognitionStatus');
+ function fill(preferences){
+  instructions.value=preferences.instructions;
+  language.value=preferences.language;
+  vocabulary.value=preferences.customVocabulary.join('\n');
+ }
+ fill(LiveConfig.normalizeSttRecognition(state.sttRecognition));
+ async function persist(restoreInstructions=false){
+  if(save.disabled)return;
+  const controls=[instructions,language,vocabulary,save,restore];
+  let payload={restoreInstructions:true};
+  if(!restoreInstructions){
+   const terms=[...new Set(vocabulary.value.split('\n').map(term=>term.trim()).filter(Boolean))];
+   if(terms.length>LiveConfig.STT_VOCABULARY_LIMIT){
+    status.textContent='O vocabulário aceita até 1.000 termos distintos.';
+    return;
+   }
+   payload={instructions:instructions.value,language:language.value,customVocabulary:terms};
+  }
+  controls.forEach(control=>{control.disabled=true;});
+  try{
+   const reply=await chrome.runtime.sendMessage({type:'STT_RECOGNITION_SAVE',payload});
+   if(!reply?.success)throw Error('STT_RECOGNITION_SAVE');
+   state.sttRecognition=reply.preferences;
+   if(restoreInstructions)instructions.value=reply.preferences.instructions;
+   else fill(reply.preferences);
+   status.textContent=restoreInstructions?'Instruções padrão restauradas para os próximos ditados.':'Preferências salvas para os próximos ditados.';
+  }catch{
+   status.textContent='Não foi possível salvar as preferências de reconhecimento.';
+  }finally{
+   controls.forEach(control=>{control.disabled=false;});
+  }
+ }
+ $('#sttRecognitionForm').onsubmit=event=>{event.preventDefault();return persist();};
+ restore.onclick=()=>persist(true);
+}
 async function startLiveTtsPreview(text){
  const options=LiveConfig.buildAgentLiveOptions(currentAgent,state.audio,state.models);
  LiveConfig.assertRouteModel(options.modelId,'tts');
  const setup=LiveConfig.buildLiveSessionConfig(options),turn=LiveConfig.buildLiveTurnMessage(text,options);
  $('#liveSetupPreview').textContent=JSON.stringify(setup,null,2);$('#liveTurnPreview').textContent=JSON.stringify(turn,null,2);
  $('#ttsPayloadModel').textContent=setup.setup.model+' · WebSocket Live';$('#ttsPayload').textContent=JSON.stringify({setup,turn},null,2);
- const playerId='options-live-'+crypto.randomUUID(),requestId=playerId+':1';livePreview={playerId,requestId};$('#liveTestStatus').textContent='Conectando…';
- const response=await chrome.runtime.sendMessage({type:'TTS_REQUEST',payload:{text,agentId:currentAgent.metadata.id,previewAgent:clone(currentAgent),playback:{playerId,requestId,volume:currentAgent.voice.volume??1,playbackRate:currentAgent.voice.rateMultiplier??1}}});
- if(!response?.success)throw new Error(response?.error||'Falha no Live.');return response;
+ const playerId='options-live-'+crypto.randomUUID(),requestId=playerId+':1',preview={playerId,requestId};
+ livePreview=preview;
+ $('#liveTestStatus').textContent='Conectando…';
+ try{
+  const response=await chrome.runtime.sendMessage({type:'TTS_REQUEST',payload:{text,agentId:currentAgent.metadata.id,
+   startedAt:Date.now(),previewAgent:clone(currentAgent),
+   playback:{playerId,requestId,volume:currentAgent.voice.volume??1,playbackRate:currentAgent.voice.rateMultiplier??1}}});
+  if(livePreview!==preview)return;
+  if(response?.cancelled){
+   livePreview=null;
+   $('#liveTestStatus').textContent='Parado · cancelado';
+   return;
+  }
+  if(!response?.success)throw new Error(response?.error||'Falha no Live.');
+  return response;
+ }catch(error){
+  if(livePreview!==preview)return;
+  livePreview=null;
+  throw error;
+ }
 }
 function liveDraft(){currentAgent.live=LiveConfig.migrateAgent(currentAgent,state.models).live;return currentAgent.live;}
 function renderLiveEditor(){
@@ -345,11 +416,17 @@ function renderLiveEditor(){
  const thinking=$('#liveThinking');thinking.innerHTML='<option value="">Padrão</option>';for(const level of LiveConfig.caps(model).supportedThinkingLevels)thinking.add(new Option(level,level));thinking.value=live.thinkingLevel||'';
  $('#liveThinkingField').classList.toggle('hidden',!LiveConfig.caps(model).supportedThinkingLevels.length);
  $('#liveTranscriptionField').classList.toggle('hidden',!LiveConfig.caps(model).supportsOutputTranscription);
- const stt=live.stt||{};$('#liveSttModel').innerHTML='';for(const id of LiveConfig.LIVE_STT_MODELS)$('#liveSttModel').add(new Option(LiveConfig.caps(id).displayName,id));$('#liveSttModel').value=stt.preferredModel||LiveConfig.DEFAULTS.sttModelId;$('#liveSttVocabulary').value=(stt.customVocabulary||[]).join('\n');$('#liveSttSmart').checked=stt.smartTranscription!==false;$('#liveSttTransform').checked=stt.transform===true||(stt.transform!==false&&currentAgent.metadata.id!=='narrator'&&Boolean(currentAgent.instructions.sttFormattingInstruction?.trim()));
+ const stt=live.stt||{};$('#liveSttModel').innerHTML='';for(const id of LiveConfig.LIVE_STT_MODELS)$('#liveSttModel').add(new Option(LiveConfig.caps(id).displayName,id));$('#liveSttModel').value=stt.preferredModel||LiveConfig.DEFAULTS.sttModelId;$('#liveSttTransform').checked=stt.transform===true||(stt.transform!==false&&currentAgent.metadata.id!=='narrator'&&Boolean(currentAgent.instructions.sttFormattingInstruction?.trim()));
  updateLiveSttCapabilities();updateLivePreview();
 }
 function updateSttTransformationState(){const realtime=state.ui?.dictationInsertion==='realtime',stt=currentAgent.live?.stt||{},desired=stt.transform===true||(stt.transform!==false&&currentAgent.metadata.id!=='narrator'&&Boolean(currentAgent.instructions?.sttFormattingInstruction?.trim()));const field=$('#liveSttTransform');field.disabled=realtime;field.checked=!realtime&&desired;field.title=realtime?'Suspensa no modo Em tempo real; a preferência do agente será restaurada em Ao finalizar.':'Transformação aplicada somente após consolidar o ditado.';const hint=$('#liveSttTransformStatus');if(hint)hint.textContent=realtime?'Transformação suspensa somente nesta modalidade. Instruções e preferência do agente preservadas.':'';}
-function updateLiveSttCapabilities(){const supportsVocabulary=LiveConfig.caps($('#liveSttModel').value).supportsCustomVocabulary;$('#liveSttVocabulary').disabled=!supportsVocabulary;$('#liveSttSmart').disabled=true;$('#liveSttVocabulary').title='Configuração legada preservada; não enviada aos modelos Live gerais.';$('#liveSttSmart').title='Configuração legada preservada; não enviada aos modelos Live gerais.';updateSttTransformationState();}
+function updateLiveSttCapabilities(){
+ const model=LiveConfig.caps($('#liveSttModel').value);
+ const language=model.supportsInputLanguageCodes?'aceita dica de idioma':'usa detecção automática';
+ const vocabulary=model.supportsCustomVocabulary?'aceita vocabulário personalizado':'mantém o vocabulário salvo para modelos compatíveis';
+ $('#sttRecognitionCompatibility').textContent=model.displayName+' (modelo no editor) '+language+' e '+vocabulary+'. Cada modelo de fallback usa os campos que suporta.';
+ updateSttTransformationState();
+}
 function syncLiveFields(){
  const live=liveDraft(),model=$('#liveModel').value,c=LiveConfig.caps(model);
  live.preferredModel=model;$('#agentTtsModel').value=model;live.voiceName=$('#liveVoice').value;currentAgent.voice.preferredVoice=live.voiceName;$('#voice').value=live.voiceName;live.chunkSize=clamp($('#liveChunkSize').value,120,10000,900);live.parallelism=clamp($('#liveParallelism').value,1,9,3);
@@ -368,6 +445,18 @@ function buildLivePreview(){
 }
 function updateLivePreview(){try{const {setup,turn}=buildLivePreview();$('#liveSetupPreview').textContent=JSON.stringify(setup,null,2);$('#liveTurnPreview').textContent=JSON.stringify(turn,null,2);$('#liveJsonStatus').textContent='Setup Live válido. '+(currentAgent.live?.jsonMode==='complete'?'JSON Completo define voz e instruções; campos do painel não substituem esse JSON. ':'')+'O contrato de narração literal é aplicado também ao JSON.';$('#ttsPayloadModel').textContent=setup.setup.model+' · WebSocket Live';$('#ttsPayload').textContent=JSON.stringify({setup,turn},null,2);}catch(error){$('#liveJsonStatus').textContent='❌ '+error.message;$('#liveSetupPreview').textContent='Configuração inválida: '+error.message;$('#liveTurnPreview').textContent='';}}
 function setupLiveOptions(){
+ setupSttRecognition();
+ const vadSelect=$('#sttVadDetector'),vadStatus=$('#sttVadDetectorStatus');
+ chrome.storage.local.get('sttVadDetector').then(settings=>{
+  vadSelect.value=settings.sttVadDetector==='rms'?'rms':'hybrid';
+ }).catch(()=>{vadStatus.textContent='Não foi possível carregar o detector.';});
+ vadSelect.onchange=async()=>{
+  const detector=vadSelect.value==='rms'?'rms':'hybrid';
+  try{
+   await chrome.storage.local.set({sttVadDetector:detector});
+   vadStatus.textContent=detector==='rms'?'RMS salvo. A troca no ditado ativo é automática.':'Híbrido Silero salvo para a próxima captura.';
+  }catch{vadStatus.textContent='Não foi possível salvar o detector.';}
+ };
  $('#dictationInsertion').value=state.ui.dictationInsertion==='realtime'?'realtime':'final';$('#dictationInsertion').onchange=async()=>{try{await saveDictationInsertion($('#dictationInsertion').value);updateSttTransformationState();$('#dictationInsertionStatus').textContent='Preferência salva para os próximos ditados.';}catch(error){$('#dictationInsertionStatus').textContent='Não foi possível salvar a preferência.';console.error('[STT preference]',error?.name||'Error');}};
  if(globalThis.GlobalHud)globalHudPanel=GlobalHud.mount($('#globalHudPanel'),{send:message=>chrome.runtime.sendMessage(message),panel:true,surface:'options'});
  const previousBind=bindCurrentAgentToFields;bindCurrentAgentToFields=()=>{previousBind();renderLiveEditor();};
@@ -381,14 +470,45 @@ function setupLiveOptions(){
  $('#liveJsonFormat').onclick=()=>{try{$('#liveJson').value=JSON.stringify(JSON.parse($('#liveJson').value),null,2);syncLiveFields();}catch(error){$('#liveJsonStatus').textContent='❌ '+error.message;}};
  $('#liveJsonValidate').onclick=updateLivePreview;
  $('#liveTest').onclick=async()=>{try{pullAgentFromFields();syncLiveFields();await startLiveTtsPreview($('#liveTestText').value);}catch(error){$('#liveTestStatus').textContent='❌ '+error.message;}};
- $('#liveStop').onclick=async()=>{if(livePreview){await chrome.runtime.sendMessage({type:'TTS_PLAYBACK_COMMAND',payload:{operation:'STOP',playerId:livePreview.playerId,requestId:livePreview.requestId}}).catch(()=>{});livePreview=null;}$('#liveTestStatus').textContent='Parado.';};
- for(const id of ['liveSttModel','liveSttVocabulary','liveSttSmart','liveSttTransform'])$('#'+id).addEventListener('input',()=>{const stt=liveDraft().stt;stt.preferredModel=$('#liveSttModel').value;$('#agentSttModel').value=stt.preferredModel;stt.customVocabulary=$('#liveSttVocabulary').value.split('\n').map(x=>x.trim()).filter(Boolean).slice(0,1000);stt.smartTranscription=$('#liveSttSmart').checked;if(state.ui?.dictationInsertion!=='realtime')stt.transform=$('#liveSttTransform').checked;updateLiveSttCapabilities();});
+ $('#liveStop').onclick=async()=>{
+  const preview=livePreview,status=$('#liveTestStatus');
+  if(!preview){status.textContent='Parado.';return;}
+  try{
+   const response=await chrome.runtime.sendMessage({type:'TTS_PLAYBACK_COMMAND',payload:{operation:'STOP',...preview}});
+   if(livePreview!==preview)return;
+   if(!response?.success)throw Error(response?.error||'O player não confirmou a parada.');
+   livePreview=null;
+   status.textContent='Parado.';
+  }catch(error){if(livePreview===preview)status.textContent='❌ '+error.message;}
+ };
+ for(const id of ['liveSttModel','liveSttTransform'])$('#'+id).addEventListener('input',()=>{const stt=liveDraft().stt;stt.preferredModel=$('#liveSttModel').value;$('#agentSttModel').value=stt.preferredModel;if(state.ui?.dictationInsertion!=='realtime')stt.transform=$('#liveSttTransform').checked;updateLiveSttCapabilities();});
  $('#recordStt').onclick=toggleLiveSttTest;
  window.addEventListener('pagehide',()=>{if(liveMic)void toggleLiveSttTest('origin-lost').catch(error=>console.error('[STT pagehide]',error?.name||'Error'));});
  chrome.runtime.onMessage.addListener((message,_sender,sendResponse)=>{if(message.type!=='STT_GLOBAL_STOP'||liveMic?.jobId!==message.payload?.jobId)return false;void toggleLiveSttTest(message.payload?.stopReason).then(()=>sendResponse({success:true}),()=>sendResponse({success:false}));return true;});
+ chrome.runtime.onMessage.addListener((message,_sender,sendResponse)=>{
+  if(message.type!=='STT_GLOBAL_CANCEL'||message.origin?.page!=='options.html')return false;
+  const jobId=message.payload?.jobId;
+  const mic=pendingSttPreviews.get(jobId)||(liveMic?.jobId===jobId?liveMic:null);
+  if(!mic)return false;
+  pendingSttPreviews.delete(jobId);
+  mic.audioQueue?.close();
+  if(liveSttJobId===jobId){liveSttJobId=null;$('#sttStatus').textContent='Encerrando…';}
+  void releaseLiveSttTest(mic,'remote-cancel').then(async()=>{
+   if(mic.context&&mic.context.state!=='closed')await mic.context.close();
+   if(!liveSttJobId)$('#sttStatus').textContent='Parado · cancelado';
+   sendResponse({success:true,microphoneReleased:true});
+  }).catch(()=>sendResponse({success:false}));
+  return true;
+ });
  chrome.runtime.onMessage.addListener((message,_sender,sendResponse)=>{if(message.type!=='STT_GLOBAL_STATUS')return false;const jobId=message.payload?.jobId,remembered=completedSttPreviews.get(jobId),pending=pendingSttPreviews.get(jobId)||(liveMic?.jobId===jobId?liveMic:null);if(!remembered&&!pending)return false;sendResponse({success:true,found:true,...(remembered||{status:pending.released?'waiting':'recording',microphoneReleased:pending.released===true})});return false;});
  $('#clearStt').onclick=()=>{$('#sttResult').textContent='O texto transcrito aparecerá aqui.';$('#sttStatus').textContent='';};
- chrome.runtime.onMessage.addListener(message=>{if(message.type==='HUD_GLOBAL_STATE'){globalHudPanel?.update(message.state||message.payload?.state);return false;}if(message.type!=='LIVE_OPTIONS_EVENT')return false;const p=message.payload;if(pendingSttPreviews.has(p.jobId)&&['stt-final','stt-error','stt-cancelled'].includes(p.event)){const owned=pendingSttPreviews.get(p.jobId);owned.audioQueue?.close();void releaseLiveSttTest(owned,p.event==='stt-final'?'final-result':p.event==='stt-cancelled'?'remote-cancel':p.stopReason||'transport-error');if(p.event==='stt-final')rememberSttPreview(p.jobId);pendingSttPreviews.delete(p.jobId);}if(livePreview&&p.playerId===livePreview.playerId&&p.requestId===livePreview.requestId){if(p.event==='status')$('#liveTestStatus').textContent=p.status+' · '+(p.modelId||'')+' '+(p.keyLabel||'');if(p.event==='setup-complete'){$('#liveTestStatus').textContent='Sessão pronta · '+Math.round(p.setupCompleteMs)+' ms';if(p.actualSetup)$('#liveSetupPreview').textContent=JSON.stringify(p.actualSetup,null,2);}if(p.event==='first-pcm')$('#liveTestStatus').textContent='Primeiro PCM recebido';if(p.event==='first-playback')$('#liveTestStatus').textContent='Reproduzindo PCM';if(p.event==='ranking'&&p.result!=='SUCCESS')$('#liveTestStatus').textContent='Fallback: '+p.result+' · '+p.modelId+' key#'+p.keyIndex;if(p.event==='ended')$('#liveTestStatus').textContent='Concluído';if(p.event==='error')$('#liveTestStatus').textContent='❌ '+p.error;}if(p.jobId===liveSttJobId){if(p.event==='stt-connect-attempt')$('#sttStatus').textContent='Conectando · '+p.modelId+' '+p.keyLabel;if(p.event==='stt-connect-error')$('#sttStatus').textContent='Tentando próxima chave · '+p.keyLabel;if(p.event==='setup-complete')$('#sttStatus').textContent='Sessão STT pronta · '+Math.round(p.setupCompleteMs)+' ms';if(p.event==='stt-audio-sent')$('#sttStatus').textContent='PCM do microfone enviado · '+p.bytes+' bytes';if(p.event==='stt-partial')$('#sttResult').textContent=typeof p.confirmedText==='string'?[p.confirmedText,p.partialText].filter(Boolean).join(' '):[liveSttCommitted,p.text].filter(Boolean).join(' ');if(p.event==='stt-segment'){liveSttCommitted=typeof p.confirmedText==='string'?p.confirmedText:[liveSttCommitted,p.text].filter(Boolean).join(' ');$('#sttResult').textContent=liveSttCommitted;}if(p.event==='stt-status')$('#sttStatus').textContent=p.status;if(p.event==='stt-transform-attempt')$('#sttStatus').textContent='Transformando · '+p.modelId+' '+p.keyLabel;if(p.event==='stt-final'){$('#sttResult').textContent=p.text;$('#sttStatus').textContent='Concluído via Live';liveSttJobId=null;}if(p.event==='stt-cancelled'){liveSttJobId=null;$('#sttStatus').textContent='Parado · cancelado';}if(p.event==='stt-error'){$('#sttStatus').textContent='❌ '+p.error;liveSttJobId=null;}}return false;});
+ chrome.runtime.onMessage.addListener(message=>{if(message.type==='HUD_GLOBAL_STATE'){
+ const current=message.state||message.payload?.state;
+ const preview=livePreview&&current?.jobs?.find(job=>job.requestId===livePreview.requestId);
+ if(preview?.status==='cancelling')$('#liveTestStatus').textContent='Encerrando…';
+ if(preview?.status==='cancelled'){livePreview=null;$('#liveTestStatus').textContent='Parado · cancelado';}
+ globalHudPanel?.update(current);return false;
+ }if(message.type!=='LIVE_OPTIONS_EVENT')return false;const p=message.payload;if(pendingSttPreviews.has(p.jobId)&&['stt-final','stt-error','stt-cancelled'].includes(p.event)){const owned=pendingSttPreviews.get(p.jobId);owned.audioQueue?.close();void releaseLiveSttTest(owned,p.event==='stt-final'?'final-result':p.event==='stt-cancelled'?'remote-cancel':p.stopReason||'transport-error');if(p.event==='stt-final')rememberSttPreview(p.jobId);pendingSttPreviews.delete(p.jobId);}if(livePreview&&p.playerId===livePreview.playerId&&p.requestId===livePreview.requestId){if(p.event==='status')$('#liveTestStatus').textContent=p.status+' · '+(p.modelId||'')+' '+(p.keyLabel||'');if(p.event==='setup-complete'){$('#liveTestStatus').textContent='Sessão pronta · '+Math.round(p.setupCompleteMs)+' ms';if(p.actualSetup)$('#liveSetupPreview').textContent=JSON.stringify(p.actualSetup,null,2);}if(p.event==='first-pcm')$('#liveTestStatus').textContent='Primeiro PCM recebido';if(p.event==='first-playback')$('#liveTestStatus').textContent='Reproduzindo PCM';if(p.event==='ranking'&&p.result!=='SUCCESS')$('#liveTestStatus').textContent='Fallback: '+p.result+' · '+p.modelId+' key#'+p.keyIndex;if(p.event==='ended')$('#liveTestStatus').textContent='Concluído';if(p.event==='error')$('#liveTestStatus').textContent='❌ '+p.error;}if(p.jobId===liveSttJobId){if(p.event==='stt-connect-attempt')$('#sttStatus').textContent='Conectando · '+p.modelId+' '+p.keyLabel;if(p.event==='stt-connect-error')$('#sttStatus').textContent='Tentando próxima chave · '+p.keyLabel;if(p.event==='setup-complete')$('#sttStatus').textContent='Sessão STT pronta · '+Math.round(p.setupCompleteMs)+' ms';if(p.event==='stt-audio-sent')$('#sttStatus').textContent='PCM do microfone enviado · '+p.bytes+' bytes';if(p.event==='stt-partial')$('#sttResult').textContent=typeof p.confirmedText==='string'?[p.confirmedText,p.partialText].filter(Boolean).join(' '):[liveSttCommitted,p.text].filter(Boolean).join(' ');if(p.event==='stt-segment'){liveSttCommitted=typeof p.confirmedText==='string'?p.confirmedText:[liveSttCommitted,p.text].filter(Boolean).join(' ');$('#sttResult').textContent=liveSttCommitted;}if(p.event==='stt-warning')$('#sttStatus').textContent=p.warning;if(p.event==='stt-status')$('#sttStatus').textContent=p.status;if(p.event==='stt-transform-attempt')$('#sttStatus').textContent='Transformando · '+p.modelId+' '+p.keyLabel;if(p.event==='stt-final'){$('#sttResult').textContent=p.text;$('#sttStatus').textContent='Concluído via Live';liveSttJobId=null;}if(p.event==='stt-cancelled'){liveSttJobId=null;$('#sttStatus').textContent='Parado · cancelado';}if(p.event==='stt-error'){$('#sttStatus').textContent='❌ '+p.error;liveSttJobId=null;}}return false;});
 }
 function resampleLiveTest(input,sourceRate,state){const ratio=sourceRate/16000,values=[];for(let position=state.cursor;position<input.length;position+=ratio){const a=Math.floor(position),b=Math.min(input.length-1,a+1),fraction=position-a;values.push(a<0?state.previous*(1-(position+1))+input[0]*(position+1):input[a]*(1-fraction)+input[b]*fraction);state.cursor=position+ratio;}state.cursor-=input.length;state.previous=input[input.length-1]||0;const pcm=new Int16Array(values.length);values.forEach((sample,index)=>{const v=Math.max(-1,Math.min(1,sample));pcm[index]=v<0?v*32768:v*32767;});return new Uint8Array(pcm.buffer);}
 async function releaseLiveSttTest(mic=liveMic,stopReason='transport-error'){
@@ -442,8 +562,8 @@ async function toggleLiveSttTest(stopReason='user-stop'){
  globalThis.LiveSttDiagnostics?.capture(mic,'starting');$('#sttStatus').textContent='Conectando ditado… Aguarde “Gravando” antes de falar.';
  const current=()=>liveMic===mic&&liveSttJobId===jobId&&!mic.closed;
  try{
-  pullAgentFromFields();const stt=liveDraft().stt;stt.preferredModel=$('#liveSttModel').value;stt.customVocabulary=$('#liveSttVocabulary').value.split('\n').map(x=>x.trim()).filter(Boolean).slice(0,1000);stt.smartTranscription=$('#liveSttSmart').checked;if(state.ui?.dictationInsertion!=='realtime')stt.transform=$('#liveSttTransform').checked;
-  mic.reservation=chrome.runtime.sendMessage({type:'STT_CAPTURE_RESERVE',payload:{jobId,agentId:currentAgent.metadata.id}});
+  pullAgentFromFields();const stt=liveDraft().stt;stt.preferredModel=$('#liveSttModel').value;if(state.ui?.dictationInsertion!=='realtime')stt.transform=$('#liveSttTransform').checked;
+  mic.reservation=chrome.runtime.sendMessage({type:'STT_CAPTURE_RESERVE',payload:{jobId,agentId:currentAgent.metadata.id,startedAt:mic.startedAt}});
   const reservation=await mic.reservation;
   if(!current())return;
   mic.reservation=null;
@@ -453,14 +573,14 @@ async function toggleLiveSttTest(stopReason='user-stop'){
   await mic.openingMic;if(!current()){mic.stream.getTracks().forEach(track=>track.stop());return;}
   globalThis.LiveSttDiagnostics?.capture(mic,'microphone-open');
   const realtime=state.ui?.dictationInsertion==='realtime';
-  const started=await chrome.runtime.sendMessage({type:'STT_LIVE_START',payload:{jobId,playerId:jobId,agentId:currentAgent.metadata.id,previewAgent:clone(currentAgent),realtime,chunked:true}});
+  const started=await chrome.runtime.sendMessage({type:'STT_LIVE_START',payload:{jobId,playerId:jobId,agentId:currentAgent.metadata.id,previewAgent:clone(currentAgent),realtime,chunked:true,distributed:true}});
   if(!current()){void chrome.runtime.sendMessage({type:'STT_LIVE_CANCEL',payload:{jobId,playerId:jobId}}).catch(()=>{});return;}
   if(!started?.success)throw new Error(started?.error||'Falha no STT Live.');
   const context=new AudioContext({latencyHint:'interactive'});mic.context=context;await context.audioWorklet.addModule(chrome.runtime.getURL('mic-capture-worklet.js'));if(!current())return;
   const source=context.createMediaStreamSource(mic.stream),node=new AudioWorkletNode(context,'gemini-mic-capture',{channelCount:1,channelCountMode:'explicit',outputChannelCount:[1]}),mute=context.createGain(),resampler={cursor:0,previous:0};mic.source=source;mic.node=node;mic.mute=mute;mute.gain.value=0;source.connect(node).connect(mute).connect(context.destination);
   globalThis.LiveSttDiagnostics?.capture(mic,'worklet-ready');
   mic.audioQueue=new globalThis.DictationRuntime.AudioQueue({metrics:mic.metrics||(mic.metrics={}),send:payload=>chrome.runtime.sendMessage({type:'STT_LIVE_AUDIO',payload}),onFailure:async error=>{if(!pendingSttPreviews.has(jobId))return;globalThis.LiveSttDiagnostics?.ending(mic,error.stopReason||(error.code==='ACK_TIMEOUT'?'ack-timeout':error.code==='BACKPRESSURE'?'backpressure':'queue-error'));globalThis.LiveSttDiagnostics?.capture(mic,error.code==='ACK_TIMEOUT'?'ack-timeout':'error',{outcome:error.code==='ACK_TIMEOUT'?'ACK_TIMEOUT':'CONNECTION'});void chrome.runtime.sendMessage({type:'HUD_CAPTURE_STATE',payload:{jobId,status:'error'}}).catch(failure=>console.error('[STT capture state]',failure?.name||'Error'));await releaseLiveSttTest(mic);pendingSttPreviews.delete(jobId);mic.audioQueue.close();if(liveSttJobId===jobId){liveSttJobId=null;$('#sttStatus').textContent=error.code==='ACK_TIMEOUT'?'❌ O envio de PCM ficou sem confirmação por 10 segundos. Consulte o diagnóstico STT.':'❌ '+error.message;}try{await chrome.runtime.sendMessage({type:'STT_LIVE_CANCEL',payload:{jobId,playerId:jobId}});}catch(failure){console.error('[STT cancel]',failure?.name||'Error');}},onProgress:()=>{if(!mic.lastDiagnosticAt||Date.now()-mic.lastDiagnosticAt>=1000){mic.lastDiagnosticAt=Date.now();globalThis.LiveSttDiagnostics?.capture(mic,'capture-progress');}}});
-  mic.chunker=new globalThis.SttRealtime.CapturePipeline({jobId,realtime:true,continuous:true,submitAudioChunk:packet=>{if(!current())return;let raw='';for(let i=0;i<packet.pcm.length;i+=0x8000)raw+=String.fromCharCode(...packet.pcm.subarray(i,i+0x8000));mic.audioQueue.push({jobId,playerId:jobId,sampleRate:16000,...(packet.activityEndOnly?{activityEndOnly:true,packetSequence:packet.packetSequence}:packet.endOnly?{endOnly:true}:{audioBase64:btoa(raw)}),chunk:packet.chunk},packet.pcm.byteLength);},onDiagnostic:packet=>globalThis.LiveSttDiagnostics?.capture(mic,packet.stage,packet)});
+  mic.chunker=new globalThis.SttRealtime.CapturePipeline({jobId,realtime:true,continuous:true,adaptive:realtime,submitAudioChunk:packet=>{if(!current())return;let raw='';for(let i=0;i<packet.pcm.length;i+=0x8000)raw+=String.fromCharCode(...packet.pcm.subarray(i,i+0x8000));mic.audioQueue.push({jobId,playerId:jobId,sampleRate:16000,...(packet.activityEndOnly?{activityEndOnly:true,packetSequence:packet.packetSequence}:packet.endOnly?{endOnly:true}:{audioBase64:btoa(raw)}),chunk:packet.chunk},packet.pcm.byteLength);},onDiagnostic:packet=>globalThis.LiveSttDiagnostics?.capture(mic,packet.stage,packet)});
   node.port.onmessage=event=>{
    if(event.data?.type==='flushed'){mic.flushAcknowledged=true;mic.flushed?.();return;}if(!current())return;
    try{

@@ -1,3 +1,4 @@
+const {voiceFrame}=require('./stt-audio-fixture.cjs');
 const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm'),crypto=require('node:crypto');
 const config=require('../live-config.js'),source=fs.readFileSync(require.resolve('../options.js'),'utf8'),flush=()=>new Promise(r=>setImmediate(r));
 function deferred(){let resolve;const promise=new Promise(r=>resolve=r);return{promise,resolve};}
@@ -14,8 +15,9 @@ function optionsEnv({slowMic=false,slowSetup=false,diagnostics=false}={}){
  if(diagnostics)vm.runInContext(fs.readFileSync(require.resolve('../live-stt-diagnostics.js'),'utf8'),context);
  const remembered=[];context.rememberSttPreview=jobId=>remembered.push(jobId);context.pendingSttPreviews=new Map();context.completedSttPreviews=new Map();
  vm.runInContext("let livePreview=null,liveMic=null,liveSttJobId=null,liveSttCommitted='',globalHudPanel=null;"+source.slice(source.indexOf('function resampleLiveTest('),source.indexOf('async function main('))+";globalThis.testApi={toggleLiveSttTest,releaseLiveSttTest,getMic:()=>liveMic,getJob:()=>liveSttJobId};",context);
- const line=source.split('\n').find(line=>line.startsWith(' chrome.runtime.onMessage.addListener(message=>'));
- vm.runInContext('globalThis.eventHandler='+line.slice(line.indexOf('(message=>')+1,-2)+';',context);
+ const handlerStart=source.indexOf(' chrome.runtime.onMessage.addListener(message=>')+' chrome.runtime.onMessage.addListener('.length;
+ const handlerEnd=source.indexOf('\n}',handlerStart);
+ vm.runInContext('globalThis.eventHandler='+source.slice(handlerStart,handlerEnd).trim().slice(0,-2)+';',context);
  return{...context.testApi,eventHandler:context.eventHandler,elements,messages,streams,contexts,nodes,stream,micReady,setupReady,context,element,remembered};
 }
 test('opções STT: final/erro liberam microfone e AudioContext sem clique extra',async()=>{
@@ -25,12 +27,12 @@ test('opções STT: falha real do dispositivo/worklet tem origem explícita e cl
  for(const kind of ['microphone-ended','worklet-error']){const e=optionsEnv({diagnostics:true});await e.toggleLiveSttTest();const mic=e.getMic();if(kind==='microphone-ended')e.streams[0].track.dispatchEvent(new Event('ended'));else e.nodes[0].dispatchEvent(new Event('processorerror'));await flush();await flush();assert.equal(mic.stopReason,kind);assert.equal(e.getMic(),null);assert.equal(e.streams[0].track.stopped,true);assert.equal(e.contexts[0].state,'closed');assert.match(e.element('#sttStatus').textContent,/❌/);assert.equal(e.messages.filter(m=>m.type==='STT_LIVE_CANCEL').length,1);e.nodes[0].dispatchEvent(new Event('processorerror'));await flush();assert.equal(e.messages.filter(m=>m.type==='STT_LIVE_CANCEL').length,1);}
 });
 test('teste STT das opções usa mesma pipeline realtime e preserva agente/draft',async()=>{
- const e=optionsEnv();e.context.state.ui.dictationInsertion='realtime';await e.toggleLiveSttTest();const start=e.messages.find(m=>m.type==='STT_LIVE_START');assert.equal(start.payload.realtime,true);assert.equal(start.payload.agentId,'custom');assert.equal(start.payload.previewAgent.metadata.id,'custom');e.nodes[0].port.onmessage({data:new Float32Array(4800).fill(.1).buffer});for(let i=0;i<5;i++)e.nodes[0].port.onmessage({data:new Float32Array(4800).buffer});await flush();await e.getMic().audioQueue.drain();assert.ok(e.messages.some(m=>m.type==='STT_LIVE_AUDIO'&&m.payload.chunk?.sequence===1));assert.ok(e.messages.some(m=>m.payload?.chunk?.cutReason==='silence'));assert.ok(!e.messages.some(m=>m.type==='STT_LIVE_STOP'));await e.toggleLiveSttTest();
+ const e=optionsEnv();e.context.state.ui.dictationInsertion='realtime';await e.toggleLiveSttTest();const start=e.messages.find(m=>m.type==='STT_LIVE_START');assert.equal(start.payload.realtime,true);assert.equal(start.payload.agentId,'custom');assert.equal(start.payload.previewAgent.metadata.id,'custom');e.nodes[0].port.onmessage({data:voiceFrame().buffer});for(let i=0;i<5;i++)e.nodes[0].port.onmessage({data:new Float32Array(4800).buffer});await flush();await e.getMic().audioQueue.drain();assert.ok(e.messages.some(m=>m.type==='STT_LIVE_AUDIO'&&m.payload.chunk?.sequence===1));assert.ok(e.messages.some(m=>m.payload?.chunk?.cutReason==='silence'));assert.ok(!e.messages.some(m=>m.type==='STT_LIVE_STOP'));await e.toggleLiveSttTest();
 });
 test('opções STT: falha do contexto no início encerra trilhas e cancela sessão',async()=>{const e=optionsEnv();e.context.AudioContext.prototype.resume=async()=>{throw Error('contexto indisponível');};await e.toggleLiveSttTest();assert.equal(e.getJob(),null);assert.equal(e.getMic(),null);assert.equal(e.streams[0].track.stopped,true);assert.equal(e.contexts[0].state,'closed');assert.ok(e.messages.some(m=>m.type==='STT_LIVE_CANCEL'));});
 test('opções STT: PCM antes de Stop e novo teste durante o processamento anterior',async()=>{
  const e=optionsEnv();await e.toggleLiveSttTest();const mic=e.getMic();
- e.nodes[0].port.onmessage({data:new Float32Array([.1,.2,.3]).buffer});await e.toggleLiveSttTest();
+ e.nodes[0].port.onmessage({data:voiceFrame().buffer});await e.toggleLiveSttTest();
  assert.equal(e.streams[0].track.stopped,true);assert.equal(e.contexts[0].state,'closed');assert.equal(e.getMic(),null);
  assert.deepEqual(e.messages.filter(m=>m.type.startsWith('STT_')).map(m=>m.type),
   ['STT_CAPTURE_RESERVE','STT_LIVE_START','STT_LIVE_AUDIO','STT_LIVE_AUDIO','STT_LIVE_STOP']);
@@ -43,18 +45,18 @@ test('opções STT: PCM antes de Stop e novo teste durante o processamento anter
 
 });
 test('opções STT: diagnóstico registra sinal, envio, flush e liberação sem conteúdo privado',async()=>{
- const e=optionsEnv({diagnostics:true});await e.toggleLiveSttTest();e.nodes[0].port.onmessage({data:new Float32Array([.1,.2,.3]).buffer});await e.toggleLiveSttTest();await flush();
+ const e=optionsEnv({diagnostics:true});await e.toggleLiveSttTest();e.nodes[0].port.onmessage({data:voiceFrame().buffer});await e.toggleLiveSttTest();await flush();
  const packets=e.messages.filter(m=>m.type==='LIVE_STT_DIAGNOSTIC').map(m=>m.payload),released=packets.filter(p=>p.stage==='capture-released').at(-1);
- assert.equal(released.contextState,'closed');assert.equal(released.released,true);assert.equal(released.flushAcknowledged,true);assert.equal(released.capturedFrames,3);assert.equal(released.ackBytes,2);assert.ok(released.maxRms>0);assert.ok(packets.some(p=>p.stage==='capture-running'));
+ assert.equal(released.contextState,'closed');assert.equal(released.released,true);assert.equal(released.flushAcknowledged,true);assert.equal(released.capturedFrames,4800);assert.equal(released.ackBytes,3200);assert.ok(released.maxRms>0);assert.ok(packets.some(p=>p.stage==='capture-running'));
  assert.ok(packets.every(p=>!('text'in p)&&!('audioBase64'in p)&&!('apiKey'in p)));assert.equal(e.streams[0].track.stopped,true);
 });
 test('opções STT: fila sem ACK para microfone, informa timeout e conserva contagem pendente',async()=>{
- const e=optionsEnv({diagnostics:true});await e.toggleLiveSttTest();const mic=e.getMic(),send=e.context.chrome.runtime.sendMessage;e.context.chrome.runtime.sendMessage=message=>message.type==='STT_LIVE_AUDIO'?new Promise(()=>{}):send(message);mic.audioQueue.ackTimeoutMs=10;e.nodes[0].port.onmessage({data:new Float32Array([.1,.2,.3]).buffer});await assert.rejects(mic.audioQueue.drain(),error=>error.code==='ACK_TIMEOUT');assert.equal(e.getMic(),null);assert.equal(e.streams[0].track.stopped,true);assert.equal(mic.metrics.pendingChunks,1);assert.equal(mic.metrics.ackTimeouts,1);assert.match(e.element('#sttStatus').textContent,/sem confirmação/);assert.ok(e.messages.some(message=>message.type==='STT_LIVE_CANCEL'));assert.ok(e.messages.some(message=>message.type==='LIVE_STT_DIAGNOSTIC'&&message.payload.stage==='ack-timeout'));
+ const e=optionsEnv({diagnostics:true});await e.toggleLiveSttTest();const mic=e.getMic(),send=e.context.chrome.runtime.sendMessage;e.context.chrome.runtime.sendMessage=message=>message.type==='STT_LIVE_AUDIO'?new Promise(()=>{}):send(message);mic.audioQueue.ackTimeoutMs=10;e.nodes[0].port.onmessage({data:voiceFrame().buffer});await assert.rejects(mic.audioQueue.drain(),error=>error.code==='ACK_TIMEOUT');assert.equal(e.getMic(),null);assert.equal(e.streams[0].track.stopped,true);assert.equal(mic.metrics.pendingChunks,1);assert.equal(mic.metrics.ackTimeouts,1);assert.match(e.element('#sttStatus').textContent,/sem confirmação/);assert.ok(e.messages.some(message=>message.type==='STT_LIVE_CANCEL'));assert.ok(e.messages.some(message=>message.type==='LIVE_STT_DIAGNOSTIC'&&message.payload.stage==='ack-timeout'));
 });
 test('opções STT: ACK de PCM atrasado não bloqueia nova captura e ainda envia Stop do job anterior',async()=>{
  const e=optionsEnv(),gate=deferred();await e.toggleLiveSttTest();const mic=e.getMic(),send=e.context.chrome.runtime.sendMessage;
  e.context.chrome.runtime.sendMessage=message=>message.type==='STT_LIVE_AUDIO'&&message.payload.jobId===mic.jobId?gate.promise:send(message);
- e.nodes[0].port.onmessage({data:new Float32Array([.1,.2,.3]).buffer});const stopping=e.toggleLiveSttTest();await flush();
+ e.nodes[0].port.onmessage({data:voiceFrame().buffer});const stopping=e.toggleLiveSttTest();await flush();
  assert.equal(e.streams[0].track.stopped,true);
  await e.toggleLiveSttTest();const next=e.getJob();assert.notEqual(next,mic.jobId);assert.equal(e.streams.length,2);
  gate.resolve({success:true});await stopping;
@@ -65,8 +67,8 @@ test('opções STT: ACK de PCM atrasado não bloqueia nova captura e ainda envia
 
 });
 test('duas páginas options: apenas proprietária responde STATUS/STOP de um job',async()=>{
- const a=optionsEnv(),b=optionsEnv();await a.toggleLiveSttTest();await b.toggleLiveSttTest();const jobId=a.getJob(),responses=[];a.nodes[0].port.onmessage({data:new Float32Array([.1,.2,.3]).buffer});
- const lines=source.split('\n').filter(line=>line.startsWith(' chrome.runtime.onMessage.addListener((message,_sender,sendResponse)=>'));
+ const a=optionsEnv(),b=optionsEnv();await a.toggleLiveSttTest();await b.toggleLiveSttTest();const jobId=a.getJob(),responses=[];a.nodes[0].port.onmessage({data:voiceFrame().buffer});
+ const lines=source.split('\n').filter(line=>line.startsWith(' chrome.runtime.onMessage.addListener((message,_sender,sendResponse)=>')&&/STT_GLOBAL_(STOP|STATUS)/.test(line));
  for(const line of lines){const kind=line.includes("message.type!=='STT_GLOBAL_STOP'")?'STT_GLOBAL_STOP':'STT_GLOBAL_STATUS';for(const env of[a,b]){vm.runInContext('globalThis.originHandler='+line.slice(line.indexOf('((')+1,-2)+';',env.context);env.context.originHandler({type:kind,payload:{jobId}},{},response=>responses.push({env,kind,response}));}await flush();assert.equal(responses.filter(response=>response.kind===kind).length,1);assert.equal(responses.find(response=>response.kind===kind).env,a);}
  assert.equal(b.streams[0].track.stopped,false);await b.releaseLiveSttTest();
 });
@@ -95,11 +97,14 @@ test('opções STT: cancelar início pendente impede gravação e encerra stream
 test('opções STT: microfone negado não deixa preview pendente fantasma',async()=>{
  const e=optionsEnv();e.context.navigator.mediaDevices.getUserMedia=async()=>{throw Error('Permissão negada');};await e.toggleLiveSttTest();assert.equal(e.context.pendingSttPreviews.size,0);assert.equal(e.getMic(),null);assert.equal(e.getJob(),null);assert.match(e.element('#sttStatus').textContent,/Permissão negada/);
 });
-test('opções mantêm vocabulário/SMART legados desativados entre modelos gerais',()=>{
- const e=optionsEnv();e.element('#liveSttVocabulary').value='termo preservado';e.element('#liveSttSmart').checked=true;
+test('opções indicam quais dicas de reconhecimento o modelo do editor recebe',()=>{
+ const e=optionsEnv();
  vm.runInContext(source.slice(source.indexOf('function updateSttTransformationState('),source.indexOf('function syncLiveFields(')),e.context);
- e.context.updateLiveSttCapabilities();assert.equal(e.element('#liveSttVocabulary').disabled,true);assert.equal(e.element('#liveSttSmart').disabled,true);
- e.element('#liveSttModel').value='gemini-3.8-live-extended-thinking';e.context.updateLiveSttCapabilities();assert.equal(e.element('#liveSttVocabulary').disabled,true);assert.equal(e.element('#liveSttSmart').disabled,true);assert.equal(e.element('#liveSttVocabulary').value,'termo preservado');assert.equal(e.element('#liveSttSmart').checked,true);
+ const notice=e.element('#sttRecognitionCompatibility');
+ e.element('#liveSttModel').value='gemini-3.8-live';e.context.updateLiveSttCapabilities();
+ assert.match(notice.textContent,/aceita dica de idioma e aceita vocabulário personalizado/);
+ e.element('#liveSttModel').value='gemini-3.8-live-extended-thinking';e.context.updateLiveSttCapabilities();
+ assert.match(notice.textContent,/usa detecção automática e mantém o vocabulário salvo/);
 });
 test('realtime suspende checkbox/payload sem apagar preferência; final restaura transformação',async()=>{
  for(const transform of [true,false,undefined]){const e=optionsEnv(),agent=e.context.currentAgent;agent.instructions={sttFormattingInstruction:'Instrução pública preservada.'};if(transform!==undefined)agent.live.stt.transform=transform;
@@ -143,7 +148,7 @@ test('leitura dos diagnósticos STT é restrita às opções, sem páginas comun
  const res=await e.run('LIVE_STT_DIAGNOSTICS_GET',{},options);assert.equal(res.success,true);assert.equal(res.diagnostics.jobs[0].capture.pcmSamples,80);assert.ok(!JSON.stringify(res.diagnostics).includes('private'));assert.equal(e.stored.length,0);
 });
 test('background substitui escolha inelegível sem apagar legado/fallback/instruções',async()=>{
- const agent={metadata:{id:'custom'},instructions:{sttFormattingInstruction:'Formate.'},live:{preferredModel:'gemini-3.8-live',stt:{preferredModel:'gemini-3.5-transcribe-live',fallbackModels:['gemini-3.5-transcribe-live','gemini-3.8-live'],smartTranscription:false,customVocabulary:['termo'],transform:false}}},before=structuredClone(agent),e=backgroundEnv(agent);await e.run('STT_LIVE_START');const p=e.forwarded[0].payload;assert.equal(p.modelId,'gemini-3.8-live');assert.deepEqual(Array.from(p.models),config.LIVE_STT_MODELS);assert.equal(p.smartTranscription,false);assert.deepEqual(Array.from(p.customVocabulary),['termo']);assert.equal(p.transformInstruction,null);assert.equal(e.stored.length,0);assert.deepEqual(agent,before);
+ const agent={metadata:{id:'custom'},instructions:{sttFormattingInstruction:'Formate.'},live:{preferredModel:'gemini-3.8-live',stt:{preferredModel:'gemini-3.5-transcribe-live',fallbackModels:['gemini-3.5-transcribe-live','gemini-3.8-live'],smartTranscription:false,customVocabulary:['termo'],transform:false}}},before=structuredClone(agent),e=backgroundEnv(agent);await e.run('STT_LIVE_START');const p=e.forwarded[0].payload;assert.equal(p.modelId,'gemini-3.8-live');assert.deepEqual(Array.from(p.models),config.LIVE_STT_MODELS);assert.equal(p.smartTranscription,undefined);assert.equal(p.customVocabulary,undefined);assert.equal(p.sttRecognition.language,'pt-BR');assert.equal(p.sttRecognition.customVocabulary.length,0);assert.equal(p.transformInstruction,null);assert.equal(e.stored.length,0);assert.deepEqual(agent,before);
 });
 test('seletores STT global/agente/editor apresentam exatamente o modelo usado',async()=>{
  for(const preferredModel of ['gemini-3.5-transcribe-live','gemini-3.8-live-extended-thinking']){
@@ -152,7 +157,7 @@ test('seletores STT global/agente/editor apresentam exatamente o modelo usado',a
   for(const id of [...source.matchAll(/\$\('(#[\w]+)'\)/g)].map(m=>m[1])){const el=e.element(id);el.options=[];el.add=o=>el.options.push(o);el.classList={toggle(){}};}
   vm.runInContext(source.slice(source.indexOf('function liveDraft('),source.indexOf('function syncLiveFields(')),e.context);e.context.renderLiveEditor();
   const routed=backgroundEnv(agent,models);await routed.run('STT_LIVE_START',{jobId:'stt',agentId:'narrator'});const actual=routed.forwarded[0].payload.modelId;
-  assert.equal(e.element('#liveSttModel').value,actual);assert.deepEqual(e.element('#liveSttModel').options.map(o=>o.value),config.LIVE_STT_MODELS);assert.equal(e.element('#liveSttVocabulary').value,'legado');assert.equal(e.element('#liveSttSmart').checked,false);
+  assert.equal(e.element('#liveSttModel').value,actual);assert.deepEqual(e.element('#liveSttModel').options.map(o=>o.value),config.LIVE_STT_MODELS);assert.deepEqual(Array.from(e.context.currentAgent.live.stt.customVocabulary),['legado']);assert.equal(e.context.currentAgent.live.stt.smartTranscription,false);
   e.context.CHAINS={tts:[],vision:[],general:[]};e.context.fillSelect=(el,ids,value)=>{el.options=Array.from(ids);el.value=value;};vm.runInContext(source.slice(source.indexOf('function initModelSelects('),source.indexOf('function renderAgentSelect(')),e.context);e.context.initModelSelects();
   assert.equal(e.element('#agentSttModel').value,actual);assert.deepEqual(e.element('#agentSttModel').options,config.LIVE_STT_MODELS);assert.deepEqual(e.element('#globalStt').options,config.LIVE_STT_MODELS);assert.equal(e.element('#globalStt').value,config.DEFAULTS.sttModelId);
   assert.ok(!routed.forwarded[0].payload.models.includes('gemini-3.5-transcribe-live'));

@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="pt-BR"><meta charset="utf-8"><title>Auditoria STT — editores</title>
+<style>body{font:16px system-ui;margin:24px}input,textarea,[contenteditable]{border:1px solid #999;padding:8px;margin:8px;white-space:pre-wrap}pre{white-space:pre-wrap}</style>
+<h1>Auditoria STT — editores nativos e ProseMirror</h1>
+<p>Sem Gemini ou microfone. Texto de teste, DOM e ProseMirror reais.</p>
+<button id="run">Executar testes de inserção</button><input id="other" aria-label="Outro campo" value="Destino alheio"><div id="fixtures"></div><pre id="result">Aguardando execução.</pre>
+<script src="/dictation-runtime.js"></script>
+<script type="importmap">{"imports":{"prosemirror-model":"/modules/prosemirror-model/dist/index.js","prosemirror-state":"/modules/prosemirror-state/dist/index.js","prosemirror-view":"/modules/prosemirror-view/dist/index.js","prosemirror-transform":"/modules/prosemirror-transform/dist/index.js","orderedmap":"/modules/orderedmap/dist/index.js"}}</script>
+<script type="module">
+import {Schema} from 'prosemirror-model';
+import {EditorState} from 'prosemirror-state';
+import {EditorView} from 'prosemirror-view';
+const schema=new Schema({nodes:{doc:{content:'paragraph+'},paragraph:{content:'inline*',toDOM:()=>['p',0],parseDOM:[{tag:'p'}]},text:{group:'inline'},hard_break:{inline:true,group:'inline',selectable:false,toDOM:()=>['br'],parseDOM:[{tag:'br'}]}},marks:{strong:{toDOM:()=>['strong',0],parseDOM:[{tag:'strong'}]},em:{toDOM:()=>['em',0],parseDOM:[{tag:'em'}]}}});
+const host=document.querySelector('#fixtures'),other=document.querySelector('#other');
+const assert=(value,message)=>{if(!value)throw Error(message);};
+const pause=()=>new Promise(resolve=>setTimeout(resolve,80));
+function fixture(kind){
+ let element,view;
+ if(kind==='ProseMirror'){
+  const mount=document.createElement('div');host.append(mount);
+  view=new EditorView(mount,{state:EditorState.create({schema,doc:schema.node('doc',null,[schema.node('paragraph',null,[schema.text('Antes ',[schema.mark('strong')]),schema.text('seleção'),schema.text(' depois',[schema.mark('em')])])])})});element=view.dom;
+ }else{element=document.createElement(kind==='contenteditable'?'div':kind);host.append(element);if(kind==='contenteditable'){element.contentEditable='true';element.innerHTML='<p><strong>Antes </strong>seleção<em> depois</em></p>';}else element.value='Antes seleção depois';}
+ function select(start,end){element.focus();if(typeof element.value==='string'){element.setSelectionRange(start,end);return;}const walker=document.createTreeWalker(element,NodeFilter.SHOW_TEXT);let node,offset=0,a,b;while(node=walker.nextNode()){if(!a&&start<=offset+node.length)a={node,at:start-offset};if(end<=offset+node.length){b={node,at:end-offset};break;}offset+=node.length;}const range=document.createRange();range.setStart(a.node,a.at);range.setEnd(b.node,b.at);getSelection().removeAllRanges();getSelection().addRange(range);}
+ const value=()=>typeof element.value==='string'?element.value:element.textContent;
+ select(6,13);const insertion=new DictationRuntime.Insertion(DictationRuntime.captureTarget());
+ return{element,view,select,value,insertion,dispose(){insertion.dispose();view?.destroy();element.remove();}};
+}
+document.querySelector('#run').onclick=async function(){
+ this.disabled=true;const results=[];
+ async function check(name,run){try{await run();results.push({name,passed:true});}catch(error){results.push({name,passed:false,error:error.message});}document.querySelector('#result').textContent=JSON.stringify({done:false,results},null,2);}
+ for(const kind of ['input','textarea','contenteditable','ProseMirror']){
+  await check(kind+': revisão, campo original, foco, formato e confirmação',async()=>{const f=fixture(kind);try{
+   other.focus();other.setSelectionRange(2,5);
+   for(const [text,final]of [['provisório',false],['confirmado',false],['confirmado e mais',true]]){const result=await f.insertion.apply(text,{final});assert(result.inserted,result.reason);assert(f.value()==='Antes '+text+' depois',f.value());assert(document.activeElement===other,'foco alterado');assert(other.selectionStart===2&&other.selectionEnd===5,'seleção alheia alterada');}
+   if(f.view)assert(f.view.state.doc.textContent===f.value(),'estado ProseMirror diverge do DOM');
+   if(f.element.isContentEditable){assert(f.element.querySelector('strong')?.textContent==='Antes ','prefixo formatado alterado');assert(f.element.querySelector('em')?.textContent===' depois','sufixo formatado alterado');}
+   const writes=f.insertion.editorWrites;await f.insertion.apply('confirmado e mais',{final:true});assert(f.insertion.editorWrites===writes,'confirmação duplicada');
+  }finally{f.dispose();}});
+  await check(kind+': preservação de edição manual fora e dentro do ditado',async()=>{const f=fixture(kind);try{
+   assert((await f.insertion.apply('ditado')).inserted,'primeira escrita recusada');
+   f.select(0,0);f.element.dispatchEvent(new InputEvent('beforeinput',{bubbles:true,inputType:'insertText',data:'Manual '}));document.execCommand('insertText',false,'Manual ');await pause();other.focus();
+   assert((await f.insertion.apply('ditado revisado')).inserted,'edição externa bloqueou revisão');assert(f.value()==='Manual Antes ditado revisado depois',f.value());
+   f.select(13,19);f.element.dispatchEvent(new InputEvent('beforeinput',{bubbles:true,inputType:'insertText',data:'MEU TEXTO'}));document.execCommand('insertText',false,'MEU TEXTO');await pause();const edited=f.value();other.focus();
+   assert(!(await f.insertion.apply('não substituir',{final:true})).inserted,'conflito manual aceito');assert(f.value()===edited,'edição manual perdida');
+  }finally{f.dispose();}});
+  await check(kind+': cancelamento de revisão pendente',async()=>{const f=fixture(kind);try{
+   const queued=f.insertion.apply('não inserir',{isCurrent:()=>false});assert(!(await queued).inserted,'cancelamento ignorado');assert(f.value()==='Antes seleção depois','texto alterado');
+  }finally{f.dispose();}});
+ }
+ for(const kind of ['textarea','contenteditable','ProseMirror'])await check(kind+': ditado multilinha e revisão',async()=>{const f=fixture(kind);try{
+  other.focus();for(const text of ['linha um\nlinha pro','linha um\nlinha dois']){const result=await f.insertion.apply(text);assert(result.inserted,result.reason+' '+JSON.stringify({html:f.element.innerHTML,state:f.view?.state.doc.toJSON(),snapshot:f.insertion.editorSnapshot()}));}
+  if(f.view)assert(f.view.state.doc.textBetween(0,f.view.state.doc.content.size,'\n','\n').includes('linha um\nlinha dois'),'quebra ausente do estado ProseMirror');
+  else assert((f.element.innerText||f.value()).includes('linha um\nlinha dois'),'quebra ausente');
+ }finally{f.dispose();}});
+ for(const kind of ['contenteditable','ProseMirror'])await check(kind+': revisões multilinha, vazia e edição manual',async()=>{const f=fixture(kind);try{
+  other.focus();
+  for(const text of ['um\n\ndois','um\ntrês','única','','novo\nfim']){const result=await f.insertion.apply(text);assert(result.inserted,result.reason+' em '+JSON.stringify(text));const read=f.view?f.view.state.doc.textBetween(0,f.view.state.doc.content.size,'\n','\n'):f.element.innerText;assert(read==='Antes '+text+' depois',JSON.stringify(read));}
+  f.select(0,0);f.element.dispatchEvent(new InputEvent('beforeinput',{bubbles:true,inputType:'insertText',data:'Manual '}));document.execCommand('insertText',false,'Manual ');await pause();other.focus();
+  assert((await f.insertion.apply('novo\nfinal')).inserted,'revisão após edição externa recusada');
+  const node=f.element.querySelector('p').childNodes;
+  // Edição dentro de texto pertencente ao ditado deve impedir novas revisões.
+  f.select(13,17);f.element.dispatchEvent(new InputEvent('beforeinput',{bubbles:true,inputType:'insertText',data:'MEU'}));document.execCommand('insertText',false,'MEU');await pause();const edited=f.value();
+  assert(!(await f.insertion.apply('não substituir',{final:true})).inserted,'conflito aceito');assert(f.value()===edited,'edição perdida');
+ }finally{f.dispose();}});
+ document.querySelector('#result').textContent=JSON.stringify({done:true,gemini:false,microphone:false,results},null,2);this.disabled=false;
+};
+</script></html>

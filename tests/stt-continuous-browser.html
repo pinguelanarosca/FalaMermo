@@ -1,0 +1,71 @@
+<!doctype html><html lang="pt-BR"><meta charset="utf-8"><title>STT — continuidade do editor</title>
+<style>body{font:16px system-ui;margin:24px}form{border:1px solid #aaa;padding:12px}input,textarea,[contenteditable]{padding:8px;border:1px solid #999;white-space:pre-wrap}pre{white-space:pre-wrap}</style>
+<h1>STT — continuidade do editor</h1><p>DOM e ProseMirror reais; reconhecimento e ações de envio locais simulados.</p><button id="run">Executar continuidade</button><input id="other" value="Outro destino"><main id="fixtures"></main><pre id="result">Aguardando.</pre>
+<script src="/dictation-runtime.js"></script>
+<script type="importmap">{"imports":{"prosemirror-model":"/modules/prosemirror-model/dist/index.js","prosemirror-state":"/modules/prosemirror-state/dist/index.js","prosemirror-view":"/modules/prosemirror-view/dist/index.js","prosemirror-transform":"/modules/prosemirror-transform/dist/index.js","orderedmap":"/modules/orderedmap/dist/index.js"}}</script>
+<script type="module">
+import {Schema} from 'prosemirror-model';import {EditorState,TextSelection} from 'prosemirror-state';import {EditorView} from 'prosemirror-view';
+const schema=new Schema({nodes:{doc:{content:'paragraph+'},paragraph:{content:'inline*',toDOM:()=>['p',0]},text:{group:'inline'},hard_break:{inline:true,group:'inline',toDOM:()=>['br']}}});
+const pause=()=>new Promise(r=>setTimeout(r,60)),assert=(x,msg)=>{if(!x)throw Error(msg);},other=document.querySelector('#other');
+function fixture(kind){
+ const form=document.createElement('form');form.innerHTML='<div class="slot"></div><button type="submit">Enviar mensagem</button><button type="button" class="clear">Limpar</button><output></output>';document.querySelector('#fixtures').append(form);
+ const slot=form.querySelector('.slot'),sent=[];let field,view,sequence=0,recreate=false,reject=false;
+ function mount(value=''){
+  if(view){view.destroy();view=null;}slot.replaceChildren();
+  if(kind==='ProseMirror'){view=new EditorView(slot,{state:EditorState.create({schema,doc:schema.node('doc',null,[schema.node('paragraph',null,value?[schema.text(value)]:[])])})});field=view.dom;field.setAttribute('aria-label','Mensagem original');}
+  else{field=document.createElement(kind==='contenteditable'?'div':kind);field.id='original-message';if(kind==='contenteditable'){field.contentEditable='true';field.textContent=value;}else field.value=value;slot.append(field);}
+ }
+ function value(){return typeof field.value==='string'?field.value:field.textContent;}
+ function set(value){if(view)view.updateState(EditorState.create({schema,doc:schema.node('doc',null,[schema.node('paragraph',null,value?[schema.text(value)]:[])])}));else if(typeof field.value==='string')field.value=value;else field.textContent=value;}
+ function cursor(at){field.focus();if(typeof field.value==='string')field.setSelectionRange(at,at);else if(view){view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc,at+1)));view.focus();}else{const range=document.createRange(),walker=document.createTreeWalker(field,4);let node,left=at;while(node=walker.nextNode()){if(left<=node.length)break;left-=node.length;}if(node)range.setStart(node,left);else{range.selectNodeContents(field);range.collapse(false);}range.collapse(true);getSelection().removeAllRanges();getSelection().addRange(range);}}
+ function manual(text,at=value().length){cursor(at);field.dispatchEvent(new InputEvent('beforeinput',{bubbles:true,inputType:'insertText',data:text}));document.execCommand('insertText',false,text);}
+ mount();cursor(0);
+ const insertion=new (DictationRuntime.SessionInsertion||DictationRuntime.Insertion)(DictationRuntime.captureTarget(),{settleMs:0,onSend:()=>sequence});
+ form.onsubmit=event=>{event.preventDefault();if(reject)return;sent.push(value());form.querySelector('output').textContent=sent.join(' | ');if(recreate)mount();else set('');};
+ form.querySelector('.clear').onclick=()=>set('');
+ async function send(method='click',replace=false){recreate=replace;if(method==='enter'){field.dispatchEvent(new KeyboardEvent('keydown',{bubbles:true,key:'Enter'}));form.requestSubmit();}else form.querySelector('button').click();await pause();}
+ async function apply(text,{partial='',cuts,seq,final=false}={}){if(seq)sequence=seq;else sequence++;const full=[text,partial].filter(Boolean).join(' ');return insertion.apply(full,{final,confirmedText:text,partialText:partial,sequence:sequence,textBoundaries:cuts||[[sequence,text.length]]});}
+ return{form,slot,insertion,send,apply,manual,set,value,sent,cursor,field:()=>field,seq:value=>sequence=value,reject:value=>reject=value,dispose(){insertion.dispose();view?.destroy();form.remove();}};
+}
+document.querySelector('#run').onclick=async function(){this.disabled=true;const results=[];async function test(name,run){try{await run();results.push({name,passed:true});}catch(e){results.push({name,passed:false,error:e.message});}document.querySelector('#result').textContent=JSON.stringify({done:false,results},null,2);}
+for(const kind of ['input','textarea','contenteditable','ProseMirror']){
+ await test(kind+': três envios, DOM recriado, confirmação atrasada e outro foco',async()=>{const f=fixture(kind);try{
+  other.focus();const first=await f.apply('Primeira.',{seq:1,cuts:[[1,9]]});assert(f.value()==='Primeira.','primeira '+JSON.stringify({first,html:f.field().outerHTML,snapshot:f.insertion.editorSnapshot()}));await f.send('enter');
+  await f.apply('Primeira.',{seq:1,cuts:[[1,9]]});assert(f.value()==='','repetiu mensagem enviada');
+  await f.apply('Primeira. Segunda.',{seq:2,cuts:[[1,9],[2,18]]});assert(f.value()==='Segunda.',f.value());await f.send('click',true);other.focus();
+  await f.apply('Primeira. Segunda. Terceira.',{seq:3,cuts:[[1,9],[2,18],[3,28]]});assert(f.value()==='Terceira.',f.value());assert(document.activeElement===other,'roubou foco');await f.send();
+  await f.apply('Primeira. Segunda. Terceira.',{seq:3,cuts:[[1,9],[2,18],[3,28]],final:true});assert(f.value()==='','final reinseriu histórico');assert(f.sent.join('|')==='Primeira.|Segunda.|Terceira.',JSON.stringify(f.sent));assert(other.value==='Outro destino','destino alheio alterado');
+ }finally{f.dispose();}});
+ await test(kind+': correção do provisório enviado não vaza para a próxima mensagem',async()=>{const f=fixture(kind);try{
+  const first=await f.apply('',{partial:'rascunho pro',seq:1,cuts:[]});assert(first.inserted,'prévia '+JSON.stringify({first,html:f.field().outerHTML}));await f.send('click',true);
+  await f.apply('Rascunho pronto.',{seq:1,cuts:[[1,16]]});assert(f.value()==='','correção tardia reinserida');
+  await f.apply('Rascunho pronto. Nova fala.',{seq:2,cuts:[[1,16],[2,27]]});assert(f.value()==='Nova fala.',f.value());assert(f.sent.length===1,'envio duplicado');
+ }finally{f.dispose();}});
+ await test(kind+': edição manual no ditado preservada e próximas falas continuam',async()=>{const f=fixture(kind);try{
+  await f.apply('Texto.',{seq:1,cuts:[[1,6]]});f.manual(' MEU');await pause();other.focus();
+  await f.apply('Texto. Próxima fala.',{seq:2,cuts:[[1,6],[2,20]]});assert(f.value()==='Texto. MEU Próxima fala.',f.value());
+  f.manual(' prefixo',0);await pause();other.focus();await f.apply('Texto. Próxima fala. Mais.',{seq:3,cuts:[[1,6],[2,20],[3,26]]});assert(f.value().includes('MEU Próxima fala. Mais.'),f.value());assert(f.value().startsWith(' prefixo'),f.value());
+ }finally{f.dispose();}});
+ await test(kind+': Enter sem envio, envio recusado e limpeza manual não repetem passado',async()=>{const f=fixture(kind);try{
+  await f.apply('Primeira.',{seq:1,cuts:[[1,9]]});f.field().dispatchEvent(new KeyboardEvent('keydown',{bubbles:true,key:'Enter'}));await pause();await f.apply('Primeira. Segunda.',{seq:2,cuts:[[1,9],[2,18]]});assert(f.value()==='Primeira. Segunda.',f.value());
+  f.reject(true);await f.send();await f.apply('Primeira. Segunda. Terceira.',{seq:3,cuts:[[1,9],[2,18],[3,28]]});assert(f.value().includes('Primeira. Segunda. Terceira.'),'envio recusado encerrou segmento');
+  f.set('');f.field().dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'deleteContentBackward'}));await pause();await f.apply('Primeira. Segunda. Terceira. Nova.',{seq:4,cuts:[[1,9],[2,18],[3,28],[4,34]]});assert(f.value()==='Nova.',f.value());assert(f.sent.length===0,'confundiu limpeza com envio');
+ }finally{f.dispose();}});
+ await test(kind+': limpar pelo botão preserva edição sem simular envio',async()=>{const f=fixture(kind);try{
+  await f.apply('Anterior.',{seq:1,cuts:[[1,9]]});f.form.querySelector('.clear').click();await pause();
+  await f.apply('Anterior. Nova.',{seq:2,cuts:[[1,9],[2,15]]});assert(f.value()==='Nova.',f.value());assert(f.sent.length===0,'limpeza contabilizada como envio');
+ }finally{f.dispose();}});
+ await test(kind+': rascunho manual no DOM recriado e revisão do trecho novo',async()=>{const f=fixture(kind);try{
+  await f.apply('Anterior.',{seq:1,cuts:[[1,9]]});const clone=f.field().cloneNode(true);if(typeof clone.value==='string')clone.value='MEU';else clone.textContent='MEU';f.field().replaceWith(clone);await pause();other.focus();
+  await f.apply('Anterior. Próxima.',{seq:2,cuts:[[1,9],[2,18]]});assert((clone.value??clone.textContent)==='MEU Próxima.',clone.value??clone.textContent);
+  await f.apply('Anterior. Próxima certa.',{seq:2,cuts:[[1,9],[2,24]]});assert((clone.value??clone.textContent)==='MEU Próxima certa.',clone.value??clone.textContent);
+ }finally{f.dispose();}});
+ await test(kind+': destino perdido não redireciona; recriação equivalente recupera',async()=>{const f=fixture(kind);try{
+  await f.apply('Primeira.',{seq:1,cuts:[[1,9]]});const old=f.field(),clone=old.cloneNode(true);old.replaceWith(clone);other.focus();
+  const update=await f.apply('Primeira. Segunda.',{seq:2,cuts:[[1,9],[2,18]]});assert(update.inserted,update.reason);assert((clone.value??clone.textContent)==='Primeira. Segunda.','recriação equivalente não recuperou');
+  clone.remove();const result=await f.apply('Primeira. Segunda. Mais.',{seq:3,cuts:[[1,9],[2,18],[3,24]]});assert(!result.inserted,'alvo inexistente aceito');assert(other.value==='Outro destino','escreveu em outro campo');
+ }finally{f.dispose();}});
+}
+document.querySelector('#result').textContent=JSON.stringify({done:true,gemini:false,microphone:false,results},null,2);this.disabled=false;
+};
+</script></html>

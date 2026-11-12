@@ -29,6 +29,25 @@ test('fila de admissão tem limite e cancelamento do aguardando não cancela ati
 test('preferência e Zero-Retry: todas nove contas de um modelo antes do próximo',async()=>{
  const e=fixture(),calls=[];await assert.rejects(e.start('x',{models:[SECOND,FIRST],open:async p=>{calls.push([p.modelId,p.keyIndex]);throw Object.assign(Error('429 quota'),{httpStatus:429});}}));assert.deepEqual(calls, [SECOND,FIRST].flatMap(m=>KEYS.map((_,i)=>[m,i+1])));assert.equal(new Set(calls.map(x=>x.join('|'))).size,18);assert.equal(e.scheduler.snapshot().activeJobs,0);
 });
+test('réplicas distribuídas mantêm contas distintas sem bloquear fallback após setup falhar',async()=>{
+ const e=fixture(),blockAccounts=new Set(),calls=[];
+ const open=async pair=>{
+  calls.push([pair.modelId,pair.keyIndex]);
+  if(pair.modelId===FIRST)throw Object.assign(Error('Model not found'),{httpStatus:404});
+  return {};
+ };
+ let first,second;
+ try{
+  first=await e.start('block:1',{blockAccounts,open});
+  second=await e.start('block:2',{blockAccounts,open});
+  assert.equal(first.modelId,SECOND);assert.equal(second.modelId,SECOND);
+  assert.notEqual(first.keyIndex,second.keyIndex);
+  assert.deepEqual(calls.slice(0,9),KEYS.map((_,i)=>[FIRST,i+1]));
+  assert.equal(new Set(calls.map(c=>c.join('|'))).size,calls.length);
+  assert.equal(blockAccounts.size,2);
+ }finally{e.scheduler.release(first);e.scheduler.release(second);}
+ assert.equal(e.scheduler.snapshot().activeJobs,0);
+});
 test('429 observado persiste cooldown por conta/modelo; não repete par no job nem espera retry',async()=>{
  const e=fixture(),calls=[],a=await e.start('a',{keys:KEYS.slice(0,2),open:async p=>{calls.push(p.keyIndex);if(p.keyIndex===1)throw Object.assign(Error('quota'),{httpStatus:429,retryAfterMs:90000});return{};}});assert.deepEqual(calls,[1,2]);e.scheduler.release(a);
  const state=e.scheduler.exportState(),again=fixture({load:()=>state}),b=await again.start('b',{keys:KEYS.slice(0,2)});assert.equal(b.keyIndex,2);assert.equal(again.scheduler.snapshot().accounts.find(x=>x.account==='key#1').models[0].quota429,1);again.scheduler.release(b);await again.advance(90001);const c=await again.start('c',{keys:KEYS.slice(0,2)});assert.equal(c.keyIndex,1);again.scheduler.release(c);

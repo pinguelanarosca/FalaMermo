@@ -34,3 +34,5 @@ tools/*
 !tools/package-release.cjs
 !tools/verify-publication.cjs
 tests/chrome-integration.cjs
+
+!docs/RELEASE-v1.0.6.md

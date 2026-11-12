@@ -68,6 +68,58 @@ test('1007 antes de setupComplete preserva motivo, fase e última mensagem; REQU
 test('pensamentos nunca entram no resultado; transcrição de áudio não duplica texto modelTurn',async t=>{
  const {session,instances}=transport(t,{outputTranscription:true}),opening=session.open(),socket=instances[0];socket.open();await flush();socket.message(JSON.stringify({setupComplete:{}}));await opening;const streamed=[],turn=session.sendTurn('Fonte pública.',message=>streamed.push(message));await flush();socket.message(JSON.stringify({serverContent:{modelTurn:{parts:[{text:'Pensamento privado de fixture',thought:true},{text:'Texto alternativo'}]},outputTranscription:{text:'Fonte pública.'},turnComplete:true}}));const result=await turn;assert.equal(result.text,'Fonte pública.');assert.ok(!JSON.stringify(streamed).includes('Pensamento privado'));assert.ok(!JSON.stringify(session.diagnosticSnapshot()).includes('Pensamento privado'));session.close();
 });
+test('turno que entrega PCM ao player não conserva segunda cópia até o fim', async t => {
+ const {session,instances}=transport(t,{mode:'narration'});
+ t.after(()=>session.close());
+ const opening=session.open(),socket=instances[0];
+ socket.open();await flush();socket.message(JSON.stringify({setupComplete:{}}));await opening;
+ const received=[];
+ const turn=session.sendTurn('Texto de teste.',part=>received.push(part.bytes.byteLength),undefined,{collectPcm:false});
+ await flush();
+ const pcm={modelTurn:{parts:[{inlineData:{mimeType:'audio/pcm;rate=24000',data:'AAA='}}]}};
+ socket.message(JSON.stringify({serverContent:pcm}));
+ await flush();
+ assert.deepEqual(received,[2]);
+ socket.message(JSON.stringify({serverContent:{...pcm,turnComplete:true}}));
+ const result=await turn;
+ assert.deepEqual(received,[2,2]);
+ assert.deepEqual(result.chunks,[]);
+});
+test('fechamento remoto da narração aguarda o último Blob já recebido', async t => {
+ const {session,instances}=transport(t,{mode:'narration'});
+ const opening=session.open(),socket=instances[0];
+ socket.open();await flush();socket.message(JSON.stringify({setupComplete:{}}));await opening;
+ const turn=session.sendTurn('Texto completo.').catch(error=>error);
+ await flush();
+ const blob=new Blob();
+ let read;
+ blob.text=()=>new Promise(resolve=>{read=resolve;});
+ socket.message(blob);
+ await flush();
+ socket.serverClose(1000,'');
+ read(JSON.stringify({serverContent:{turnComplete:true,modelTurn:{parts:[{inlineData:{data:'AAA='}}]}}}));
+ const result=await turn;
+ assert.equal(result.chunks?.[0].byteLength,2);
+ await flush();
+ assert.equal(session.closed,true);
+});
+test('o socket da narração permanece reservado até a liberação pelo chamador', async t => {
+ const {options,instances}=transport(t,{mode:'narration'});
+ const manager=new sessions.LiveSessionManager();
+ t.after(()=>manager.closeAll());
+ const opening=manager.acquire(options);
+ instances[0].open();await flush();instances[0].message(JSON.stringify({setupComplete:{}}));
+ const first=await opening;
+ const turn=first.sendTurn('Primeiro.');
+ await flush();
+ first.handler({serverContent:{turnComplete:true}});
+ const next=manager.acquire({...options,jobId:'other'}).catch(error=>error);
+ await turn;
+ assert.equal(instances.length,2);
+ manager.release(first);
+ instances[1].open();await flush();instances[1].message(JSON.stringify({setupComplete:{}}));
+ assert.notEqual(await next,first);
+});
 test('diagnóstico de protocolo conserva código/fase, mas não erros/reasons textuais arbitrários',t=>{
  const {session}=transport(t);session.trace('server-error',{code:400,error:'private-error-body',reason:'private-close-body'});session.closeDetails={code:1007,reason:'private-close-body',readyState:3,phase:'ready',local:false};const snapshot=session.diagnosticSnapshot();assert.equal(snapshot.events[0].code,400);assert.equal(snapshot.close.code,1007);assert.ok(!JSON.stringify(snapshot).includes('private-'));assert.equal(snapshot.close.reason,undefined);
 });
@@ -101,8 +153,9 @@ test('STT aceita setupComplete Blob e transcrições ArrayBuffer sem timeout',as
  const received=[];session.handler=msg=>received.push(msg.serverContent);socket.message(new TextEncoder().encode(JSON.stringify({serverContent:{interimInputTranscription:{text:'Teste'}}})).buffer);socket.message(new Blob([JSON.stringify({serverContent:{inputTranscription:{text:'Teste final'},turnComplete:true}})]));await flush();assert.equal(received[0].interimInputTranscription.text,'Teste');assert.equal(received[1].inputTranscription.text,'Teste final');
 });
 test('roteamento dictation real envia setup STT geral, PCM e fim sem turno TTS',async t=>{
- const {session,instances}=transport(t,{mode:'dictation',vad:{disabled:false},outputTranscription:true,systemInstruction:'instrução TTS privada'});t.after(()=>session.close());
- const opening=session.open(),socket=instances[0];socket.open();await flush();const setup=JSON.parse(socket.sent[0]).setup;assert.deepEqual(setup.generationConfig,{responseModalities:['AUDIO']});assert.deepEqual(setup.inputAudioTranscription,{});assert.equal(setup.outputAudioTranscription,undefined);assert.ok(!JSON.stringify(setup).includes('privada'));
+ const sttRecognition={instructions:'Preserve os nomes técnicos.',language:'pt-BR',customVocabulary:['FalaMermo','Kubernetes']};
+ const {session,instances}=transport(t,{mode:'dictation',vad:{disabled:false},sttRecognition,outputTranscription:true,systemInstruction:'instrução TTS privada'});t.after(()=>session.close());
+ const opening=session.open(),socket=instances[0];socket.open();await flush();const setup=JSON.parse(socket.sent[0]).setup;assert.deepEqual(setup.generationConfig,{responseModalities:['AUDIO']});assert.deepEqual(setup.inputAudioTranscription,{languageCodes:['pt-BR'],customVocabulary:['FalaMermo','Kubernetes']});assert.equal(setup.outputAudioTranscription,undefined);assert.ok(setup.systemInstruction.parts[0].text.startsWith(sttRecognition.instructions));assert.ok(!JSON.stringify(setup).includes('privada'));
  socket.message(JSON.stringify({setupComplete:{}}));await opening;session.sendAudio(new Uint8Array([0,0]),16000);session.endAudio();assert.deepEqual(JSON.parse(socket.sent[1]),{realtimeInput:{audio:{data:'AAA=',mimeType:'audio/pcm;rate=16000'}}});assert.deepEqual(JSON.parse(socket.sent[2]),{realtimeInput:{audioStreamEnd:true}});assert.equal(sessions.getTtsDiagnostics().some(s=>s.sessionId===session.id),false);
 });
 test('VAD manual delimita áudio com activityStart/activityEnd, sem audioStreamEnd',async t=>{
@@ -112,7 +165,7 @@ test('VAD manual delimita áudio com activityStart/activityEnd, sem audioStreamE
 test('quatro modelos STT respeitam setupComplete e VAD efetivo sem misturar finais',async t=>{
  const {instances,options}=transport(t);
  for(const modelId of config.LIVE_MODEL_PRIORITY)for(const vad of [undefined,{disabled:true},{disabled:false}]){
-  const session=new sessions.LiveSession({retire(s){s.close();}},{...options,modelId,mode:'dictation',vad}),opening=session.open(),socket=instances.at(-1);assert.throws(()=>session.sendAudio(new Uint8Array([0,0])),/não está pronta/);socket.open();await flush();const setup=JSON.parse(socket.sent[0]).setup;assert.deepEqual(setup.inputAudioTranscription,{});assert.deepEqual(setup.generationConfig.responseModalities,['AUDIO']);socket.message(JSON.stringify({setupComplete:{}}));await opening;
+  const session=new sessions.LiveSession({retire(s){s.close();}},{...options,modelId,mode:'dictation',vad}),opening=session.open(),socket=instances.at(-1);assert.throws(()=>session.sendAudio(new Uint8Array([0,0])),/não está pronta/);socket.open();await flush();const setup=JSON.parse(socket.sent[0]).setup;assert.deepEqual(setup.inputAudioTranscription,modelId==='gemini-3.8-live'?{languageCodes:['pt-BR']}:{});assert.deepEqual(setup.generationConfig.responseModalities,['AUDIO']);socket.message(JSON.stringify({setupComplete:{}}));await opening;
   assert.throws(()=>session.sendAudio(new Uint8Array([0])),/Int16/);assert.throws(()=>session.sendAudio(new Uint8Array([0,0]),48000),/16000/);session.sendAudio(new Uint8Array([0,64]));session.endAudio();const manual=session.options.vad.disabled===true;assert.deepEqual(socket.sent.slice(1).map(w=>Object.keys(JSON.parse(w).realtimeInput)[0]),manual?['activityStart','audio','activityEnd']:['audio','audioStreamEnd']);const snapshot=session.sttSnapshot();assert.equal(snapshot.inputTranscriptionConfigured,true);assert.equal(snapshot.sentBytes,2);assert.equal(snapshot.activityEnds,manual?1:0);assert.equal(snapshot.streamEnds,manual?0:1);session.close();
  }
 });
@@ -168,4 +221,17 @@ test('offscreen encerra payload rejeitado sem repetir em nove chaves/modelos',as
  const payload={operation:'TTS_LIVE_START',tabId:0,playerId:'p',requestId:'r',jobId:'j',modelId:'gemini-3.8-live',models:['gemini-3.8-live','gemini-3.8-live-extended-thinking'],apiKeys:Array.from({length:9},(_,i)=>'secret-'+i),text:'Teste de áudio.'};
  const started=await new Promise(resolve=>listener({type:'TTS_OFFSCREEN_COMMAND',target:'offscreen',payload},{},resolve));assert.equal(started.success,true);await flush();await flush();
  assert.equal(sockets.length,1);assert.equal(messages.filter(message=>message.payload.event==='ranking').length,1);assert.equal(messages.find(message=>message.payload.event==='ranking').payload.result,'REQUEST');assert.ok(messages.some(message=>message.payload.event==='error'));assert.ok(!JSON.stringify(messages).includes('secret-'));
+});
+
+test('marca no recebimento do WebSocket se a primeira fala do bloco já saiu, antes do parse assíncrono',async t=>{
+ const {session,instances}=transport(t,{mode:'dictation'}),ready=session.open(),wire=[];
+ const socket=instances[0];socket.open();await flush();socket.message(JSON.stringify({setupComplete:{}}));await ready;
+ try{
+  session.handler=(message,phase)=>{if(message.serverContent)wire.push(phase.afterNewSpeech);};
+  session.sendAudio(new Uint8Array(3200),16000,false);
+  socket.message(JSON.stringify({serverContent:{inputTranscription:{text:'¿Qué?'}}}));
+  session.sendAudio(new Uint8Array([0,16,0,240]),16000,true);
+  socket.message(JSON.stringify({serverContent:{inputTranscription:{text:'Quê?'}}}));
+  await flush();assert.deepEqual(wire,[false,true]);
+ }finally{session.close();}
 });

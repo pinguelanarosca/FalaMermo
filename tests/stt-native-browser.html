@@ -22,7 +22,7 @@ document.querySelector('#run').onclick=async function(){
    transport=new SttRealtime.DictationTransport({jobId:mode,...(mode==='realtime'?{setTimer:window.setTimeout,clearTimer:window.clearTimeout}:{}),sendAudio:bytes=>sent.push(bytes.length),endAudio:()=>{const text=++ended===1?'Primeira frase pública.':' Segunda frase pública.';timers.push(window.setTimeout(()=>transport.receive({inputTranscription:{text}}),30));},onPartial:result=>{if(mode==='realtime')delivery=delivery.then(()=>insertion.apply(result.text));},onChunk:result=>{if(result.sequence){committed++;chunks.push(result.sequence);}},onFailure:error=>failures.push(error.message)});
    const queue=new DictationRuntime.AudioQueue({metrics,send:async packet=>{await transport.submitAudioChunk(packet);return{success:true};},onFailure:error=>failures.push(error.message)});
    const capture=new SttRealtime.CapturePipeline({jobId:mode,realtime:true,continuous:true,submitAudioChunk:p=>queue.push(p,p.pcm.byteLength)});
-   const voice=new Uint8Array(3200);new Int16Array(voice.buffer).fill(3000);
+   const voice=new Uint8Array(3200);const samples=new Int16Array(voice.buffer);for(let i=0;i<samples.length;i++)samples[i]=3000*Math.sin(2*Math.PI*180*i/16000);
    const voicePackets=mode==='realtime'?26:18;
    for(let i=0;i<voicePackets;i++)capture.push(voice);
    for(let i=0;i<5;i++)capture.push(new Uint8Array(3200));

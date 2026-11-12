@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "FalaMermo",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "description": "Narração e ditado Gemini Live, Lens, HUD e agentes personalizados com configurações avançadas.",
   "permissions": [
     "storage",
@@ -29,6 +29,9 @@
     }
   },
   "options_page": "options.html",
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+  },
   "content_scripts": [
     {
       "matches": [
@@ -40,6 +43,7 @@
         "global-hud.js",
         "dictation-runtime.js",
         "stt-realtime.js",
+        "stt-vad-client.js",
         "content.js"
       ],
       "css": [

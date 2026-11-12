@@ -5,21 +5,46 @@ const stages=new Set(['starting','microphone-open','worklet-ready','capture-runn
 for(const stage of ['chunk-created','chunk-queued','chunk-send','chunk-response','chunk-merge','chunk-error','vad-silence'])stages.add(stage);
 for(const stage of ['connecting','first-pcm','consolidated'])stages.add(stage);
 for(const stage of ['capture-ending','capture-state','session-ending'])stages.add(stage);
-for(const stage of ['chunk-unresolved','chunk-no-speech','session-resuming','session-resumed','session-remote-wait'])stages.add(stage);
+for(const stage of ['chunk-unresolved','chunk-no-speech','chunk-degraded','session-resuming','session-resumed','session-remote-wait'])stages.add(stage);
+for(const stage of ['editor-dispatch','editor-apply','editor-ack','editor-delivery-missed','editor-delivery-exhausted'])stages.add(stage);
 const enums={scope:['capture','transport','result'],contextState:['running','suspended','closed','interrupted'],trackState:['live','ended'],vad:['manual','automatic'],voiceActivity:['ACTIVITY_START','ACTIVITY_END','TYPE_UNSPECIFIED'],interactionStatus:['IDLE','IN_PROGRESS'],outcome:['NO_CAPTURE','CAPTURE_NOT_SENT','NO_TRANSCRIPTION','INTERIM_ONLY','TIMEOUT','CONNECTION','CANCELLED','INVALIDATED_CONTEXT','FINAL','INSERTED','INSERTION_FAILED'],modelId:['gemini-3.8-live','gemini-3.8-live-extended-thinking','gemini-3.1-flash-live-preview','gemini-2.5-flash-native-audio-preview-12-2025']};
+for(const stage of ['vad-selected','vad-ready','vad-fallback'])stages.add(stage);
+enums.detector=['hybrid','rms'];
+enums.vadFallbackReason=['prepare','not-ready','backpressure','deadline','analysis','manual'];
+enums.vadFailureCode=['VAD_CAPTURE_MISSING','VAD_ORIGIN','VAD_SEQUENCE','VAD_PCM','VAD_OPERATION','VAD_HOST_ERROR','VAD_WORKER_DISPOSED','VAD_WORKER_ERROR','VAD_CANCELLED'];
 const numbers=['sourceRate','sampleRate','trackSampleRate','trackChannels','capturedFrames','captureChunks','capturedBytes','ackChunks','ackBytes','peak','maxRms','signalSamples','pcmSamples','pcmPeak','pcmMaxRms','pcmSignalSamples','nonFiniteSamples','receivedChunks','receivedBytes','sentChunks','sentBytes','bufferedAmount','activityStarts','activityEnds','streamEnds','closeCode','serverMessages','messagesAfterEnd','setupMessages','resumptionMessages','usageMessages','goAwayMessages','toolMessages','serverContentMessages','errorMessages','unknownMessages','parseErrors','voiceActivityEvents','voiceStarts','voiceEnds','modelTurnEvents','outputEvents','inputEvents','interimEvents','characters','sequence','elapsedMs','firstAudioMs','lastAudioMs','audioEndMs','firstServerAfterEndMs','sendIntervalMinMs','sendIntervalMaxMs','pcmDurationMs'];
+numbers.push('vadSequence','vadElapsedMs');
 numbers.push('queuedChunks','queuedBytes','pendingChunks','pendingBytes','forwardedChunks','forwardedBytes','ackTimeouts','flushTimeouts','queueWaitMs','maxQueueWaitMs','insertionAttempts','transformDurationMs');
 numbers.push('startMs','endMs','durationMs','overlapMs','latencyMs','meanChunkLatencyMs','skippedSilenceMs');
-numbers.push('socketOpenMs','setupCompleteMs','admissionMs','firstPcmMs','firstResponseMs','firstInsertionMs','insertionDurationMs','confirmationWaitMs','stopToFinalMs');
+numbers.push('socketOpenMs','setupCompleteMs','admissionMs','firstPcmMs','firstResponseMs','firstInsertionMs','insertionDurationMs','confirmationWaitMs','stopToFinalMs','revision','editorReceivedMs','publicationToEditorMs','dispatchToEditorMs');
 enums.cutReason=['silence','maximum','finalization'];enums.status=['streaming','closed','final'];enums.insertionMode=['final','realtime'];
 enums.outcome.push('ACK_TIMEOUT','FLUSH_TIMEOUT','TARGET_CHANGED','TARGET_REMOVED','TARGET_DOCUMENT_LOST','EDITOR_REVERTED','EVENT_DELIVERY_FAILED','TRANSFORM_TIMEOUT');
 enums.outcome.push('BACKPRESSURE','CHUNK_TIMEOUT','NO_SPEECH');
-enums.outcome.push('RECOVERY_STORAGE');numbers.push('unresolved');
+enums.outcome.push('RECOVERY_STORAGE');numbers.push('unresolved','copy');
 enums.stopReason=['user-stop','user-cancel','origin-lost','context-invalidated','startup-error','queue-error','ack-timeout','flush-error','chunk-timeout','backpressure','socket-error','transport-error','microphone-ended','worklet-error','context-closed','final-result','remote-cancel'];
 enums.stopReason.push('recovery-storage','recovery-limit');
 enums.errorKind=['CANCELLED','INVALIDATED_CONTEXT','QUOTA','AUTH','REQUEST','MODEL','TRANSIENT','NETWORK','UNKNOWN'];
-const booleans=['chunked','transform','finalInsertion','whileRecording','trackMuted','trackEnabled','microphoneOpened','workletReady','nodesConnected','released','setupComplete','inputTranscriptionConfigured','turnComplete','inputFinished','generationComplete','interrupted','waitingForInput','afterAudioEnd','localClose','inserted','flushAcknowledged','socketOpen','insertionVerified'];
+enums.scope.push('editor');
+enums.editorReason=['INSERTED','UNCHANGED','ALREADY_INSERTED','EMPTY_TEXT','WAITING_FINAL','SUPERSEDED','CANCELLED',
+ 'TARGET_CHANGED','TARGET_REMOVED','TARGET_DOCUMENT_LOST','TARGET_SELECTION_LOST','EDITOR_REJECTED','EDITOR_REVERTED',
+ 'AUDIO_BOUNDARY_UNCONFIRMED','SEGMENT_SENT','MANUAL_EDIT_PRESERVED','EDITOR_ERROR','FINAL_ALREADY_APPLIED','ORIGIN_LOST','EDITOR_ACK_MISSING','EDITOR_ACK_MISMATCH','EDITOR_ACK_TIMEOUT','EDITOR_MESSAGE_FAILED'];
+numbers.push('appliedRevision','ackRevision','publishedRevision','deliveryAttempt');
+const booleans=['chunked','transform','finalInsertion','whileRecording','trackMuted','trackEnabled','microphoneOpened','workletReady','nodesConnected','released','setupComplete','inputTranscriptionConfigured','turnComplete','inputFinished','generationComplete','interrupted','waitingForInput','afterAudioEnd','localClose','inserted','flushAcknowledged','socketOpen','insertionVerified','provisional'];
+booleans.push('ackAccepted','incomplete');
 const serverTypes=['setupComplete','sessionResumptionUpdate','usageMetadata','goAway','toolCall','toolCallCancellation','serverContent','voiceActivity','error'],contentTypes=['inputTranscription','interimInputTranscription','outputTranscription','modelTurn','turnComplete','generationComplete','interrupted','waitingForInput','interactionStatus'];
+function sanitizeEditorSnapshot(snapshot){
+ if(!snapshot||typeof snapshot!=='object')return undefined;
+ const safe={};
+ if(['input','textarea','contenteditable'].includes(snapshot.kind))safe.kind=snapshot.kind;
+ if(enums.editorReason.includes(snapshot.invalidReason))safe.invalidReason=snapshot.invalidReason;
+ for(const key of ['fieldCharacters','ownedCharacters','ownedStart','ownedEnd','selectionStart','selectionEnd','writes','rebinds','externalInputs']){
+  if(Number.isSafeInteger(snapshot[key])&&snapshot[key]>=0&&snapshot[key]<=1e9)safe[key]=snapshot[key];
+ }
+ for(const key of ['connected','editable','focused','hasOwned','ownedMatches','valueMatches','rangeAttached','singleTextNode','selectionInside','selectionCollapsed','lastInputTrusted']){
+  if(typeof snapshot[key]==='boolean')safe[key]=snapshot[key];
+ }
+ return safe;
+}
 function sanitize(packet){
  if(!packet||!/^((options-stt-)?[0-9a-f-]{36})$/i.test(packet.jobId||'')||!stages.has(packet.stage)||!enums.scope.includes(packet.scope))return null;
  const out={jobId:packet.jobId,stage:packet.stage,scope:packet.scope};
@@ -29,6 +54,9 @@ function sanitize(packet){
  for(const [key,values]of Object.entries(enums))if(values.includes(packet[key]))out[key]=packet[key];
  for(const key of numbers)if(typeof packet[key]==='number'&&Number.isFinite(packet[key])&&packet[key]>=0&&packet[key]<=1e12)out[key]=packet[key];
  for(const key of booleans)if(typeof packet[key]==='boolean')out[key]=packet[key];
+ if(out.scope==='editor')for(const key of ['before','after']){
+  const snapshot=sanitizeEditorSnapshot(packet[key]);if(snapshot)out[key]=snapshot;
+ }
  for(const [key,allowed]of [['serverEventTypes',serverTypes],['serverContentTypes',contentTypes]])if(Array.isArray(packet[key]))out[key]=[...new Set(packet[key].filter(value=>allowed.includes(value)))].slice(0,allowed.length);
  return out;
 }
@@ -40,8 +68,39 @@ function capture(capture,stage,extra={}){capture.startedAt??=Date.now();capture.
 function ending(target,reason){if(!target||target.stopReason)return;target.stopReason=enums.stopReason.includes(reason)?reason:'transport-error';capture(target,'capture-ending');if(reason==='context-invalidated')root.console?.warn('[STT capture-ending]',target.jobId,target.stopReason);}
 let queue=Promise.resolve();
 function enqueue(fn){const result=queue.catch(()=>{}).then(fn);queue=result;return result;}
-function clean(raw,now=Date.now()){const jobs=[];for(const old of raw?.jobs||[]){if(!Number.isFinite(old.updatedAt)||old.updatedAt<now-TTL||old.updatedAt>now)continue;const events=(old.events||[]).map(e=>{const safe=sanitize(e);return safe?{...safe,at:Number.isFinite(e.at)?e.at:now}:null;}).filter(Boolean).slice(-MAX_EVENTS);if(!events.length)continue;const job={jobId:events[0].jobId,updatedAt:old.updatedAt,events};for(const scope of enums.scope){const snapshot=sanitize({...old[scope],jobId:job.jobId,scope});if(snapshot)job[scope]=snapshot;}jobs.push(job);}return{version:1,jobs:jobs.sort((a,b)=>b.updatedAt-a.updatedAt).slice(0,MAX_JOBS)};}
-function record(packet){const safe=sanitize(packet);if(!safe)return Promise.resolve({success:false});return enqueue(async()=>{const now=Date.now(),storage=root.chrome.storage.session,state=clean((await storage.get(STORAGE_KEY))[STORAGE_KEY],now);let job=state.jobs.find(j=>j.jobId===safe.jobId);if(!job){job={jobId:safe.jobId,updatedAt:now,events:[]};state.jobs.unshift(job);}job.updatedAt=now;job[safe.scope]={...job[safe.scope],...safe};job.events.push({...safe,at:now});job.events=job.events.slice(-MAX_EVENTS);await storage.set({[STORAGE_KEY]:clean(state,now)});return{success:true};});}
+function isEditorDivergence(event){
+ if(event?.scope!=='editor'||!(event.characters>0))return false;
+ if(event.stage==='editor-delivery-exhausted')return true;
+ return event.stage==='editor-apply'&&event.inserted===false&&
+  !['EMPTY_TEXT','WAITING_FINAL','SUPERSEDED','CANCELLED','MANUAL_EDIT_PRESERVED'].includes(event.editorReason);
+}
+function clean(raw,now=Date.now()){
+ const jobs=[];
+ for(const old of raw?.jobs||[]){
+  if(!Number.isFinite(old.updatedAt)||old.updatedAt<now-TTL||old.updatedAt>now)continue;
+  const events=(old.events||[]).map(e=>{const safe=sanitize(e);return safe?{...safe,at:Number.isFinite(e.at)?e.at:now}:null;}).filter(Boolean).slice(-MAX_EVENTS);
+  if(!events.length)continue;
+  const job={jobId:events[0].jobId,updatedAt:old.updatedAt,events};
+  for(const scope of enums.scope){const snapshot=sanitize({...old[scope],jobId:job.jobId,scope});if(snapshot)job[scope]=snapshot;}
+  const first=sanitize(old.firstEditorDivergence);
+  if(first?.jobId===job.jobId&&isEditorDivergence(first))job.firstEditorDivergence={...first,at:Number.isFinite(old.firstEditorDivergence.at)?old.firstEditorDivergence.at:now};
+  jobs.push(job);
+ }
+ return{version:1,jobs:jobs.sort((a,b)=>b.updatedAt-a.updatedAt).slice(0,MAX_JOBS)};
+}
+function record(packet){
+ const safe=sanitize(packet);if(!safe)return Promise.resolve({success:false});
+ return enqueue(async()=>{
+  const now=Date.now(),storage=root.chrome.storage.session,state=clean((await storage.get(STORAGE_KEY))[STORAGE_KEY],now);
+  let job=state.jobs.find(j=>j.jobId===safe.jobId);
+  if(!job){job={jobId:safe.jobId,updatedAt:now,events:[]};state.jobs.unshift(job);}
+  job.updatedAt=now;job[safe.scope]=safe.scope==='editor'?safe:{...job[safe.scope],...safe};
+  const event={...safe,at:now};
+  if(!job.firstEditorDivergence&&isEditorDivergence(event))job.firstEditorDivergence=event;
+  job.events.push(event);job.events=job.events.slice(-MAX_EVENTS);
+  await storage.set({[STORAGE_KEY]:clean(state,now)});return{success:true};
+ });
+}
 function read(){return enqueue(async()=>{const storage=root.chrome.storage.session,state=clean((await storage.get(STORAGE_KEY))[STORAGE_KEY]);await storage.set({[STORAGE_KEY]:state});return state;});}
 async function get(){const res=await root.chrome.runtime.sendMessage({type:'LIVE_STT_DIAGNOSTICS_GET'});if(!res?.success)throw Error('Diagnóstico STT indisponível.');return res.diagnostics;}
 return{sanitize,observe,captureSnapshot,capture,ending,emit,record,read,get,clean,STORAGE_KEY,MAX_JOBS,MAX_EVENTS};

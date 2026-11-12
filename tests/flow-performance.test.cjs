@@ -41,21 +41,22 @@ function createBundle(file = 'background.js', raw = {}, failures = 0) {
                 return JSON.stringify(status === 200
                     ? { candidates: [{ content: { parts: modelId.endsWith('-tts') || modelId.endsWith('-tts-preview')
                         ? [{ inlineData: { data: Buffer.alloc(120).toString('base64') } }]
-                        : [{ text: 'Resultado simulado.' }] } }] }
+                        : [{ text: JSON.parse(options.body).generationConfig?.responseMimeType==='application/json'?JSON.stringify({text:'Resultado simulado.'}):'Resultado simulado.' }] } }] }
                     : { error: { message: 'Quota exceeded' } });
             } };
         },
     });
     vm.runInContext(source.replace(entry, 'globalThis.factories = __modules;'), context);
-    const cache = {};
+    const cache = {}, overrides = {};
     function load(id) {
+        if (overrides[id]) return overrides[id];
         if (cache[id]) return cache[id].exports;
         const module = cache[id] = { exports: {} };
         assert.ok(context.factories[id], `Módulo ausente: ${id}`);
         context.factories[id](module, module.exports, load);
         return module.exports;
     }
-    return { load, stored, trace };
+    return { load, stored, trace, overrides };
 }
 
 for (const file of ['background.js', 'content.js']) {
@@ -167,7 +168,7 @@ test('STT unary legado fica desativado por padrão', async () => {
     assert.equal(env.trace.requests.length, 0);
 });
 for (const type of ['LENS_ANALYZE_REQUEST']) {
-    test(`${type}: configuração é lida uma vez e mantém instrução, modelo e chave da persona`, async () => {
+    test(`${type}: visão e narração leem configuração uma vez por etapa e preservam a persona`, async () => {
         const env = createBundle('background.js', {
             api: { apiKey: 'fake-primary', apiKeys: ['fake-tts-only'] },
             agents: { customAgents: [{
@@ -176,6 +177,7 @@ for (const type of ['LENS_ANALYZE_REQUEST']) {
                 modelPreferences: { sttModelId: 'gemini-3.1-flash-lite', visionModelId: 'gemini-3.1-flash-lite' },
             }] },
         });
+        env.overrides['extension/src/services/backgroundPlayback.ts']={hasDocument:async()=>false,handlePlaybackCommand:async()=>({success:true})};
         const router = env.load('extension/src/background/messageRouter.ts');
         const response = await router.handleExtensionMessage({ type, payload: {
             agentId: 'custom-original', audioBase64: 'YXVkaW8=', mimeType: 'audio/webm;codecs=opus',
@@ -184,10 +186,11 @@ for (const type of ['LENS_ANALYZE_REQUEST']) {
         assert.equal(env.trace.requests.length, 1);
         const request = env.trace.requests[0];
         assert.equal(request.modelId, 'gemini-3.1-flash-lite');
-        assert.equal(request.key, 'fake-primary');
-        assert.equal(env.trace.reads.filter(keys => keys.includes('api')).length, 1);
+        assert.equal(request.key, 'fake-tts-only');
+        assert.equal(env.trace.reads.filter(keys => keys.includes('api') && !keys.includes('audio')).length, 1);
+        assert.equal(env.trace.reads.filter(keys => keys.includes('api') && keys.includes('audio')).length, 1);
         const parts = request.body.contents[0].parts;
-        assert.equal(request.body.systemInstruction.parts[0].text,'Descreva as legendas.');
+        assert.equal(request.body.systemInstruction.parts[0].text,require('../live-config.js').LITERAL_SELECTION_OCR);
         assert.equal(parts[0].inlineData.mimeType,'image/jpeg');assert.ok(parts[0].inlineData.data);assert.equal(parts.some(part=>part.text),false);
         assert.equal(env.trace.captures, type === 'LENS_ANALYZE_REQUEST' ? 1 : 0);
         assert.equal(env.stored.history.recentItems[0].agentId, 'custom-original');

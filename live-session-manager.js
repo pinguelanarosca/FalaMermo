@@ -23,11 +23,12 @@ class LiveSession{
  }
  async connect(){
   const route=this.options.mode==='dictation'?'stt':'tts';
+  const narration=this.options.mode==='narration';
   config.assertRouteModel(this.options.modelId,route);
   const builder=route==='stt'?config.buildLiveSttSessionConfig:config.buildLiveSessionConfig;
   // Payload estrutural é validado antes de abrir socket ou consumir outra chave.
   const setup=builder({...this.options,resumeHandle:this.resumeHandle});this.lastSetup=setup;
-  const started=performance.now();this.connectStartedAt=started;this.protocolPhase='connecting';this.closed=false;this.closingSocket=false;this.localClose=false;
+  const started=performance.now();this.connectStartedAt=started;this.protocolPhase='connecting';this.sentNewSpeech=false;this.closed=false;this.closingSocket=false;this.localClose=false;
   const socket=new WebSocket(websocketEndpoint(this.options.apiVersion)+'?key='+encodeURIComponent(this.options.apiKey));this.socket=socket;this.trace('socket-created');
   let openResolve,openReject,setupResolve,setupReject;
   const opened=new Promise((resolve,reject)=>{openResolve=resolve;openReject=reject;});
@@ -38,8 +39,9 @@ class LiveSession{
   let setupTimer;
   socket.onopen=()=>{clearTimeout(openedTimer);this.socketOpenMs=performance.now()-started;this.protocolPhase='socket-open';this.trace('socket-open');openResolve();};
   let incoming=Promise.resolve();
-  const receive=async(event,receivedMs,afterAudioEnd)=>{
-   let msg;try{const data=await readMessageData(event.data);msg=JSON.parse(data);}catch(error){if(this.options.mode==='dictation'){this.sttCounters||={sentChunks:0,sentBytes:0,activityStarts:0,activityEnds:0,streamEnds:0,inputEvents:0,interimEvents:0};this.sttCounters.parseErrors=(this.sttCounters.parseErrors||0)+1;this.sttDiagnostic('message-parse-error');}this.trace('message-parse-error',{error:config.redactSecrets(error.message,[this.options.apiKey])});return;}
+  const receive=async(event,receivedMs,afterAudioEnd,afterNewSpeech)=>{
+   if(narration&&this.closed)return;
+   let msg;try{const data=await readMessageData(event.data);if(narration&&this.closed)return;msg=JSON.parse(data);}catch(error){if(this.options.mode==='dictation'){this.sttCounters||={sentChunks:0,sentBytes:0,activityStarts:0,activityEnds:0,streamEnds:0,inputEvents:0,interimEvents:0};this.sttCounters.parseErrors=(this.sttCounters.parseErrors||0)+1;this.sttDiagnostic('message-parse-error');}this.trace('message-parse-error',{error:config.redactSecrets(error.message,[this.options.apiKey])});return;}
    this.lastReceivedEvent={fields:Object.keys(msg),serverContentFields:Object.keys(msg.serverContent||{})};this.trace('message-received',{fields:this.lastReceivedEvent.fields});
    if(this.options.mode==='dictation'){const m=this.sttCounters||={sentChunks:0,sentBytes:0,activityStarts:0,activityEnds:0,streamEnds:0,inputEvents:0,interimEvents:0};m.serverMessages=(m.serverMessages||0)+1;if(afterAudioEnd){m.messagesAfterEnd=(m.messagesAfterEnd||0)+1;m.firstServerAfterEndMs??=receivedMs;}if(msg.voiceActivity){m.voiceActivityEvents=(m.voiceActivityEvents||0)+1;if(msg.voiceActivity.type==='ACTIVITY_START')m.voiceStarts=(m.voiceStarts||0)+1;if(msg.voiceActivity.type==='ACTIVITY_END')m.voiceEnds=(m.voiceEnds||0)+1;}const sc=msg.serverContent;for(const [field,counter]of [['setupComplete','setupMessages'],['sessionResumptionUpdate','resumptionMessages'],['usageMetadata','usageMessages'],['goAway','goAwayMessages'],['toolCall','toolMessages'],['toolCallCancellation','toolMessages'],['serverContent','serverContentMessages'],['error','errorMessages']])if(msg[field])m[counter]=(m[counter]||0)+1;if(!['setupComplete','sessionResumptionUpdate','usageMetadata','goAway','toolCall','toolCallCancellation','serverContent','voiceActivity','error'].some(field=>msg[field]))m.unknownMessages=(m.unknownMessages||0)+1;if(sc?.modelTurn)m.modelTurnEvents=(m.modelTurnEvents||0)+1;if(sc?.outputTranscription)m.outputEvents=(m.outputEvents||0)+1;if(sc?.inputTranscription){m.inputEvents=(m.inputEvents||0)+1;m.characters=(m.characters||0)+(sc.inputTranscription.text?.length||0);if(sc.inputTranscription.finished)m.inputFinished=true;}if(sc?.interimInputTranscription)m.interimEvents=(m.interimEvents||0)+1;
     const now=performance.now(),control=!sc||sc.turnComplete||sc.generationComplete||sc.interrupted||sc.waitingForInput||sc.interactionStatus||sc.inputTranscription||sc.interimInputTranscription;if(control||!this.lastSttDiagnosticAt||now-this.lastSttDiagnosticAt>=1000){this.lastSttDiagnosticAt=now;this.sttDiagnostic('server-message',{serverEventTypes:Object.keys(msg),serverContentTypes:Object.keys(sc||{}),elapsedMs:receivedMs,afterAudioEnd,setupComplete:this.setupCompleteMs!==undefined||!!msg.setupComplete,voiceActivity:msg.voiceActivity?.type,interactionStatus:sc?.interactionStatus,turnComplete:sc?.turnComplete,generationComplete:sc?.generationComplete,interrupted:sc?.interrupted,waitingForInput:sc?.waitingForInput});}
@@ -48,12 +50,30 @@ class LiveSession{
    if(msg.sessionResumptionUpdate)this.resumeHandle=msg.sessionResumptionUpdate.resumable?msg.sessionResumptionUpdate.newHandle||null:null;
    if(msg.setupComplete){clearTimeout(setupTimer);this.setupCompleteMs=performance.now()-started;this.ready=true;this.protocolPhase='ready';this.trace('setup-complete');setupResolve();}
    if(msg.goAway){this.retiring=true;this.manager.onGoAway?.(this,msg.goAway.timeLeft);}
-   if(msg.serverContent||this.options.mode==='dictation'&&(msg.voiceActivity||msg.usageMetadata))this.handler?.(msg);
+   if(this.options.mode==='dictation'){
+    if(msg.serverContent||msg.voiceActivity||msg.usageMetadata)this.handler?.(msg,{afterAudioEnd,afterNewSpeech});
+   }else if(msg.serverContent)this.handler?.(msg);
    if(msg.error){const error=new Error(String(msg.error.message||msg.error.status||'Erro Live.'));error.httpStatus=Number(msg.error.code)||undefined;if(this.options.mode==='dictation'){for(const detail of msg.error.details||[]){if(typeof detail.retryDelay==='string'&&/^\d+(?:\.\d+)?s$/.test(detail.retryDelay))error.retryAfterMs=Math.min(86400000,parseFloat(detail.retryDelay)*1000);}}this.trace('server-error',{code:error.httpStatus||null,error:config.redactSecrets(error.message,[this.options.apiKey])});setupReject(error);this.fail(error);}
   };
-  socket.onmessage=event=>{const receivedMs=performance.now()-this.connectStartedAt,afterAudioEnd=this.sttCounters?.audioEndMs!==undefined;incoming=incoming.then(()=>receive(event,receivedMs,afterAudioEnd)).catch(error=>this.fail(error));};
+  socket.onmessage=event=>{const receivedMs=performance.now()-this.connectStartedAt,afterAudioEnd=this.sttCounters?.audioEndMs!==undefined,afterNewSpeech=this.sentNewSpeech;incoming=incoming.then(()=>receive(event,receivedMs,afterAudioEnd,afterNewSpeech)).catch(error=>this.fail(error));};
   socket.onerror=()=>{const error=new Error('Falha de rede no WebSocket Live.');this.trace('socket-error');openReject(error);setupReject(error);this.fail(error);};
-  socket.onclose=event=>{const phase=this.protocolPhase,reason=config.redactSecrets(String(event.reason||''),[this.options.apiKey]);this.closeDetails={code:event.code,reason,readyState:socket.readyState,at:new Date().toISOString(),phase,local:this.localClose===true};this.trace('socket-close',this.closeDetails);this.sttDiagnostic('socket-close',{closeCode:event.code,localClose:this.localClose===true});rememberDiagnostic(this);const error=Object.assign(new Error('WebSocket Live fechado ('+event.code+')'+(reason?': '+reason:'.')),{closeCode:event.code,closeReason:reason,protocolPhase:phase,lastSentType:this.lastSentType,protocol:this.diagnosticSnapshot()});openReject(error);setupReject(error);this.fail(error);};
+  const finishClose=event=>{
+   const phase=this.protocolPhase,reason=config.redactSecrets(String(event.reason||''),[this.options.apiKey]);
+   this.closeDetails={code:event.code,reason,readyState:socket.readyState,at:new Date().toISOString(),phase,local:this.localClose===true};
+   this.trace('socket-close',this.closeDetails);
+   this.sttDiagnostic('socket-close',{closeCode:event.code,localClose:this.localClose===true});
+   rememberDiagnostic(this);
+   const error=Object.assign(new Error('WebSocket Live fechado ('+event.code+')'+(reason?': '+reason:'.')),
+    {closeCode:event.code,closeReason:reason,protocolPhase:phase,lastSentType:this.lastSentType,protocol:this.diagnosticSnapshot()});
+   openReject(error);setupReject(error);this.fail(error);
+  };
+  socket.onclose=event=>{
+   if(narration&&!this.localClose){
+    // The last turnComplete can still be queued behind an asynchronous Blob read.
+    this.retiring=true;
+    void incoming.then(()=>finishClose(event));
+   }else finishClose(event);
+  };
   try{
    await opened;
    setupTimer=setTimeout(()=>setupReject(new Error('Timeout Live aguardando setupComplete.')),12000);
@@ -64,19 +84,57 @@ class LiveSession{
   finally{clearTimeout(openedTimer);clearTimeout(setupTimer);}
  }
  fail(error){this.ready=false;this.closed=true;this.handler?.({error:{message:error.message,cause:error}});this.manager.retire(this);}
- async sendTurn(text,onMessage,signal){
+ async sendTurn(text,onMessage,signal,{collectPcm=true}={}){
+  if(this.closed)throw Error('WebSocket Live fechado antes do turno.');
   await this.open();if(signal?.aborted)throw signal.reason;
+  if(this.closed||this.socket.readyState!==1)throw Error('WebSocket Live fechado antes do turno.');
   this.busy=true;this.lastUsedAt=Date.now();
   const chunks=[],transcript=[],audioTranscript=[],started=performance.now();let firstAudio=null,firstText=null,settled=false,timer;
   const result=new Promise((resolve,reject)=>{
-   const finish=(error)=>{if(settled)return;settled=true;clearTimeout(timer);signal?.removeEventListener('abort',abort);this.handler=null;this.busy=false;this.lastUsedAt=Date.now();this.trace(error?'turn-error':'turn-complete');rememberDiagnostic(this);if(error){reject(error);this.manager.retire(this);}else resolve({chunks,text:(audioTranscript.length?audioTranscript:transcript).join('').trim(),metrics:{socketOpen:this.socketOpenMs,setupComplete:this.setupCompleteMs,firstAudio:firstAudio===null?null:firstAudio-started,firstText:firstText===null?null:firstText-started,turnComplete:performance.now()-started}});};
+   const finish=error=>{
+    if(settled)return;
+    settled=true;
+    clearTimeout(timer);
+    signal?.removeEventListener('abort',abort);
+    this.handler=null;
+    this.lastUsedAt=Date.now();
+    this.trace(error?'turn-error':'turn-complete');
+    rememberDiagnostic(this);
+    if(error){reject(error);this.manager.retire(this);return;}
+    // The caller still owns the session until manager.release().
+    resolve({
+     chunks,text:(audioTranscript.length?audioTranscript:transcript).join('').trim(),
+     metrics:{socketOpen:this.socketOpenMs,setupComplete:this.setupCompleteMs,
+      firstAudio:firstAudio===null?null:firstAudio-started,firstText:firstText===null?null:firstText-started,
+      turnComplete:performance.now()-started}
+    });
+   };
    const abort=()=>finish(Object.assign(new Error('Turno Live cancelado.'),{cancelled:true}));
    signal?.addEventListener('abort',abort,{once:true});
    timer=setTimeout(()=>finish(new Error('Timeout aguardando conclusão do turno Live.')),90000);
    this.handler=msg=>{
     if(msg.error){finish(msg.error.cause||new Error(msg.error.message||'Erro Live.'));return;}
     const sc=msg.serverContent;if(!sc)return;
-    for(const part of sc.modelTurn?.parts||[]){const inline=part.inlineData||part.inline_data;if(inline?.data){if(firstAudio===null){firstAudio=performance.now();this.protocolPhase='streaming';this.trace('first-pcm',{mimeType:inline.mimeType||inline.mime_type});}const bytes=decodeBase64(inline.data);chunks.push(bytes);onMessage?.({type:'pcm',bytes,mimeType:inline.mimeType||inline.mime_type||'audio/pcm;rate=24000'});}if(part.text&&!part.thought){if(firstText===null)firstText=performance.now();transcript.push(part.text);onMessage?.({type:'text',text:part.text});}}
+    for(const part of sc.modelTurn?.parts||[]){
+     if(settled)return;
+     const inline=part.inlineData||part.inline_data;
+     if(inline?.data){
+      if(firstAudio===null){
+       firstAudio=performance.now();
+       this.protocolPhase='streaming';
+       this.trace('first-pcm',{mimeType:inline.mimeType||inline.mime_type});
+      }
+      const bytes=decodeBase64(inline.data);
+      if(collectPcm)chunks.push(bytes);
+      onMessage?.({type:'pcm',bytes,mimeType:inline.mimeType||inline.mime_type||'audio/pcm;rate=24000'});
+     }
+     if(settled)return;
+     if(part.text&&!part.thought){
+      if(firstText===null)firstText=performance.now();
+      transcript.push(part.text);
+      onMessage?.({type:'text',text:part.text});
+     }
+    }
     if(sc.outputTranscription?.text){if(firstText===null)firstText=performance.now();audioTranscript.push(sc.outputTranscription.text);onMessage?.({type:'text',text:sc.outputTranscription.text});}
     const requiresIdle=config.caps(this.options.modelId).requiresInteractionIdle;
     if(requiresIdle?sc.interactionStatus==='IDLE':sc.turnComplete||sc.interactionStatus==='IDLE')finish();
@@ -86,16 +144,15 @@ class LiveSession{
   return result;
  }
  sttSnapshot(){return{...this.sttCounters,setupComplete:this.setupCompleteMs!==undefined,inputTranscriptionConfigured:!!this.lastSetup?.setup?.inputAudioTranscription,socketOpen:this.ready&&!this.closed,bufferedAmount:this.socket?.bufferedAmount||0,vad:this.options.vad?.disabled===true?'manual':'automatic',closeCode:this.closeDetails?.code};}
- sendAudio(bytes,sampleRate=16000){if(!this.ready||this.closed)throw new Error('Sessão STT Live não está pronta.');if(sampleRate!==16000||!bytes.byteLength||bytes.byteLength%2)throw Object.assign(new Error('STT exige PCM Int16 LE mono não vazio a 16000 Hz.'),{httpStatus:400});const m=this.sttCounters||={sentChunks:0,sentBytes:0,activityStarts:0,activityEnds:0,streamEnds:0,inputEvents:0,interimEvents:0};if(this.options.vad?.disabled===true&&!this.audioActivity){this.socket.send(JSON.stringify({realtimeInput:{activityStart:{}}}));this.audioActivity=true;m.activityStarts++;}this.socket.send(JSON.stringify(config.buildLiveAudioMessage(encodeBase64(bytes),sampleRate)));m.sentChunks++;m.sentBytes+=bytes.byteLength;const now=performance.now()-this.connectStartedAt;if(m.lastAudioMs!==undefined){const interval=Math.max(0,now-m.lastAudioMs);m.sendIntervalMinMs=Math.min(m.sendIntervalMinMs??interval,interval);m.sendIntervalMaxMs=Math.max(m.sendIntervalMaxMs||0,interval);}m.firstAudioMs??=now;m.lastAudioMs=now;m.pcmDurationMs=m.sentBytes/32;}
+ sendAudio(bytes,sampleRate=16000,hasNewSpeech=false){if(!this.ready||this.closed)throw new Error('Sessão STT Live não está pronta.');if(sampleRate!==16000||!bytes.byteLength||bytes.byteLength%2)throw Object.assign(new Error('STT exige PCM Int16 LE mono não vazio a 16000 Hz.'),{httpStatus:400});const m=this.sttCounters||={sentChunks:0,sentBytes:0,activityStarts:0,activityEnds:0,streamEnds:0,inputEvents:0,interimEvents:0};if(this.options.vad?.disabled===true&&!this.audioActivity){this.socket.send(JSON.stringify({realtimeInput:{activityStart:{}}}));this.audioActivity=true;m.activityStarts++;}if(hasNewSpeech)this.sentNewSpeech=true;this.socket.send(JSON.stringify(config.buildLiveAudioMessage(encodeBase64(bytes),sampleRate)));m.sentChunks++;m.sentBytes+=bytes.byteLength;const now=performance.now()-this.connectStartedAt;if(m.lastAudioMs!==undefined){const interval=Math.max(0,now-m.lastAudioMs);m.sendIntervalMinMs=Math.min(m.sendIntervalMinMs??interval,interval);m.sendIntervalMaxMs=Math.max(m.sendIntervalMaxMs||0,interval);}m.firstAudioMs??=now;m.lastAudioMs=now;m.pcmDurationMs=m.sentBytes/32;}
  endAudio(){if(!this.ready||this.closed)throw new Error('Sessão STT Live fechada.');const m=this.sttCounters||={sentChunks:0,sentBytes:0,activityStarts:0,activityEnds:0,streamEnds:0,inputEvents:0,interimEvents:0};if(this.options.vad?.disabled===true){if(!this.audioActivity)return;this.socket.send(JSON.stringify({realtimeInput:{activityEnd:{}}}));m.activityEnds++;}else{this.socket.send(JSON.stringify({realtimeInput:{audioStreamEnd:true}}));m.streamEnds++;}m.audioEndMs=performance.now()-this.connectStartedAt;m.messagesAfterEnd=0;this.audioActivity=false;this.sttDiagnostic('activity-end');}
  close(){this.closed=true;this.ready=false;try{if(this.socket&&this.socket.readyState<2&&!this.closingSocket){this.closingSocket=true;this.localClose=true;this.socket.close(1000,'idle');}}catch{}}
 }
-// Only STT admission supplies this signal; TTS pooling/opening remains unchanged.
-async function openDictation(session,signal){if(!signal)return session.open();let abort;try{return await Promise.race([session.open(),new Promise((_,reject)=>{abort=()=>{session.manager.retire(session);reject(signal.reason||Object.assign(Error('Ditado cancelado.'),{cancelled:true}));};signal.addEventListener('abort',abort,{once:true});if(signal.aborted)abort();})]);}finally{signal.removeEventListener('abort',abort);}}
+async function openWithSignal(session,signal){if(!signal)return session.open();let abort;try{return await Promise.race([session.open(),new Promise((_,reject)=>{abort=()=>{session.manager.retire(session);reject(signal.reason||Object.assign(Error('Ditado cancelado.'),{cancelled:true}));};signal.addEventListener('abort',abort,{once:true});if(signal.aborted)abort();})]);}finally{signal.removeEventListener('abort',abort);}}
 class LiveSessionManager{
  constructor(){this.pool=new Map();this.resumeHandles=new Map();this.credentials=new Map();this.credentialSequence=0;this.ttl=config.DEFAULTS.liveSessionIdleTtl;this.timer=setInterval(()=>this.sweep(),10000);}
- key(o){const slot=o.keyIndex||1;let identity=this.credentials.get(slot);if(!identity||identity.value!==o.apiKey){identity={value:o.apiKey,id:++this.credentialSequence};this.credentials.set(slot,identity);}return [o.modelId,o.keyIndex,identity.id,o.voiceName||'',o.mode||'',o.thinkingLevel||'',o.thinkingBudget??'',Boolean(o.outputTranscription),o.systemInstruction||'',JSON.stringify(o.vad||{}),JSON.stringify(o.customVocabulary||[]),o.jsonMode||'panel',JSON.stringify(o.advancedJson||null),o.smartTranscription!==false,JSON.stringify(o.languageCodes||[])].join('|');}
- async acquire(options){config.assertRouteModel(options.modelId,options.mode==='dictation'?'stt':'tts');this.ttl=options.liveSessionIdleTtl||this.ttl;const key=this.key(options),list=this.pool.get(key)||[];let session=options.mode==='dictation'?null:list.find(s=>!s.busy&&!s.closed&&!s.retiring);if(!session){session=new LiveSession(this,{...options,resumeHandle:options.mode==='dictation'?options.resumeHandle||null:this.resumeHandles.get(key)||null});list.push(session);this.pool.set(key,list);}session.options.jobId=options.jobId;session.options.blockId=options.blockId;session.options.agentId=options.agentId;session.busy=true;try{if(options.mode==='dictation')await openDictation(session,options.signal);else await session.open();return session;}catch(error){this.retire(session);this.resumeHandles.delete(key);throw error;}}
+ key(o){const slot=o.keyIndex||1;let identity=this.credentials.get(slot);if(!identity||identity.value!==o.apiKey){identity={value:o.apiKey,id:++this.credentialSequence};this.credentials.set(slot,identity);}return [o.modelId,o.keyIndex,identity.id,o.voiceName||'',o.mode==='narration'&&o.literalSelection===true?'literal-selection':o.mode||'',o.thinkingLevel||'',o.thinkingBudget??'',Boolean(o.outputTranscription),o.systemInstruction||'',JSON.stringify(o.vad||{}),JSON.stringify(o.customVocabulary||[]),o.jsonMode||'panel',JSON.stringify(o.advancedJson||null),o.smartTranscription!==false,JSON.stringify(o.languageCodes||[])].join('|');}
+ async acquire(options){config.assertRouteModel(options.modelId,options.mode==='dictation'?'stt':'tts');this.ttl=options.liveSessionIdleTtl||this.ttl;const key=this.key(options),list=this.pool.get(key)||[];let session=options.mode==='dictation'?null:list.find(s=>!s.busy&&!s.closed&&!s.retiring);if(!session){session=new LiveSession(this,{...options,resumeHandle:options.mode==='dictation'?options.resumeHandle||null:this.resumeHandles.get(key)||null});list.push(session);this.pool.set(key,list);}session.options.jobId=options.jobId;session.options.blockId=options.blockId;session.options.agentId=options.agentId;session.busy=true;try{await openWithSignal(session,options.signal);return session;}catch(error){this.retire(session);this.resumeHandles.delete(key);throw error;}}
  release(session){session.busy=false;session.lastUsedAt=Date.now();if(session.retiring)this.retire(session);}
  retire(session){session.close();for(const [key,list] of this.pool){if(list.includes(session)&&session.resumeHandle&&session.options.mode!=='dictation')this.resumeHandles.set(key,session.resumeHandle);const next=list.filter(s=>s!==session);if(next.length)this.pool.set(key,next);else this.pool.delete(key);}}
  onGoAway(session){if(!session.busy)this.retire(session);}

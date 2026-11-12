@@ -4,7 +4,7 @@ const {CapturePipeline,DictationTransport}=require('../stt-realtime.js');
 test('carregar STT em frame com IndexedDB bloqueado não acessa storage nem quebra outros módulos',async()=>{
  const vm=require('node:vm'),fs=require('node:fs'),context=vm.createContext({Uint8Array,DataView,setTimeout,clearTimeout});let reads=0;Object.defineProperty(context,'indexedDB',{get(){reads++;throw Error('SecurityError');}});assert.doesNotThrow(()=>vm.runInContext(fs.readFileSync(require.resolve('../stt-realtime.js'),'utf8'),context));assert.equal(reads,0);await assert.rejects(context.SttRealtime.recovery.start('test'),error=>error.code==='RECOVERY_STORAGE');assert.equal(reads,1);
 });
-const pcm=(ms=100,value=3000)=>{const bytes=new Uint8Array(ms*32);new Int16Array(bytes.buffer).fill(value);return bytes;};
+const {voicePcm:pcm}=require('./stt-audio-fixture.cjs');
 function fixture(options={}){
  let time=0,id=0;const timers=new Map(),sent=[],retained=[],errors=[],warnings=[],diagnostics=[];
  const transport=new DictationTransport({jobId:'test',sendAudio:bytes=>sent.push(bytes.slice()),endAudio:()=>{e.ends++;},retain:async p=>retained.push({pcm:p.pcm.slice(),chunk:{...p.chunk}}),now:()=>time,setTimer:(fn,ms)=>{timers.set(++id,{fn,at:time+ms});return id;},clearTimer:id=>timers.delete(id),onFailure:error=>errors.push(error),onWarning:w=>warnings.push(w),onDiagnostic:d=>diagnostics.push(d),...options});

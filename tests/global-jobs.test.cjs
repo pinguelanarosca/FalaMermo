@@ -8,6 +8,39 @@ function environment(options={}){
 }
 const origin={tabId:1,frameId:2,documentId:'document-original'};
 const job=(jobId,type='STT',extra={})=>({jobId,type,origin,playerId:'same-player',requestId:jobId,...extra});
+test('registro de ditado não altera a apresentação global do HUD',async()=>{
+ const {registry}=environment();
+ await registry.ui({visible:false,minimized:true});
+ await registry.start(job('dictation'),'reserve-stt');
+ await registry.start(job('dictation'),'start-stt');
+ const state=await registry.get();
+ assert.equal(state.visible,false);
+ assert.equal(state.minimized,true);
+ assert.equal(state.jobs[0].jobId,'dictation');
+});
+test('apresentação por aba usa o remetente, sobrevive ao worker e respeita controles manuais globais',async()=>{
+ const e=backgroundEnvironment(),other={tab:{id:2},frameId:0,documentId:'viewer',url:'https://viewer.invalid/'};
+ await e.run('HUD_GLOBAL_GET',{},e.original);
+ await e.run('HUD_GLOBAL_GET',{},other);
+ await e.run('HUD_GLOBAL_UI_SET',{visible:false,minimized:true},e.original);
+ const local=await e.run('HUD_GLOBAL_UI_SET',{scope:'tab',tabId:2,visible:true,minimized:false},e.original);
+ assert.equal(local.state.visible,true);
+ assert.equal(local.state.minimized,false);
+ assert.equal('tabHud'in local.state,false);
+ const observer=await e.run('HUD_GLOBAL_GET',{},other);
+ assert.equal(observer.state.visible,false);
+ assert.equal(observer.state.minimized,true);
+ assert.equal(e.sent.findLast(item=>item.tabId===2&&item.message.type==='HUD_GLOBAL_STATE').message.state.visible,false);
+ const restarted=backgroundEnvironment(e);
+ assert.equal((await restarted.run('HUD_GLOBAL_GET',{},e.original)).state.visible,true);
+ const minimized=await restarted.run('HUD_GLOBAL_UI_SET',{minimized:true},other);
+ assert.equal(minimized.state.minimized,true);
+ const originState=(await restarted.run('HUD_GLOBAL_GET',{},e.original)).state;
+ assert.equal(originState.visible,true);
+ assert.equal(originState.minimized,true);
+ await restarted.router.originLost({tabId:e.original.tab.id,tabClosed:true,captureGone:true});
+ assert.equal((await restarted.run('HUD_GLOBAL_GET',{},e.original)).state.visible,false);
+});
 test('rascunhos, tarefa ativa e expansão recuperam no worker; edição concorrente não sobrescreve',async()=>{
  const e=environment(),r=e.registry;await r.draft({jobId:'manual-a',agentId:'custom',origin:{}});await r.edit({jobId:'manual-a',text:'Texto escrito e colado.',expectedText:''});await r.draft({jobId:'manual-b',agentId:'narrator',origin:{}});await r.ui({activeTaskId:'manual-a'});await r.collapse({jobId:'manual-a',collapsed:true});await r.historyChanged(e.history());
  const restarted=GlobalJobs.create(e.services);assert.deepEqual(await restarted.get(),await r.get());await restarted.reconcile([]);const state=await restarted.get();assert.equal(state.activeTaskId,'manual-a');assert.equal(state.jobs.find(j=>j.jobId==='manual-a').collapsed,true);assert.equal(state.jobs.find(j=>j.jobId==='manual-a').agentId,'custom');assert.equal(state.jobs.find(j=>j.jobId==='manual-a').status,'ready');
@@ -198,7 +231,16 @@ test('broadcast falho conserva viewer e recupera último snapshot sem polling de
 });
 test('recuperação de viewer tem no máximo três tentativas e encerra ao fechar a aba',async()=>{
  const e=backgroundEnvironment(),timers=new Map();let tick=0;const delays=[];e.context.setTimeout=(fn,ms)=>{delays.push(ms);timers.set(++tick,fn);return tick;};e.context.clearTimeout=id=>timers.delete(id);
- await e.run('HUD_GLOBAL_GET',{}, {tab:{id:2},frameId:0,documentId:'v',url:'https://viewer.invalid/'});e.context.chrome.tabs.sendMessage=async()=>{throw Error('transient');};await e.run('TTS_REQUEST',{text:'Público.'});while(timers.size){const [id,fn]=timers.entries().next().value;timers.delete(id);await fn();}assert.deepEqual(delays,[100,400,1000]);await e.router.originLost({tabId:2});assert.equal(timers.size,0);
+ await e.run('HUD_GLOBAL_GET',{}, {tab:{id:2},frameId:0,documentId:'v',url:'https://viewer.invalid/'});e.context.chrome.tabs.sendMessage=async()=>{throw Error('transient');};await e.run('TTS_REQUEST',{text:'Público.'});while(timers.size){const [id,fn]=timers.entries().next().value;timers.delete(id);await fn();}assert.deepEqual(delays.filter(ms=>ms!==1500),[100,400,1000]);await e.router.originLost({tabId:2});assert.equal(timers.size,0);
+});
+test('porta de notificação congelada não bloqueia atualização nem leitura do registro', {timeout:1000},async()=>{
+ const e=backgroundEnvironment(),original=e.context.chrome.tabs.sendMessage;
+ const viewer={tab:{id:2},frameId:0,documentId:'frozen',url:'https://viewer.invalid/'};
+ await e.run('HUD_GLOBAL_GET',{},viewer);
+ e.context.chrome.tabs.sendMessage=(...args)=>args[1].type==='HUD_GLOBAL_STATE'?new Promise(()=>{}):original(...args);
+ e.context.setTimeout=()=>1;e.context.clearTimeout=()=>{};
+ await e.run('TTS_REQUEST',{text:'Texto público.'});
+ assert.equal((await e.run('HUD_GLOBAL_GET')).state.jobs[0].text,'Texto público.');
 });
 test('TTS parado editável; pausado ainda pertence à reprodução e não aceita edição',async()=>{
  const r=environment().registry;await r.start(job('audio','TTS',{text:'Original.'}));await r.event({jobId:'audio',event:'play',eventSeq:1});await r.event({jobId:'audio',event:'pause',eventSeq:2});await assert.rejects(r.edit({jobId:'audio',text:'Não alterar buffer.'}),/Pare/);await r.stopped('audio');await r.edit({jobId:'audio',text:'Nova reprodução.'});assert.equal((await r.get()).jobs[0].text,'Nova reprodução.');
@@ -350,4 +392,80 @@ test('cancelamento no transporte e navegação iniciada não liberam microfone s
  await assert.rejects(r.start(job('next'),'reserve-stt'),{code:'STT_CAPTURE_BUSY'});
  await r.originLost({...origin,captureGone:true});
  assert.equal((await r.start(job('next'),'reserve-stt')).status,'connecting');
+});
+
+test('ACK progressivo atrasado não conclui o job nem substitui a confirmação final do editor',async()=>{
+ const e=environment(),r=e.registry;
+ await r.start(job('editor'),'reserve-stt');
+ await r.start(job('editor','STT',{editorDelivery:true}),'start-stt');
+ await r.event({jobId:'editor',event:'stt-segment',eventSeq:4,confirmedText:'Primeiro.'});
+ await r.event({jobId:'editor',event:'stt-status',eventSeq:5,status:'Inserindo'});
+ await r.insertion({jobId:'editor',revision:4,final:false,inserted:false,reason:'EDITOR_REVERTED'},origin);
+ assert.equal((await r.find({jobId:'editor'})).status,'inserting');
+ await r.event({jobId:'editor',event:'stt-final',eventSeq:6,text:'Primeiro. Segundo.'});
+ await r.capture({jobId:'editor',status:'waiting',microphoneReleased:true},origin);
+ await r.insertion({jobId:'editor',revision:4,final:false,inserted:true},origin);
+ assert.equal((await r.find({jobId:'editor'})).status,'inserting');
+ assert.equal(e.history().recentItems.length,0);
+ const restarted=GlobalJobs.create(e.services);
+ await restarted.reconcile([]);
+ assert.equal((await restarted.find({jobId:'editor'})).status,'inserting');
+ await restarted.insertion({jobId:'editor',revision:6,final:true,inserted:true,reason:'INSERTED',characters:18},origin);
+ await restarted.insertion({jobId:'editor',revision:6,final:true,inserted:false,reason:'TARGET_CHANGED'},origin);
+ const result=await restarted.find({jobId:'editor'});
+ assert.equal(result.status,'completed');
+ assert.equal(result.text,'Primeiro. Segundo.');
+ assert.deepEqual(result.insertion,{revision:6,final:true,inserted:true,reason:'INSERTED',characters:18});
+ assert.equal(e.history().recentItems[0].text,result.text);
+ assert.deepEqual(e.history().recentItems[0].insertion,result.insertion);
+ await restarted.preparePlayback({jobId:'editor',requestId:'read-transcript'});
+ await restarted.event({jobId:'editor',narration:true,event:'first-playback',requestId:'read-transcript',eventSeq:1});
+ assert.equal((await restarted.find({jobId:'editor'})).narration.status,'playing');
+});
+
+
+test('Parar tudo espera liberação, congela resultados e mantém histórico e novas solicitações',async()=>{
+ const e=environment({history:{enabled:true,maxEntries:50,recentItems:[{jobId:'old',text:'Resultado salvo'}]}});
+ const {registry}=e;
+ await registry.start(job('mic','STT',{editorDelivery:true}),'start-stt');
+ await registry.event({jobId:'mic',event:'stt-partial',eventSeq:1,confirmedText:'Confirmado',partialText:'Provisório'});
+ await registry.start(job('playing','TTS',{text:'Texto editado'}));
+ await registry.event({jobId:'playing',event:'pause',eventSeq:1});
+ const before=e.history();
+ const affected=await registry.beginPanic();
+ assert.deepEqual((await registry.beginPanic()).map(j=>j.jobId),affected.map(j=>j.jobId));
+ const mic=affected.find(j=>j.jobId==='mic'),tts=affected.find(j=>j.jobId==='playing');
+ await registry.finishPanic(mic,{remoteStopped:true,captureReleased:false});
+ assert.equal((await registry.find({jobId:'mic'})).status,'cancelling');
+ assert.equal((await registry.event({jobId:'mic',event:'stt-final',eventSeq:2,text:'Atrasado'})).changed,false);
+ await registry.insertion({jobId:'mic',revision:1,final:false,inserted:true},origin);
+ assert.equal((await registry.find({jobId:'mic'})).insertion,undefined);
+ await assert.rejects(registry.start(job('new'),'start-stt'),{code:'STT_CAPTURE_BUSY'});
+ await registry.finishPanic(mic,{remoteStopped:true,captureReleased:true});
+ await registry.finishPanic(tts,{remoteStopped:true,captureReleased:false});
+ await registry.start(job('new'),'start-stt');
+ await registry.preparePlayback({...tts,requestId:'new-request'});
+ await registry.finishPanic(tts,{remoteStopped:true,captureReleased:false});
+ assert.equal((await registry.find({jobId:'new'})).status,'connecting');
+ assert.equal((await registry.find({jobId:'playing'})).requestId,'new-request');
+ assert.equal((await registry.find({jobId:'playing'})).text,'Texto editado');
+ assert.equal((await registry.find({jobId:'mic'})).text,'Confirmado');
+ assert.equal((await registry.find({jobId:'mic'})).partialText,'Provisório');
+ assert.deepEqual(e.history(),before);
+});
+
+test('fronteiras do transcript sobrevivem ao worker, chegam ao editor e rejeitam offsets inválidos',async()=>{
+ const e=environment(),r=e.registry;
+ await r.start(job('boundaries','STT',{editorDelivery:true}),'start-stt');
+ await r.event({jobId:'boundaries',event:'stt-segment',eventSeq:1,confirmedText:'Um. Dois.',textBoundaries:[[1,3],[2,9]]});
+ assert.deepEqual((await r.find({jobId:'boundaries'})).textBoundaries,[[1,3],[2,9]]);
+ const restored=GlobalJobs.create(e.services);
+ assert.deepEqual((await restored.find({jobId:'boundaries'})).textBoundaries,[[1,3],[2,9]]);
+ await restored.event({jobId:'boundaries',event:'stt-partial',eventSeq:2,confirmedText:'Um. Dois.',textBoundaries:[[1,30]]});
+ assert.deepEqual((await restored.find({jobId:'boundaries'})).textBoundaries,[[1,3],[2,9]]);
+ const flow=backgroundEnvironment();
+ await flow.run('STT_LIVE_START',{jobId:'editor-boundaries',editorDelivery:true,distributed:true,chunked:true,realtime:true});
+ await flow.run('LIVE_OFFSCREEN_EVENT',{jobId:'editor-boundaries',event:'stt-segment',eventSeq:1,text:'Um.',confirmedText:'Um.',textBoundaries:[[1,3]]},{url:'chrome-extension://test/offscreen.html'});
+ for(let i=0;i<10;i++)await new Promise(resolve=>setImmediate(resolve));
+ assert.deepEqual(JSON.parse(JSON.stringify(flow.sent.find(packet=>packet.message?.editorDelivery)?.message.payload.textBoundaries)),[[1,3]]);
 });

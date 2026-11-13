@@ -1,6 +1,21 @@
 const test=require('node:test'),assert=require('node:assert/strict');
 const config=require('../live-config.js'),sessions=require('../live-session-manager.js');
 const flush=()=>new Promise(resolve=>setImmediate(resolve));
+test('diagnóstico STT identifica réplica e origem da quebra de linha sem expor transcrição',async t=>{
+ const original=globalThis.LiveSttDiagnostics,events=[];
+ globalThis.LiveSttDiagnostics={emit:e=>events.push(e)};t.after(()=>{globalThis.LiveSttDiagnostics=original;});
+ const {session,instances}=transport(t,{mode:'dictation',jobId:'00000000-0000-4000-8000-000000000000',blockId:3,keyIndex:6});
+ const opening=session.open();instances[0].open();await flush();instances[0].message(JSON.stringify({setupComplete:{}}));await opening;
+ session.sendAudio(new Uint8Array([0,0]),16000,true);session.endAudio();
+ instances[0].message(JSON.stringify({serverContent:{inputTranscription:{text:'Fala.\n¿Sí?',finished:true}}}));await flush();
+ instances[0].message(JSON.stringify({serverContent:{interactionStatus:'IDLE'}}));await flush();session.close();
+ const last=events.at(-1);
+ assert.equal(last.sessionId,session.id);assert.equal(last.sequence,3);assert.equal(last.chunkId,session.options.jobId+':3');
+ assert.equal(last.keyLabel,'key#6');assert.equal(last.inputLineBreaks,1);
+ const input=events.find(e=>e.serverContentTypes?.includes('inputTranscription'));
+ assert.equal(input.inputFinished,true);assert.equal(input.afterNewSpeech,true);
+ assert.doesNotMatch(JSON.stringify(events),/Fala|¿Sí|secret-test-key/);
+});
 function transport(t,override={}){
  const original=globalThis.WebSocket,instances=[];
  class Socket{

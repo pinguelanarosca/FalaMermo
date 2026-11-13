@@ -2,17 +2,17 @@
 
 Extensão Chrome Manifest V3 para narração, ditado e seleção visual com Gemini, agentes personalizados e HUD na página.
 
-FalaMermo v1.0.6 integra VAD híbrido Silero local, continuidade do ditado e leitura literal da Seleção (Lens), com redundância competitiva entre contas. A versão do manifesto é `1.0.6`; ZIP e checksum acompanham a [release v1.0.6](https://github.com/pinguelanarosca/FalaMermo/releases/tag/v1.0.6).
+FalaMermo v1.0.7 consolida a dupla confirmação local Silero + TEN, recuperação automática do VAD, arquivamento de tarefas e diagnósticos do ditado. A versão do manifesto é `1.0.7`; ZIP e checksum acompanham a [release v1.0.7](https://github.com/pinguelanarosca/FalaMermo/releases/tag/v1.0.7).
 
 ## Instalação no Chrome
 
-1. Baixe e extraia `FalaMermo-v1.0.6.zip` da [release v1.0.6](https://github.com/pinguelanarosca/FalaMermo/releases/tag/v1.0.6), ou clone [este repositório](https://github.com/pinguelanarosca/FalaMermo) na branch `main`.
+1. Baixe e extraia `FalaMermo-v1.0.7.zip` da [release v1.0.7](https://github.com/pinguelanarosca/FalaMermo/releases/tag/v1.0.7), ou clone [este repositório](https://github.com/pinguelanarosca/FalaMermo) na branch `main`.
 2. Mantenha o código em uma pasta permanente. `manifest.json` deve estar diretamente nessa pasta.
 3. Abra `chrome://extensions`, ative **Modo do desenvolvedor** e escolha **Carregar sem compactação**.
 4. Selecione a pasta extraída, abra as opções da extensão e configure sua chave Gemini.
 5. Atualize as páginas que já estavam abertas. Após atualizar/recarregar a extensão, atualize também essas páginas.
 
-Não há etapa de build obrigatória. Para atualizar uma instalação descompactada, feche trabalhos ativos, atualize o código na mesma pasta já carregada e clique **Recarregar** em `chrome://extensions`. Não remova a extensão nem limpe seu armazenamento; mantenha a pasta para preservar a instalação e as preferências. Atualize também as páginas abertas. Pacotes anteriores não contêm as mudanças da v1.0.6.
+Não há etapa de build obrigatória. Para atualizar uma instalação descompactada, feche trabalhos ativos, atualize o código na mesma pasta já carregada e clique **Recarregar** em `chrome://extensions`. Não remova a extensão nem limpe seu armazenamento; mantenha a pasta para preservar a instalação e as preferências. Atualize também as páginas abertas. Pacotes anteriores não contêm as mudanças da v1.0.7.
 
 ## Configuração e utilização
 
@@ -86,7 +86,7 @@ As chaves e preferências são armazenadas localmente pela extensão no perfil d
 
 Ao usar os recursos, o conteúdo necessário é enviado ao Gemini: texto e instruções para narração; áudio do microfone para ditado; imagem selecionada e instruções para Lens. Uma transformação pós-ditado configurada pelo agente também processa o transcript no Gemini. A captura do microfone depende de autorização do navegador.
 
-Há histórico/diagnósticos locais. Não exporte nem publique seu armazenamento, chaves, áudio, textos pessoais ou instruções privadas. Os diagnósticos persistidos específicos de reprodução TTS e de STT usam resumos limitados e sanitizados; isso não torna todo histórico da extensão livre de conteúdo pessoal. O diagnóstico STT guarda somente contadores e estados em armazenamento de sessão, limitado a 8 jobs e 40 eventos por job, com expiração de 24 horas; não inclui chaves, áudio, texto reconhecido, identificadores de dispositivo ou instruções dos agentes.
+Há histórico/diagnósticos locais. Não exporte nem publique seu armazenamento, chaves, áudio, textos pessoais ou instruções privadas. Os diagnósticos persistidos específicos de reprodução TTS e de STT usam resumos limitados e sanitizados; isso não torna todo histórico da extensão livre de conteúdo pessoal. O diagnóstico STT guarda somente contadores e estados em armazenamento de sessão, limitado a 8 jobs, 40 eventos, 32 resumos de segmentos e 64 resumos de sessões Gemini por job, com expiração de 24 horas; não inclui chaves, áudio, texto reconhecido, identificadores de dispositivo ou instruções dos agentes. Os resumos correlacionam job, segmento, sessão e revisão do editor, incluindo evidência VAD por pacote ativo e contagens de quebras de linha na resposta e no campo. Duração de pacote aceito pelo VAD não equivale à duração exata de fala humana.
 
 Para consultar os últimos diagnósticos TTS no Console de `options.html`, inclusive após o offscreen encerrar:
 
@@ -96,13 +96,15 @@ await LiveTtsDiagnostics.get()
 
 O resumo TTS aceita também tarefas manuais, registra marcos de pausa/retomada/seek e mantém no máximo 8 jobs, 120 eventos por job e 12 sessões por job, com expiração de 24 horas. Não mantém o offscreen aberto artificialmente nem armazena chaves, PCM, base64 ou conteúdo pessoal nesses diagnósticos.
 
-O estado global do HUD guarda textos necessários à visualização e recuperação em armazenamento de sessão. Ele não é um diagnóstico sanitizado. Resultados concluídos também podem integrar o histórico local, conforme sua preferência e limite; podem conter texto pessoal. Nas Opções, configure até 5.000 resultados/3.650 dias (padrão: 50 resultados/365 dias, preservando limites existentes) e reabra tarefas históricas. A expiração ocorre ao salvar novos resultados, segundo esses limites. Há orçamento de 6 MB para histórico e 4 MB para o registro de sessão; resultados já salvos podem sair do cache de sessão e ser reabertos pelo histórico. Se não for possível salvar, o resultado permanece na sessão com aviso; novas tarefas podem ser recusadas para evitar perda. Não são guardados PCM, base64 ou credenciais no registro de jobs. A limpeza explícita do histórico remove os resultados concluídos correspondentes do HUD.
+O estado global do HUD guarda textos necessários à visualização e recuperação em armazenamento de sessão. Ele não é um diagnóstico sanitizado. Resultados concluídos também podem integrar o histórico local, conforme sua preferência e limite; podem conter texto pessoal. Nas Opções, configure até 5.000 resultados/3.650 dias (padrão: 50 resultados/365 dias, preservando limites existentes) e consulte o arquivo de tarefas. Quando o limite configurado, o orçamento de 6 MB do histórico ou o orçamento de 4 MB da sessão for alcançado, tarefas concluídas mais antigas são copiadas para um IndexedDB separado e só então removidas do cache ativo. As configurações de tarefa arquivadas usam uma lista permitida que remove credenciais; não são guardados PCM ou base64 nos jobs. Recuperações STT encerradas são compactadas sem perda no arquivo separado para liberar o limite ativo de 256 MB/129 registros. Em Opções, tarefas arquivadas podem ser consultadas, exportadas, restauradas e reproduzidas; recuperações podem ser ouvidas, exportadas como WAV e restauradas. Tarefas em execução, pendentes ou fixadas não são arquivadas. Limpar histórico é uma exclusão explícita dos jobs arquivados e dos resultados concluídos da sessão.
 
-O estado de sessão permite recuperar o service worker, mas não sobrevive ao recarregamento/atualização da extensão ou reinício do navegador. Somente o histórico habilitado preserva resultados concluídos além dessa sessão. [Documentação Chrome](https://developer.chrome.com/docs/extensions/reference/api/storage#storage_areas).
+O estado de sessão permite recuperar o service worker, mas não sobrevive ao recarregamento/atualização da extensão ou reinício do navegador. O arquivo IndexedDB separado preserva tarefas e áudio arquivados além dessa sessão e do reinício do navegador. O limite físico do perfil Chrome ainda depende do espaço/quota IndexedDB disponível; se o navegador recusar a gravação no arquivo, a cópia ativa não é removida. [Documentação Chrome](https://developer.chrome.com/docs/extensions/reference/api/storage#storage_areas).
 
 ## Limitações conhecidas
 
-- A versão foi considerada suficientemente funcional pelo responsável após teste manual. Isso não equivale a homologação completa de todo navegador, site, editor, chave e modelo.
+- O gargalo dos pacotes STT permanece em investigação. Esta release não comprova sua correção nem anuncia ganho de latência do ditado.
+
+- A validação da v1.0.7 está registrada nas notas da release. O teste geral de controles Chrome ainda apresenta timeout ao localizar a medição diagnóstica do bloco confirmado; não há homologação completa de todo navegador, site, editor, chave e modelo.
 - O usuário confirmou o funcionamento do STT com microfone físico no Chrome após a correção de finalização do Gemini 3.8 Live. Isso não homologa todos os dispositivos, editores e ambientes. Microfone físico, inserção e cenários de reload/contexto invalidado não foram repetidos de ponta a ponta pela automação desta publicação. A referência `svg` anteriormente relatada no DevTools ainda não foi correlacionada a um stack original.
 - Depois de recarregar a extensão, um content script antigo pode perder autorização para comunicar-se. O STT trata a invalidação, libera sua captura e orienta F5; não reconecta nem recarrega páginas automaticamente. Uma página com código anterior à correção precisa ser atualizada para receber a proteção.
 - Campos removidos, editores especiais, páginas internas/restritas do Chrome e permissões recusadas podem impedir inserção/captura. Lens não funciona em todas as páginas.
@@ -114,7 +116,7 @@ O seek exato por palavra ainda está indisponível. No ciclo de correção anter
 
 Não há ganho comparativo de latência comprovado para o scheduler nem teto real de TPM conhecido automaticamente. Os testes reais anteriores do scheduler usaram áudio sintético e não substituem homologação física da instalação atual.
 
-Consulte as [notas da v1.0.6](docs/RELEASE-v1.0.6.md), as [notas da v1.0.5](docs/RELEASE-v1.0.5.md), as [notas da v1.0.4](docs/RELEASE-v1.0.4.md), as [notas da v1.0.3](docs/RELEASE-v1.0.3.md), o [histórico v1.0.2](docs/RELEASE-v1.0.2.md), as [notas v1.0.1](docs/RELEASE-v1.0.1.md) e a [release v1.0.0](https://github.com/pinguelanarosca/FalaMermo/releases/tag/v1.0.0).
+Consulte as [notas da v1.0.7](docs/RELEASE-v1.0.7.md), as [notas da v1.0.6](docs/RELEASE-v1.0.6.md), as [notas da v1.0.5](docs/RELEASE-v1.0.5.md), as [notas da v1.0.4](docs/RELEASE-v1.0.4.md), as [notas da v1.0.3](docs/RELEASE-v1.0.3.md), o [histórico v1.0.2](docs/RELEASE-v1.0.2.md), as [notas v1.0.1](docs/RELEASE-v1.0.1.md) e a [release v1.0.0](https://github.com/pinguelanarosca/FalaMermo/releases/tag/v1.0.0).
 
 ## Validação do código
 
@@ -127,3 +129,11 @@ git diff --check
 ```
 
 O verificador confere recursos, versão do manifest, sintaxe JavaScript e padrões de segredos nos arquivos públicos selecionados. Isso não substitui homologação física. `node tools/package-release.cjs` gera o pacote da versão pública, verifica as entradas e a extração e calcula seu SHA-256; os artefatos em `dist/` não entram no Git.
+
+## Dupla confirmação local de fala
+
+O ditado no campo e na página de Opções usa Silero + TEN VAD, ambos locais e contínuos em PCM 16 kHz. O início exige uma janela Silero ≥ 0,50 e uma janela TEN ≥ 0,50 com sobreposição temporal em offsets de amostras (32 e 16 ms). RMS e resgates acústicos não autorizam o início. Segmentos confirmados preservam pré-roll de 800 ms e hangover; um detector neural pode sustentar a continuação.
+
+Falhas de inferência reinicializam o worker e reprocessam apenas o PCM ainda não entregue, aquecendo os estados com contexto recente sem reenviá-lo. Deadline por análise: 1.500 ms; fila normal até 5 segundos de PCM, limite de emergência 10 segundos. Após falhas repetidas o envio fica bloqueado e o PCM pendente é salvo nas recuperações locais. O HUD mostra as duas probabilidades e os diagnósticos incluem confirmações, rejeições, deadlines e recuperações.
+
+O TEN WASM oficial e seu JavaScript estão em `vad-assets/ten/`, com origem e commit em `SOURCE.txt` e licença integral em `LICENSE`. Os artefatos são empacotados na extensão, sem CDN. Validação acústica automatizada: `node tests/stt-dual-vad-chrome.cjs [segmento47.wav] [fala-humana.wav]`. O teste usa um perfil Chrome isolado, os modelos reais e nenhuma chave Gemini.

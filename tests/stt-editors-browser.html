@@ -29,6 +29,17 @@ document.querySelector('#run').onclick=async function(){
  this.disabled=true;const results=[];
  async function check(name,run){try{await run();results.push({name,passed:true});}catch(error){results.push({name,passed:false,error:error.message});}document.querySelector('#result').textContent=JSON.stringify({done:false,results},null,2);}
  for(const kind of ['input','textarea','contenteditable','ProseMirror']){
+  await check(kind+': resposta curta não cria quebra nem duplica em revisões',async()=>{const f=fixture(kind);try{
+   for(const text of ['Fala.','Fala. ¿Qué?','Fala. ¿Qué?'])assert((await f.insertion.apply(text)).inserted,'escrita recusada');
+   assert(f.value()==='Antes Fala. ¿Qué? depois',f.value());
+   assert(!f.value().includes('\n'),'quebra criada sem LF de entrada');
+   if(f.view)assert(f.view.state.doc.textContent===f.value(),'estado divergiu');
+  }finally{f.dispose();}});
+  if(kind!=='input')await check(kind+': quebra recebida do resultado é preservada',async()=>{const f=fixture(kind);try{
+   assert((await f.insertion.apply('Fala.\n¿Sí?',{final:true})).inserted,'quebra rejeitada');
+   if(typeof f.element.value==='string')assert(f.value()==='Antes Fala.\n¿Sí? depois',f.value());
+   else assert(f.element.querySelectorAll('br:not(.ProseMirror-trailingBreak)').length===1,'quebra não corresponde ao resultado');
+  }finally{f.dispose();}});
   await check(kind+': revisão, campo original, foco, formato e confirmação',async()=>{const f=fixture(kind);try{
    other.focus();other.setSelectionRange(2,5);
    for(const [text,final]of [['provisório',false],['confirmado',false],['confirmado e mais',true]]){const result=await f.insertion.apply(text,{final});assert(result.inserted,result.reason);assert(f.value()==='Antes '+text+' depois',f.value());assert(document.activeElement===other,'foco alterado');assert(other.selectionStart===2&&other.selectionEnd===5,'seleção alheia alterada');}

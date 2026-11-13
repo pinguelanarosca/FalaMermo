@@ -33,6 +33,12 @@ VERIFICACAO.txt
 tools/*
 !tools/package-release.cjs
 !tools/verify-publication.cjs
+!tools/stt-audio-forensics.cjs
+!tools/stt-forensics/
+!tools/stt-forensics/*.cjs
+!tools/stt-forensics/*.js
 tests/chrome-integration.cjs
 
 !docs/RELEASE-v1.0.6.md
+
+!docs/RELEASE-v1.0.7.md

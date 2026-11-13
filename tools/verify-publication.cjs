@@ -3,21 +3,21 @@ const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
 const root = path.resolve(__dirname, '..');
-const PUBLIC_VERSION = '1.0.6';
+const PUBLIC_VERSION = '1.0.7';
 const runtimeFiles = [
     'manifest.json', 'background.js', 'content.js', 'content.css',
     'popup.html', 'popup.js', 'options.html', 'options.js', 'task.html', 'task.js',
     'offscreen.html', 'offscreen.js', 'lens-permission.html', 'lens-permission.js',
     'tts-config.js', 'tts-adaptive.js', 'live-config.js', 'live-session-manager.js',
     'live-tts-diagnostics.js', 'live-stt-diagnostics.js', 'mic-capture-worklet.js', 'pcm-player-worklet.js',
-    'global-jobs.js', 'global-hud.js', 'dictation-runtime.js', 'stt-realtime.js', 'stt-scheduler.js',
+    'global-jobs.js', 'global-hud.js', 'task-archive.js', 'dictation-runtime.js', 'stt-realtime.js', 'stt-scheduler.js',
     'stt-vad-client.js', 'stt-vad-host.js', 'stt-vad-worker.js',
-    'vad-assets/hybrid.js', 'vad-assets/rescue.js', 'vad-assets/model.onnx', 'vad-assets/LICENSES.txt',
+    'vad-assets/dual.js', 'vad-assets/ten/ten_vad.js', 'vad-assets/ten/ten_vad.wasm', 'vad-assets/ten/LICENSE', 'vad-assets/ten/NOTICES', 'vad-assets/ten/SOURCE.txt', 'vad-assets/hybrid.js', 'vad-assets/rescue.js', 'vad-assets/model.onnx', 'vad-assets/LICENSES.txt',
     'vad-assets/ort.wasm.min.js', 'vad-assets/ort-wasm-simd-threaded.mjs', 'vad-assets/ort-wasm-simd-threaded.wasm',
     'icons/icon16.png', 'icons/icon48.png', 'icons/icon128.png',
 ];
 function publicFiles() {
-    return [...runtimeFiles, 'README.md', '.gitignore', 'docs/RELEASE-v1.0.0.md', 'docs/RELEASE-v1.0.1.md', 'docs/RELEASE-v1.0.2.md', 'docs/RELEASE-v1.0.3.md', 'docs/RELEASE-v1.0.4.md', 'docs/RELEASE-v1.0.5.md', 'docs/RELEASE-v1.0.6.md',
+    return [...runtimeFiles, 'README.md', '.gitignore', 'docs/RELEASE-v1.0.0.md', 'docs/RELEASE-v1.0.1.md', 'docs/RELEASE-v1.0.2.md', 'docs/RELEASE-v1.0.3.md', 'docs/RELEASE-v1.0.4.md', 'docs/RELEASE-v1.0.5.md', 'docs/RELEASE-v1.0.6.md', 'docs/RELEASE-v1.0.7.md',
         'tools/verify-publication.cjs', 'tools/package-release.cjs',
         ...fs.readdirSync(path.join(root, 'tests')).filter(name =>
             name.endsWith('.test.cjs') || ['selection-chrome.cjs', 'stt-editors-chrome.cjs', 'stt-editors-browser.html', 'stt-continuous-browser.html', 'load-background.cjs', 'stt-audio-fixture.cjs', 'controls-chrome.cjs', 'stt-vad-chrome-cases.cjs', 'vad-go-sintetico.pcm', 'vad-oh-sintetico.pcm', 'audio-controls-browser.html', 'audio-controls-browser.js', 'stt-native-browser.html', 'AUDIO-CONTROLS.md'].includes(name)).map(name => 'tests/' + name)].sort();

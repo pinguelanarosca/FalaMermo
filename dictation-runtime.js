@@ -119,7 +119,7 @@ class Insertion{
    const snapshot={
     kind:this.textControl?(element.tagName==='INPUT'?'input':'textarea'):'contenteditable',
     connected:element.isConnected!==false,editable:editable(element),focused:active===element,
-    fieldCharacters:textOf(element).length,ownedCharacters:this.applied.length,hasOwned:!!this.hasOwned,
+    fieldCharacters:textOf(element).length,fieldLineBreaks:(visualText(element).match(/\n/g)||[]).length,ownedCharacters:this.applied.length,hasOwned:!!this.hasOwned,
     writes:this.editorWrites||0,rebinds:this.editorRebinds||0,externalInputs:this.externalInputs||0,
     lastInputTrusted:this.lastInputTrusted,invalidReason:this.invalidReason
    };

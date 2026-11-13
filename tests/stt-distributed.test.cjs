@@ -83,6 +83,18 @@ async function block(job,sequence,cutReason='silence'){
 }
 function final(session,text){session.receive({inputTranscription:{text,finished:true}});}
 
+test('palavra curta legítima e repetição em outro bloco continuam sendo publicadas',async()=>{
+ const env=fixture(),job=env.job('legitimate-short');
+ for(let sequence=1;sequence<=2;sequence++){
+  await block(job,sequence);
+  await until(()=>job.lanes(sequence).filter(l=>l.ended).length===2);
+  final(job.lanes(sequence)[0],'¿Qué?');
+  final(job.lanes(sequence)[1],'resposta duplicada de outra réplica');
+ }
+ const result=await job.transport.finish();
+ assert.equal(result.text,'¿Qué? ¿Qué?');assert.equal(result.incomplete,false);assert.equal(result.transcribed,2);
+});
+
 test('nove contas participam de um ditado, duas sessões distintas por bloco e uma gravação local por pacote',async()=>{
  const env=fixture({config:{maxPerAccount:2}}),job=env.job('nine');
  for(let sequence=1;sequence<=5;sequence++){

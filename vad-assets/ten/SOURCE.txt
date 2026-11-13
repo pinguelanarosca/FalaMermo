@@ -1,0 +1,5 @@
+Official TEN-framework/ten-vad
+https://github.com/TEN-framework/ten-vad
+Commit: 9a3f4b55467a3418f896044370cc7689f4b3b14a
+Files copied without modifications.
+NOTICES copied from the same official commit.

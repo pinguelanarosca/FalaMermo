@@ -512,7 +512,7 @@ async function startStt(payload){
  const d={payload,startedAt:performance.now(),timings:{},finalParts:[],pendingText:'',stopped:false,finalized:false,controller:new AbortController(),finalTimer:null};dictations.set(payload.jobId,d);
  const models=LiveConfig.modelChain('stt',payload.modelId,payload.models||[]),scheduler=getSttScheduler();
  try{
-  LiveConfig.assertRouteModel(payload.modelId,'stt');if(payload.realtime===true||payload.chunked===true){d.recovery=globalThis.SttRecovery||SttRealtime.recovery;d.recoveryOpening=preserveSttAudio(d.recovery.start(payload.jobId)).then(()=>{d.recoveryStarted=true;});await d.recoveryOpening;}sttDiagnostic(d,'connecting');
+  LiveConfig.assertRouteModel(payload.modelId,'stt');if(payload.realtime===true||payload.chunked===true){d.recovery=globalThis.SttRecovery||SttRealtime.recovery;d.recoveryOpening=preserveSttAudio(d.recovery.start(payload.jobId,payload)).then(()=>{d.recoveryStarted=true;});await d.recoveryOpening;}sttDiagnostic(d,'connecting');
   if(payload.distributed===true&&payload.chunked===true){
    if(d.controller.signal.aborted)throw d.controller.signal.reason;
    d.distributed=true;

@@ -1,0 +1,4 @@
+# Preserve the exact official TEN artifacts, including upstream whitespace.
+vad-assets/ten/ten_vad.js whitespace=-blank-at-eol
+vad-assets/ten/LICENSE whitespace=-blank-at-eol
+vad-assets/ten/NOTICES whitespace=-blank-at-eol,-blank-at-eof

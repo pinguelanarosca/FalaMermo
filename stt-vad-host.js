@@ -44,7 +44,7 @@
         });
     }
 
-    async function handle({ operation, id, seq, pcm, final, rollback, warm = true, clientSentAt, backgroundAt, origin }) {
+    async function handle({ operation, id, seq, pcm, final, rollback, warm = true, clientSentAt, backgroundAt, origin, packets }) {
         const hostAt=performance.timeOrigin+performance.now();
         clearTimeout(idleTimer);
         if (operation === 'dispose') { dispose(); return {ok:true}; }
@@ -55,11 +55,18 @@
         }
         if (operation === 'open') {
             if (jobs.size) dispose();
-            jobs.set(id, {seq:0,origin});
+            const job={seq:0,origin};
+            jobs.set(id,job);
             const result = await request({ operation, id, warm });
-            if (!result.ok && jobs.has(id)) dispose();
+            if (!result.ok && jobs.get(id)===job) dispose();
             idle();
             return result;
+        }
+        if(operation==='preserve'){
+            const recovery=globalThis.SttRealtime.recovery,jobId='vad-'+id+'-'+Date.now();
+            await recovery.start(jobId,{realtime:true});
+            try{let sequence=0;for(const packet of packets||[]){const pcm=Uint8Array.from(atob(packet.pcm),c=>c.charCodeAt(0));await recovery.append(jobId,{pcm,chunk:{packetSequence:++sequence,sequence:1,startMs:packet.captureStartMs,endMs:packet.captureEndMs,overlapMs:0}});}await recovery.update(jobId,{state:'incomplete'});return{ok:true};}
+            catch(error){await recovery.update(jobId,{state:'interrupted'});throw error;}
         }
         if (operation === 'close') {
             if (!jobs.has(id)) return { ok: true };
@@ -107,7 +114,7 @@
                 reply({ok:false,code:'VAD_ORIGIN'});
                 return false;
             }
-            if(!['analyze','close'].includes(payload.operation)){
+            if(!['analyze','close','preserve'].includes(payload.operation)){
                 reply({ok:false,code:'VAD_OPERATION'});
                 return false;
             }

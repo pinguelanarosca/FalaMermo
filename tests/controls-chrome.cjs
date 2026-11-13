@@ -166,6 +166,13 @@ function liveFixture() {
         'if(globalThis.fixtureVadInput){capture.fixtureHandler=node.port.onmessage;node.port.onmessage=event=>{if(event.data?.type==="flushed")capture.fixtureHandler(event);};}capture.unwatch=globalThis.DictationRuntime.watchCapture'
     ));
     await new Promise((resolve, reject) => server.once('error', reject).listen(0, '127.0.0.1', resolve));
+    // O dispositivo padrão do Chrome emite um tom; o VAD duplo o rejeita corretamente.
+    // Use a amostra de voz já versionada, mantendo captura e inferências reais.
+    const voice = fs.readFileSync(path.join(__dirname,'vad-go-sintetico.pcm'));
+    const microphonePcm = Buffer.concat([voice,Buffer.alloc(16000)]);
+    const microphoneFile = path.join(temp,'microphone.wav');
+    const header = Buffer.alloc(44);header.write('RIFF');header.writeUInt32LE(36+microphonePcm.length,4);header.write('WAVEfmt ',8);header.writeUInt32LE(16,16);header.writeUInt16LE(1,20);header.writeUInt16LE(1,22);header.writeUInt32LE(16000,24);header.writeUInt32LE(32000,28);header.writeUInt16LE(2,32);header.writeUInt16LE(16,34);header.write('data',36);header.writeUInt32LE(microphonePcm.length,40);
+    fs.writeFileSync(microphoneFile,Buffer.concat([header,microphonePcm]));
     const args = [
         '--no-sandbox', '--ozone-platform=x11', '--disable-gpu', '--disable-dev-shm-usage', '--disable-background-networking',
         '--no-first-run', '--no-default-browser-check', '--remote-debugging-pipe',
@@ -173,6 +180,8 @@ function liveFixture() {
         '--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream',
         '--user-data-dir=' + path.join(temp, 'profile'), 'about:blank'
     ];
+    if(!process.env.FALAMERMO_GHOST_PHYSICAL)args.push('--use-file-for-fake-audio-capture='+microphoneFile);
+    if(process.env.FALAMERMO_GHOST_PHYSICAL)args.splice(args.indexOf('--use-fake-device-for-media-stream'),1);
     if (!process.env.FALAMERMO_HEADED) args.unshift('--headless');
     chrome = spawn(process.env.FALAMERMO_CHROME || 'google-chrome', args, {stdio: ['ignore', 'ignore', 'pipe', 'pipe', 'pipe']});
     chrome.stderr.pipe(fs.createWriteStream(path.join(temp, 'chrome.log')));
@@ -332,7 +341,7 @@ function liveFixture() {
         }
     });
     if(process.env.FALAMERMO_VAD_ONLY){
-        await require('./stt-vad-chrome-cases.cjs')({call,worker,content,evaluate,waitFor,offscreen,locate,base,status,job,sleep,page,click,target});
+        await require(process.env.FALAMERMO_GHOST_ONLY?'./stt-ghost-chrome-cases.cjs':'./stt-vad-chrome-cases.cjs')({call,worker,content,evaluate,waitFor,offscreen,locate,base,status,job,sleep,page,click,target});
         return;
     }
     if(process.env.FALAMERMO_PANIC_ONLY){
@@ -509,7 +518,8 @@ function liveFixture() {
     })()`), 'Já existe um ditado em andamento em outra aba.');
     assert.equal(await secondContent('fixtureHud.querySelector(".ext-hud-body").hidden'), true);
     assert.doesNotMatch(await secondContent('fixtureHud.querySelector(".ext-hud-card").innerText'), /atualize|recarregue|F5/i);
-    assert.equal(await content('fixtureHud.querySelector("#ext-capture-notice").hidden'), true);
+    await waitFor('confianças Silero e TEN no HUD da captura',()=>content('/Silero.*TEN/.test(fixtureHud.querySelector("#ext-capture-notice").textContent)'));
+    assert.equal(await content('fixtureHud.querySelector("#ext-capture-notice").hidden'), false);
     assert.equal(await content('fixtureStt.liveJobId'), activeDictation);
     await click('#ext-btn-min', content);
     await waitFor('HUD restaurado', () => content('!fixtureHud.querySelector(".ext-hud-body").hidden'));

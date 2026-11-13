@@ -3,8 +3,10 @@ const GlobalJobs=require('../global-jobs.js');
 function environment(options={}){
  const data=options.data||{},notifications=[],updates=[],tabs=new Map([[1,{id:1,autoDiscardable:options.previous!==false}],[2,{id:2,autoDiscardable:true}]]);
  let history=options.history||{enabled:true,maxEntries:50,recentItems:[]},clock=100;
- const services={storage:{get:async key=>({[key]:data[key]}),set:async value=>Object.assign(data,structuredClone(value))},getHistory:async()=>structuredClone(history),updateHistory:async fn=>{const result=fn(structuredClone(history));if(result)history=result;},notify:async state=>notifications.push(structuredClone(state)),getTab:async id=>{if(!tabs.has(id))throw Error('closed');return tabs.get(id);},updateTab:async(id,value)=>{updates.push([id,value]);if(!tabs.has(id))throw Error('closed');Object.assign(tabs.get(id),value);},now:()=>clock};
- return{data,notifications,updates,tabs,services,registry:GlobalJobs.create(services),history:()=>history,setHistory:value=>history=value,tick:ms=>clock+=ms};
+ const archived=new Map(),archivedHistory=new Map();
+ const taskArchive={putTask:async(task,settings={})=>archived.set(task.jobId,{jobId:task.jobId,task:structuredClone(task),settings:structuredClone(settings)}),getTask:async id=>structuredClone(archived.get(id)),deleteTask:async id=>archived.delete(id),putHistory:async item=>archivedHistory.set(item.id,{id:item.id,jobId:item.jobId,item:structuredClone(item)}),listHistory:async()=>structuredClone([...archivedHistory.values()]),deleteHistory:async id=>archivedHistory.delete(id),clearTasks:async()=>{archived.clear();archivedHistory.clear();}};
+ const services={taskArchive,storage:{get:async key=>({[key]:data[key]}),set:async value=>Object.assign(data,structuredClone(value))},getHistory:async()=>structuredClone(history),updateHistory:async fn=>{const result=fn(structuredClone(history));if(result)history=result;},notify:async state=>notifications.push(structuredClone(state)),getTab:async id=>{if(!tabs.has(id))throw Error('closed');return tabs.get(id);},updateTab:async(id,value)=>{updates.push([id,value]);if(!tabs.has(id))throw Error('closed');Object.assign(tabs.get(id),value);},now:()=>clock};
+ return{archived,archivedHistory,data,notifications,updates,tabs,services,registry:GlobalJobs.create(services),history:()=>history,setHistory:value=>history=value,tick:ms=>clock+=ms};
 }
 const origin={tabId:1,frameId:2,documentId:'document-original'};
 const job=(jobId,type='STT',extra={})=>({jobId,type,origin,playerId:'same-player',requestId:jobId,...extra});
@@ -176,7 +178,7 @@ test('consulta remove resultados expirados e late event não ressuscita jobs rem
 });
 test('orçamento de sessão remove somente resultados antigos, rejeita novo excesso e não trunca ativos',async()=>{
  const e=environment(),r=e.registry,content='a'.repeat(2200000);await r.start(job('t1','TTS',{text:content}));assert.equal((await r.get()).jobs[0].text.length,content.length);
- await assert.rejects(r.start(job('t2','TTS',{text:content})),/4 MB/);assert.equal((await r.get()).jobs.length,1);assert.equal((await r.get()).jobs[0].text,content);
+ await assert.rejects(r.start(job('t2','TTS',{text:content})),/não há tarefa concluída/i);assert.equal((await r.get()).jobs.length,1);assert.equal((await r.get()).jobs[0].text,content);
  await r.event({jobId:'t1',event:'ended',eventSeq:1});await r.start(job('t2','TTS',{text:content}));const state=await r.get();assert.equal(state.jobs.length,1);assert.equal(state.jobs[0].jobId,'t2');assert.equal(state.jobs[0].text,content);assert.equal(e.history().recentItems[0].text,content);assert.ok(Buffer.byteLength(JSON.stringify(e.data[GlobalJobs.STORAGE_KEY]))<=GlobalJobs.SESSION_BUDGET);
 });
 test('falha de histórico não impede persistir/confirmar final e mantém texto copiável',async()=>{
@@ -247,7 +249,7 @@ test('TTS parado editável; pausado ainda pertence à reprodução e não aceita
 });
 test('rotação do cache não descarta edição TTS nem cópia STT ainda não arquivadas',async()=>{
  const e=environment({history:{enabled:true,maxEntries:1,recentItems:[]}}),r=e.registry;await r.start(job('audio','TTS',{text:'Já narrado.'}));await r.event({jobId:'audio',event:'ended',eventSeq:1});await r.edit({jobId:'audio',text:'Edição ainda não narrada.'});await r.start(job('speech'));await r.event({jobId:'speech',event:'stt-final',text:'Original.',eventSeq:1});await r.insertion({jobId:'speech',inserted:true},origin);await r.edit({jobId:'speech',text:'Cópia não arquivada.'});await r.start(job('new','TTS',{text:'Novo.'}));await r.event({jobId:'new',event:'ended',eventSeq:1});
- const state=await r.get();assert.equal(state.jobs.find(j=>j.jobId==='audio').text,'Edição ainda não narrada.');assert.equal(state.jobs.find(j=>j.jobId==='speech').workingText,'Cópia não arquivada.');await r.clearHistory();assert.deepEqual((await r.get()).jobs.map(j=>j.jobId),['audio']);
+ const state=await r.get();assert.equal(state.jobs.find(j=>j.jobId==='audio').text,'Edição ainda não narrada.');assert.equal(e.archived.get('speech').task.workingText,'Cópia não arquivada.');assert.equal(e.archived.get('speech').task.text,'Original.');assert.ok(!state.jobs.some(j=>j.jobId==='speech'));await r.clearHistory();assert.deepEqual((await r.get()).jobs.map(j=>j.jobId),['audio']);
 });
 test('Play global pausa a reprodução ativa oculta e retoma a selecionada',async()=>{
  const e=backgroundEnvironment(),offscreen={url:'chrome-extension://test/offscreen.html'},panel={url:'chrome-extension://test/task.html?jobId=anything'};
@@ -468,4 +470,15 @@ test('fronteiras do transcript sobrevivem ao worker, chegam ao editor e rejeitam
  await flow.run('LIVE_OFFSCREEN_EVENT',{jobId:'editor-boundaries',event:'stt-segment',eventSeq:1,text:'Um.',confirmedText:'Um.',textBoundaries:[[1,3]]},{url:'chrome-extension://test/offscreen.html'});
  for(let i=0;i<10;i++)await new Promise(resolve=>setImmediate(resolve));
  assert.deepEqual(JSON.parse(JSON.stringify(flow.sent.find(packet=>packet.message?.editorDelivery)?.message.payload.textBoundaries)),[[1,3]]);
+});
+
+test('Lens mantém modo e persona de leitura no histórico e na reabertura',async()=>{
+ const e=environment(),r=e.registry;
+ await r.start(job('lens-history','TTS',{source:'lens',lensMode:'interpret'}));
+ await r.selectionResult({jobId:'lens-history',text:'Análise completa.',lensReadingInstruction:'Voz guardada.'});
+ await r.preparePlayback({jobId:'lens-history',requestId:'audio'});
+ await r.event({jobId:'lens-history',requestId:'audio',event:'ended',eventSeq:1});
+ const entry=e.history().recentItems[0];assert.equal(entry.source,'lens');assert.equal(entry.lensMode,'interpret');assert.equal(entry.lensReadingInstruction,'Voz guardada.');
+ const reopened=GlobalJobs.create({...e.services,storage:{get:async()=>({}),set:async()=>{}}});
+ const state=await reopened.reopen('lens-history'),restored=state.jobs[0];assert.equal(restored.source,'lens');assert.equal(restored.lensMode,'interpret');assert.equal(restored.lensReadingInstruction,'Voz guardada.');assert.equal(restored.text,'Análise completa.');
 });

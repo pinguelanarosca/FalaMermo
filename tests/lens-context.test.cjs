@@ -222,3 +222,17 @@ test('contexto invalidado enquanto aguarda recebe recuperação na resposta', ()
     env.state.reply({success:false,error:'Timeout global de 30s excedido no fluxo do Gemini Lens.'});
     assertRecovery(env);
 });
+
+test('gestos propagam explicitamente literal e interpret sem duplicar captura',()=>{
+ for(const mode of ['literal','interpret']){
+  const env=createLens();env.lens.startDragSelection(110,100,'custom-agent',mode);
+  const up=new Event('mouseup');Object.assign(up,{clientX:10,clientY:20});env.window.dispatchEvent(up);
+  assert.equal(env.state.sends.length,1);assert.equal(env.state.sends[0].payload.mode,mode);
+ }
+});
+test('Ctrl/Alt/Meta combinados não disparam gesto ambíguo e atalho mantém modo literal',()=>{
+ const source=fs.readFileSync(contentPath,'utf8'),a=source.indexOf('    // 5. Ctrl+Shift+Arrastar'),b=source.indexOf('    // Listener para mensagens',a),calls=[];let handler;
+ vm.runInNewContext(source.slice(a,b),{window:{addEventListener:(_type,fn)=>handler=fn},cachedActiveAgentId:'a',lensController_1:{lens:{startDragSelection:(...args)=>calls.push(args)}}});
+ for(const modifiers of [{ctrlKey:true,altKey:false},{ctrlKey:false,altKey:true},{ctrlKey:true,altKey:true},{ctrlKey:true,altKey:false,metaKey:true}])handler({shiftKey:true,button:0,preventDefault(){},...modifiers});
+ assert.equal(calls.length,2);assert.equal(calls[0][3],'literal');assert.equal(calls[1][3],'interpret');
+});

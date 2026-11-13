@@ -1,6 +1,7 @@
 (function(root,factory){const api=factory(root);if(typeof module==='object'&&module.exports)module.exports=api;else root.LiveSttDiagnostics=api;})(globalThis,function(root){
 'use strict';
 const STORAGE_KEY='liveSttDiagnosticsV1',TTL=86400000,MAX_JOBS=8,MAX_EVENTS=40;
+const MAX_SEGMENTS=32,MAX_SESSIONS=64;
 const stages=new Set(['starting','microphone-open','worklet-ready','capture-running','capture-progress','capture-stopping','capture-released','setup-complete','audio-sent','input-transcription','input-interim','server-event','server-message','message-parse-error','socket-close','turn-complete','activity-end','final','error','cancelled','inserted','insertion-failed','queue-draining','awaiting-gemini','flush-timeout','ack-timeout','inserting','transform-start','transform-complete','event-delivery-error']);
 for(const stage of ['chunk-created','chunk-queued','chunk-send','chunk-response','chunk-merge','chunk-error','vad-silence'])stages.add(stage);
 for(const stage of ['connecting','first-pcm','consolidated'])stages.add(stage);
@@ -8,12 +9,13 @@ for(const stage of ['capture-ending','capture-state','session-ending'])stages.ad
 for(const stage of ['chunk-unresolved','chunk-no-speech','chunk-degraded','session-resuming','session-resumed','session-remote-wait'])stages.add(stage);
 for(const stage of ['editor-dispatch','editor-apply','editor-ack','editor-delivery-missed','editor-delivery-exhausted'])stages.add(stage);
 const enums={scope:['capture','transport','result'],contextState:['running','suspended','closed','interrupted'],trackState:['live','ended'],vad:['manual','automatic'],voiceActivity:['ACTIVITY_START','ACTIVITY_END','TYPE_UNSPECIFIED'],interactionStatus:['IDLE','IN_PROGRESS'],outcome:['NO_CAPTURE','CAPTURE_NOT_SENT','NO_TRANSCRIPTION','INTERIM_ONLY','TIMEOUT','CONNECTION','CANCELLED','INVALIDATED_CONTEXT','FINAL','INSERTED','INSERTION_FAILED'],modelId:['gemini-3.8-live','gemini-3.8-live-extended-thinking','gemini-3.1-flash-live-preview','gemini-2.5-flash-native-audio-preview-12-2025']};
-for(const stage of ['vad-selected','vad-ready','vad-fallback'])stages.add(stage);
-enums.detector=['hybrid','rms'];
-enums.vadFallbackReason=['prepare','not-ready','backpressure','deadline','analysis','manual'];
+for(const stage of ['vad-selected','vad-ready','vad-fallback','vad-decision','vad-recovered'])stages.add(stage);
+enums.detector=['hybrid','rms','dual'];
+enums.vadFallbackReason=['prepare','not-ready','backpressure','deadline','analysis','manual','recovered','recovery-failed','buffer-limit','preserving'];
 enums.vadFailureCode=['VAD_CAPTURE_MISSING','VAD_ORIGIN','VAD_SEQUENCE','VAD_PCM','VAD_OPERATION','VAD_HOST_ERROR','VAD_WORKER_DISPOSED','VAD_WORKER_ERROR','VAD_CANCELLED'];
 const numbers=['sourceRate','sampleRate','trackSampleRate','trackChannels','capturedFrames','captureChunks','capturedBytes','ackChunks','ackBytes','peak','maxRms','signalSamples','pcmSamples','pcmPeak','pcmMaxRms','pcmSignalSamples','nonFiniteSamples','receivedChunks','receivedBytes','sentChunks','sentBytes','bufferedAmount','activityStarts','activityEnds','streamEnds','closeCode','serverMessages','messagesAfterEnd','setupMessages','resumptionMessages','usageMessages','goAwayMessages','toolMessages','serverContentMessages','errorMessages','unknownMessages','parseErrors','voiceActivityEvents','voiceStarts','voiceEnds','modelTurnEvents','outputEvents','inputEvents','interimEvents','characters','sequence','elapsedMs','firstAudioMs','lastAudioMs','audioEndMs','firstServerAfterEndMs','sendIntervalMinMs','sendIntervalMaxMs','pcmDurationMs'];
-numbers.push('vadSequence','vadElapsedMs');
+numbers.push('vadSequence','vadElapsedMs','tenFrames','tenMaxProbability','sileroProbability','tenProbability','dualConfirmations','dualRejections','deadlines','recoveries');
+numbers.push('vadSequenceStart','vadSequenceEnd','voicedPacketMs','basePacketMs','rescuePacketMs','rmsPacketMs','analyzedFrames','hybridFrames','rescueFrames','sileroMaxProbability','inputLineBreaks','interimLineBreaks','textLineBreaks');
 numbers.push('queuedChunks','queuedBytes','pendingChunks','pendingBytes','forwardedChunks','forwardedBytes','ackTimeouts','flushTimeouts','queueWaitMs','maxQueueWaitMs','insertionAttempts','transformDurationMs');
 numbers.push('startMs','endMs','durationMs','overlapMs','latencyMs','meanChunkLatencyMs','skippedSilenceMs');
 numbers.push('socketOpenMs','setupCompleteMs','admissionMs','firstPcmMs','firstResponseMs','firstInsertionMs','insertionDurationMs','confirmationWaitMs','stopToFinalMs','revision','editorReceivedMs','publicationToEditorMs','dispatchToEditorMs');
@@ -30,14 +32,14 @@ enums.editorReason=['INSERTED','UNCHANGED','ALREADY_INSERTED','EMPTY_TEXT','WAIT
  'AUDIO_BOUNDARY_UNCONFIRMED','SEGMENT_SENT','MANUAL_EDIT_PRESERVED','EDITOR_ERROR','FINAL_ALREADY_APPLIED','ORIGIN_LOST','EDITOR_ACK_MISSING','EDITOR_ACK_MISMATCH','EDITOR_ACK_TIMEOUT','EDITOR_MESSAGE_FAILED'];
 numbers.push('appliedRevision','ackRevision','publishedRevision','deliveryAttempt');
 const booleans=['chunked','transform','finalInsertion','whileRecording','trackMuted','trackEnabled','microphoneOpened','workletReady','nodesConnected','released','setupComplete','inputTranscriptionConfigured','turnComplete','inputFinished','generationComplete','interrupted','waitingForInput','afterAudioEnd','localClose','inserted','flushAcknowledged','socketOpen','insertionVerified','provisional'];
-booleans.push('ackAccepted','incomplete');
+booleans.push('ackAccepted','incomplete','afterNewSpeech');
 const serverTypes=['setupComplete','sessionResumptionUpdate','usageMetadata','goAway','toolCall','toolCallCancellation','serverContent','voiceActivity','error'],contentTypes=['inputTranscription','interimInputTranscription','outputTranscription','modelTurn','turnComplete','generationComplete','interrupted','waitingForInput','interactionStatus'];
 function sanitizeEditorSnapshot(snapshot){
  if(!snapshot||typeof snapshot!=='object')return undefined;
  const safe={};
  if(['input','textarea','contenteditable'].includes(snapshot.kind))safe.kind=snapshot.kind;
  if(enums.editorReason.includes(snapshot.invalidReason))safe.invalidReason=snapshot.invalidReason;
- for(const key of ['fieldCharacters','ownedCharacters','ownedStart','ownedEnd','selectionStart','selectionEnd','writes','rebinds','externalInputs']){
+ for(const key of ['fieldCharacters','fieldLineBreaks','ownedCharacters','ownedStart','ownedEnd','selectionStart','selectionEnd','writes','rebinds','externalInputs']){
   if(Number.isSafeInteger(snapshot[key])&&snapshot[key]>=0&&snapshot[key]<=1e9)safe[key]=snapshot[key];
  }
  for(const key of ['connected','editable','focused','hasOwned','ownedMatches','valueMatches','rangeAttached','singleTextNode','selectionInside','selectionCollapsed','lastInputTrusted']){
@@ -81,6 +83,11 @@ function clean(raw,now=Date.now()){
   const events=(old.events||[]).map(e=>{const safe=sanitize(e);return safe?{...safe,at:Number.isFinite(e.at)?e.at:now}:null;}).filter(Boolean).slice(-MAX_EVENTS);
   if(!events.length)continue;
   const job={jobId:events[0].jobId,updatedAt:old.updatedAt,events};
+  for(const [key,limit] of [['segments',MAX_SEGMENTS],['sessions',MAX_SESSIONS]]){
+   const entries=(old[key]||[]).map(sanitize).filter(e=>e?.jobId===job.jobId&&
+    (key==='segments'?e.stage==='chunk-created'&&e.scope==='capture'&&e.chunkId:e.scope==='transport'&&e.sessionId));
+   if(entries.length)job[key]=entries.slice(-limit);
+  }
   for(const scope of enums.scope){const snapshot=sanitize({...old[scope],jobId:job.jobId,scope});if(snapshot)job[scope]=snapshot;}
   const first=sanitize(old.firstEditorDivergence);
   if(first?.jobId===job.jobId&&isEditorDivergence(first))job.firstEditorDivergence={...first,at:Number.isFinite(old.firstEditorDivergence.at)?old.firstEditorDivergence.at:now};
@@ -94,8 +101,20 @@ function record(packet){
   const now=Date.now(),storage=root.chrome.storage.session,state=clean((await storage.get(STORAGE_KEY))[STORAGE_KEY],now);
   let job=state.jobs.find(j=>j.jobId===safe.jobId);
   if(!job){job={jobId:safe.jobId,updatedAt:now,events:[]};state.jobs.unshift(job);}
-  job.updatedAt=now;job[safe.scope]=safe.scope==='editor'?safe:{...job[safe.scope],...safe};
+  // Um snapshot não pode herdar contadores/flags de outra réplica ou do agregado do job.
+  const changedSession=safe.scope==='transport'&&job.transport?.sessionId!==safe.sessionId;
+  job.updatedAt=now;job[safe.scope]=safe.scope==='editor'||changedSession?safe:{...job[safe.scope],...safe};
   const event={...safe,at:now};
+  if(safe.stage==='chunk-created'&&safe.scope==='capture'&&safe.chunkId){
+   job.segments=(job.segments||[]).filter(e=>e.sequence!==safe.sequence);
+   job.segments.push(safe);job.segments=job.segments.slice(-MAX_SEGMENTS);
+  }
+  if(safe.scope==='transport'&&safe.sessionId){
+   job.sessions||=[];
+   const previous=job.sessions.find(e=>e.sessionId===safe.sessionId);
+   job.sessions=job.sessions.filter(e=>e.sessionId!==safe.sessionId);
+   job.sessions.push({...previous,...safe});job.sessions=job.sessions.slice(-MAX_SESSIONS);
+  }
   if(!job.firstEditorDivergence&&isEditorDivergence(event))job.firstEditorDivergence=event;
   job.events.push(event);job.events=job.events.slice(-MAX_EVENTS);
   await storage.set({[STORAGE_KEY]:clean(state,now)});return{success:true};

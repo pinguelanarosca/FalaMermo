@@ -64,12 +64,12 @@
     const minimize=element('button','','Minimizar'),visibility=element('button','','Ocultar HUD');minimize.type=visibility.type='button';
     toolbar.append(minimize,visibility);head.append(heading,toolbar);
     const message=element('div','fm-global-message');message.setAttribute('role','status');message.setAttribute('aria-live','polite');
-    const localNotice=element('div','fm-global-message');localNotice.setAttribute('role','alert');
+    const localNotice=element('div','fm-global-message');localNotice.setAttribute('role','status');localNotice.setAttribute('aria-live','polite');
     const list=element('div','fm-global-jobs');list.setAttribute('tabindex','0');list.setAttribute('aria-label','Lista de tarefas');const empty=element('div','fm-global-empty','Nenhuma tarefa disponível.');
     const player=element('div','fm-global-player'),playerState=element('div','fm-global-player-state','Selecione uma narração'),playerButtons=element('div','fm-global-player-buttons'),playerSettings=element('div','fm-global-settings'),seekNote=element('div','fm-global-seek-note',SEEK_LIMITATION);
     player.append(playerState,playerButtons,playerSettings,seekNote);
     root.append(head,message,localNotice,empty,list,player);container.append(style,root);
-    const cards=new Map();let revision=-1,state={visible:false,minimized:false,jobs:[]},destroyed=false,contextExpired=false;
+    const cards=new Map();let revision=-1,state={visible:false,minimized:false,jobs:[]},destroyed=false,contextExpired=false,seenNoticeId=0,noticeTimer=null;
     async function request(type,payload){
       if(contextExpired)throw new Error('Extensão atualizada. Atualize esta página (F5) para usar os controles.');
       let response;try{response=await send({type,payload:payload||{}});}catch(error){if(/extension context invalidated/i.test(error?.message||String(error))){contextExpired=true;setText(message,'Extensão atualizada. Atualize esta página (F5) para usar os controles.');}throw error;}
@@ -203,7 +203,7 @@
     }
     function renderCard(card,job){
       if(!job)return;card.job=job;const audio=audioJob(job),available=audioAvailable(job);
-      setText(card.kind,job.type==='STT'?'🎙 Ditado':job.manual?'✎ Manual':job.source==='lens'?'🔍 Seleção':'🔊 Narração');setText(card.status,job.type==='STT'&&job.narration&&!['ready','completed','cancelled','error'].includes(audio.status)?'Narração · '+(STATUS[audio.status]||'Gerando'):(STATUS[job.status]||'Em andamento'));card.node.dataset.active=String(activeJob()?.jobId===job.jobId);card.node.setAttribute('aria-current',String(activeJob()?.jobId===job.jobId));
+      setText(card.kind,job.type==='STT'?'🎙 Ditado':job.manual?'✎ Manual':job.source==='lens'?(job.lensMode==='interpret'?'🔍 Análise':'🔍 Leitura'):'🔊 Narração');setText(card.status,job.type==='STT'&&job.narration&&!['ready','completed','cancelled','error'].includes(audio.status)?'Narração · '+(STATUS[audio.status]||'Gerando'):(STATUS[job.status]||'Em andamento'));card.node.dataset.active=String(activeJob()?.jobId===job.jobId);card.node.setAttribute('aria-current',String(activeJob()?.jobId===job.jobId));
       const short=availableText(job).replace(/\s+/g,' ').trim().slice(0,80)||(job.manual?'Texto manual':job.type==='STT'?'Microfone':job.source==='lens'?'Área selecionada':'Gemini Live');setText(card.description,short);card.description.title=short;
       const source=job.origin||{};setText(card.origin,number(source.tabId)!==null&&source.tabId>0?`Origem: aba ${source.tabId}${number(source.frameId)!==null&&source.frameId!==0?' · frame '+source.frameId:''}`:'Origem: painel da extensão');if(options.jobId)setText(card.origin,card.origin.textContent+' · Agente: '+text(job.agentId)+' · Criado: '+(Number.isFinite(job.createdAt)?new Date(job.createdAt).toLocaleString('pt-BR'):'—')+' · ID: '+job.jobId);
       setText(card.progress,progressLabel(job.narration?.progress||job.progress));card.progress.hidden=!card.progress.textContent;
@@ -233,6 +233,7 @@
       const nextRevision=number(next.revision);if(nextRevision!==null&&nextRevision<=revision)return false;
       if(nextRevision!==null)revision=nextRevision;
       state={...next,visible:!!next.visible,minimized:!!next.minimized,jobs:Array.isArray(next.jobs)?[...next.jobs].sort((a,b)=>(b.createdAt||0)-(a.createdAt||0)||b.jobId.localeCompare(a.jobId)):[]};
+      if(typeof next.notice==='string'&&next.noticeId&&next.noticeId!==seenNoticeId){seenNoticeId=next.noticeId;setText(localNotice,next.notice);clearTimeout(noticeTimer);noticeTimer=setTimeout(()=>{if(localNotice.textContent===next.notice)setText(localNotice,'');},5000);}
       renderPanic();
       root.hidden=options.panel?false:!state.visible;root.dataset.minimized=String(!options.panel&&!options.embedded&&!options.jobId&&state.minimized);
       setText(minimize,state.minimized?'Expandir':'Minimizar');minimize.setAttribute('aria-expanded',String(!state.minimized));setText(visibility,state.visible?'Ocultar HUD':'Mostrar HUD');
@@ -256,7 +257,7 @@
     // State arrives through broadcasts; opening/focus restores the authoritative snapshot.
     const beforeClose=event=>{if([...cards.values()].some(card=>card.dirty)){event.preventDefault();event.returnValue='Há uma edição não salva.';}};win?.addEventListener?.('beforeunload',beforeClose);
     const ready=refresh();
-    renderPlayer();return{update,refresh,ready,seekWords,notice(value){if(!destroyed)setText(localNotice,text(value).slice(0,1000));},destroy(){destroyed=true;if(agentListener)globalThis.chrome?.storage?.onChanged?.removeListener(agentListener);globalThis.chrome?.runtime?.onMessage?.removeListener(listener);win?.removeEventListener?.('focus',reconnect);win?.removeEventListener?.('pageshow',reconnect);doc.removeEventListener?.('visibilitychange',reconnect);win?.removeEventListener?.('beforeunload',beforeClose);cards.clear();root.remove();style.remove();}};
+    renderPlayer();return{update,refresh,ready,seekWords,notice(value){if(!destroyed)setText(localNotice,text(value).slice(0,1000));},destroy(){destroyed=true;clearTimeout(noticeTimer);if(agentListener)globalThis.chrome?.storage?.onChanged?.removeListener(agentListener);globalThis.chrome?.runtime?.onMessage?.removeListener(listener);win?.removeEventListener?.('focus',reconnect);win?.removeEventListener?.('pageshow',reconnect);doc.removeEventListener?.('visibilitychange',reconnect);win?.removeEventListener?.('beforeunload',beforeClose);cards.clear();root.remove();style.remove();}};
   }
   return{mount,availableText,progressLabel,SEEK_LIMITATION,AGENTS};
 });

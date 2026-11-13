@@ -179,9 +179,9 @@ function initialize() {
     });
     // 5. Ctrl+Shift+Arrastar: Gemini Lens (Seleção retangular na página)
     window.addEventListener('mousedown', (e) => {
-        if (e.ctrlKey && e.shiftKey && e.button === 0) {
+        if (e.shiftKey && !e.metaKey && e.button === 0 && (e.ctrlKey !== e.altKey)) {
             e.preventDefault();
-            lensController_1.lens.startDragSelection(e.clientX, e.clientY, cachedActiveAgentId);
+            lensController_1.lens.startDragSelection(e.clientX, e.clientY, cachedActiveAgentId, e.altKey?'interpret':'literal');
         }
     });
     // Listener para mensagens vindas do Background / Popup / Menus
@@ -1561,13 +1561,13 @@ class SttController {
             }});
             capture.chunker=new globalThis.SttRealtime.CapturePipeline({jobId,realtime:true,continuous:true,adaptive:job.mode==='realtime',submitAudioChunk:packet=>this.submitAudioChunk(capture,packet),onDiagnostic:packet=>globalThis.LiveSttDiagnostics?.capture(capture,packet.stage,packet)});
             if(opened.localVad)this.attachLocalVad(capture);
-            else globalThis.LiveSttDiagnostics?.capture(capture,'vad-selected',{detector:'rms'});
+            else throw Error('A dupla confirmação Silero + TEN não foi disponibilizada.');
             node.port.onmessage=event=>{
                 if(event.data?.type==='flushed'){if(capture.segmentCut){const cut=capture.segmentCut;capture.segmentCut=null;clearTimeout(cut.timer);const close=()=>{capture.chunker?.closeChunk('silence');return capture.chunker?.sequence;};if(capture.vad)capture.vad.barrier(close).then(cut.resolve,cut.reject);else cut.resolve(close());return;}capture.flushAcknowledged=true;capture.flushed?.();return;}
                 if(!current()||(capture.vad&&capture.stopping&&capture.flushAcknowledged))return;
                 try{
                 const final=event.data?.type==='vad-final-pcm',input=new Float32Array(final?event.data.pcm:event.data),pcm=this.resamplePcm16(input,ctx.sampleRate,16000);if(!pcm.length)return;if(globalThis.LiveSttDiagnostics?.observe)globalThis.LiveSttDiagnostics.observe(capture,input,pcm);else{const m=capture.metrics;m.capturedBytes=(m.capturedBytes||0)+pcm.byteLength;m.captureChunks=(m.captureChunks||0)+1;m.capturedFrames=(m.capturedFrames||0)+input.length;}let raw='';if(!capture.chunker)for(let i=0;i<pcm.length;i+=0x8000)raw+=String.fromCharCode(...pcm.subarray(i,i+0x8000));const audioBase64=capture.chunker?undefined:btoa(raw);
-                if(capture.vad)capture.vad.push(pcm,final);else if(capture.chunker)capture.chunker.push(pcm);else capture.audioQueue.push({jobId,playerId:jobId,generation,audioBase64,sampleRate:16000},pcm.byteLength);capture.pending=capture.audioQueue.tail;
+                if(capture.vad)capture.vad.push(pcm,final);else if(capture.chunker)throw Error('Dupla confirmação indisponível.');else capture.audioQueue.push({jobId,playerId:jobId,generation,audioBase64,sampleRate:16000},pcm.byteLength);capture.pending=capture.audioQueue.tail;
                 this.liveAudioPending=capture.pending;
                 }catch(error){void Promise.resolve().then(()=>capture.audioQueue.onFailure(error)).catch(failure=>this.reportRuntimeError(failure));}
             };
@@ -1602,22 +1602,27 @@ class SttController {
         pipeline.config.preRollMs=800;
         const vad=capture.vad=new CaptureVad({
             analyze:({pcm,seq,final})=>send('analyze',{seq,final,clientSentAt:performance.timeOrigin+performance.now(),pcm:btoa(String.fromCharCode(...pcm))}),
-            consume:(pcm,decision)=>pipeline.push(pcm,decision===undefined?undefined:decision.base||(!pipeline.chunk&&decision.weak)),
+            consume:(pcm,decision)=>pipeline.push(pcm,decision.base||Boolean((pipeline.chunk||pipeline.pendingActivityEnd)&&decision.continuation),decision),
+            recover:()=>{opening=send('open');return opening;},
+            preserve:packets=>send('preserve',{packets:packets.map(item=>({pcm:btoa(String.fromCharCode(...item.pcm)),captureStartMs:item.captureStartMs,captureEndMs:item.captureEndMs}))}).then(result=>{if(!result?.ok)throw Error('PCM não preservado.');}),
+            onDecision:(decision,metrics)=>{
+                const e=decision.evidence||{};
+                hudController_1.hud.setCaptureNotice('Silero '+((e.sileroProbability||0)*100).toFixed(1)+'% · TEN '+((e.tenProbability||0)*100).toFixed(1)+'% · '+(decision.base?'confirmado':'sem dupla confirmação')+' · recuperações '+metrics.recoveries);
+                globalThis.LiveSttDiagnostics?.capture(capture,'vad-decision',{detector:'dual',...e,deadlines:metrics.deadlines,recoveries:metrics.recoveries});
+            },
             onFallback:reason=>{
+                if(reason==='preserving'){capture.unwatch?.();capture.node?.disconnect();capture.source?.disconnect();capture.stream?.getTracks().forEach(track=>track.stop());}
                 const detail=capture.vad.metrics.fallbackAt||{};
-                globalThis.LiveSttDiagnostics?.capture(capture,'vad-fallback',{
-                    detector:'rms',vadFallbackReason:reason,
-                    vadSequence:detail.sequence,vadElapsedMs:detail.elapsedMs,
-                    vadFailureCode:detail.responseValidation?.code,
+                globalThis.LiveSttDiagnostics?.capture(capture,reason==='recovered'?'vad-recovered':'vad-fallback',{
+                    detector:'dual',vadFallbackReason:reason,vadSequence:detail.sequence,vadElapsedMs:detail.elapsedMs,
+                    deadlines:capture.vad.metrics.deadlines,recoveries:capture.vad.metrics.recoveries,
                 });
-                hudController_1.hud.setCaptureNotice(reason==='manual'?'Detector RMS selecionado.':'Detector RMS ativo · Silero indisponível ('+reason+').');
-                pipeline.config.preRollMs=globalThis.SttRealtime.CONFIG.preRollMs;
-                capture.closeVad(true);
+                hudController_1.hud.setCaptureNotice(reason==='recovered'?'Silero + TEN recuperados.':'Silero + TEN: '+reason+' · PCM em buffer, envio aguardando validação.');
             },
             onFailure:error=>void Promise.resolve().then(()=>capture.audioQueue.onFailure(error)).catch(failure=>this.reportRuntimeError(failure)),
         });
         const changed=(changes,area)=>{
-            if(area==='local'&&changes[SETTING]&&changes[SETTING].newValue==='rms')vad.fallback('manual');
+            // A seleção antiga de RMS não autoriza mais o envio de áudio.
         };
         chrome.storage.onChanged.addListener(changed);
         globalThis.LiveSttDiagnostics?.capture(capture,'vad-selected',{detector:'hybrid'});
@@ -1626,7 +1631,7 @@ class SttController {
             if(ready)globalThis.LiveSttDiagnostics?.capture(capture,'vad-ready',{detector:'hybrid'});
         });
         void chrome.storage.local.get(SETTING).then(settings=>{
-            if(settings[SETTING]==='rms')vad.fallback('manual');
+            // O fluxo usa sempre confirmação Silero + TEN.
         }).catch(()=>vad.fallback('prepare'));
     }
     cutDictationSegment(capture){
@@ -1773,7 +1778,8 @@ class SttController {
         if(payload.editorDelivery){
             if(result.inserted)job.appliedEditorRevision=payload.eventSeq;
             if(editorTrace&&(first||final||!result.inserted||!payload.partialText))void globalThis.LiveSttDiagnostics.emit({
-                jobId:job.jobId,scope:'editor',stage:'editor-apply',revision:payload.eventSeq,
+                jobId:job.jobId,scope:'editor',stage:'editor-apply',revision:payload.eventSeq,sequence:payload.sequence,
+                textLineBreaks:typeof text==='string'?(text.match(/\n/g)||[]).length:0,
                 appliedRevision:job.appliedEditorRevision||0,characters:text?.length||0,
                 inserted:result.inserted,editorReason:result.reason,insertionMode:job.mode,
                 finalInsertion:final,provisional:!!payload.partialText,...editorTrace
@@ -3215,7 +3221,7 @@ class LensController {
      * Ativa o modo de seleção Gemini Lens por atalho de teclado ou botão do HUD/Popup.
      * Exibe aviso no topo da tela e aguarda o clique e arraste do usuário.
      */
-    activateLensMode(agentId = 'narrator') {
+    activateLensMode(agentId = 'narrator', mode = 'literal') {
         if (!this.ensureExtensionContext())
             return;
         if (this.isSelecting)
@@ -3294,7 +3300,7 @@ class LensController {
                         width,
                         height,
                         devicePixelRatio: window.devicePixelRatio || 1,
-                    }, agentId);
+                    }, agentId, mode);
                 }
                 else {
                     this.cleanup();
@@ -3309,7 +3315,7 @@ class LensController {
     /**
      * Inicia a seleção imediatamente quando acionada por Ctrl+Shift+Mousedown (arraste direto).
      */
-    startDragSelection(clientX, clientY, agentId = 'narrator') {
+    startDragSelection(clientX, clientY, agentId = 'narrator', mode = 'literal') {
         if (!this.ensureExtensionContext())
             return;
         if (this.isSelecting)
@@ -3358,7 +3364,7 @@ class LensController {
                     width,
                     height,
                     devicePixelRatio: window.devicePixelRatio || 1,
-                }, agentId);
+                }, agentId, mode);
             }
             else {
                 this.cleanup();
@@ -3379,7 +3385,7 @@ class LensController {
         this.boxElement.style.width = `${width}px`;
         this.boxElement.style.height = `${height}px`;
     }
-    submitSelection(rect, agentId = 'narrator') {
+    submitSelection(rect, agentId = 'narrator', mode = 'literal') {
         this.cleanup();
         if (!this.ensureExtensionContext())
             return;
@@ -3393,6 +3399,7 @@ class LensController {
                     instruction: undefined,
                     rect,
                     agentId,
+                    mode,
                 },
             }, (response) => {
                 let runtimeError;

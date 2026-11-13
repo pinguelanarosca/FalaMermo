@@ -3,6 +3,7 @@ import './tts-adaptive.js';
 import './live-config.js';
 import './live-tts-diagnostics.js';
 import './live-stt-diagnostics.js';
+import './task-archive.js';
 import './global-jobs.js';
 import './stt-scheduler.js';
 (()=>{
@@ -240,12 +241,13 @@ function ttsStartKey(sender,playback){
 const allowedHudSender=sender=>Boolean(sender.tab?.id||cleanPage(sender));
 const vadSetting='sttVadDetector';
 let vadOwner;
-const hybridRequested=async()=> (await chrome.storage.local.get(vadSetting))[vadSetting]!=='rms';
+const hybridRequested=async()=>true;
 const sameVadOwner=(payload,sender)=>Boolean(vadOwner&&payload)&&vadOwner.id===payload.jobId&&
     vadOwner.generation===payload.generation&&vadOwner.documentId===sender.documentId&&
-    vadOwner.tabId===sender.tab?.id&&vadOwner.frameId===sender.frameId;
+    vadOwner.tabId===sender.tab?.id&&vadOwner.frameId===sender.frameId&&vadOwner.page===(sender.tab?undefined:cleanPage(sender));
 const viewHud=(state,viewer)=>globalThis.GlobalJobs.forHud(state,viewer?.page?0:viewer?.tabId);
 const globalJobs=globalThis.GlobalJobs.create({storage:chrome.storage?.session,
+ taskArchive:globalThis.TaskArchive.getDefault(),
  warn:message=>console.warn('[GlobalJobs]',message),
  getHistory:()=>chromeStorageAdapter_1.chromeStorage.get('history'),
  updateHistory:fn=>chromeStorageAdapter_1.chromeStorage.update('history',fn),
@@ -587,6 +589,12 @@ async function handleExtensionMessage(message, sender, guiJob, signal) {
             case 'HUD_GLOBAL_REOPEN':
                 if(!allowedHudSender(sender))return{success:false};
                 await recoverGlobalJobs();return{success:true,state:await globalJobs.reopen(message.payload?.jobId)};
+            case 'HUD_GLOBAL_PIN':
+                if(cleanPage(sender)!=='options.html')return{success:false,error:'Fixação disponível nas opções.'};
+                await recoverGlobalJobs();return{success:true,state:await globalJobs.pin(message.payload?.jobId,message.payload?.pinned===true)};
+            case 'STT_RECOVERY_ARCHIVED':
+                if(sender.url!==chrome.runtime.getURL('offscreen.html'))return{success:false};
+                await recoverGlobalJobs();return{success:true,state:await globalJobs.recoveryArchived(message.payload?.count)};
             case 'HUD_GLOBAL_UI_SET': {
                 if(!allowedHudSender(sender))return{success:false};
                 const payload=message.payload||{},origin=senderOrigin(sender);
@@ -756,7 +764,7 @@ async function handleExtensionMessage(message, sender, guiJob, signal) {
                     await backgroundPlayback_1.reserveIntent?.(intent);
                     const agent=sender.url?.split(/[?#]/)[0]===chrome.runtime.getURL('options.html')&&message.payload.previewAgent?message.payload.previewAgent:globalThis.LiveConfig.resolveAgent(settings.agents,agentId,defaultAgents_1.DEFAULT_AGENTS,defaultAgents_1.AGENT_ID_ALIASES);
                     const live=globalThis.LiveConfig.migrateAgent(agent,settings.models).live,liveOptions=globalThis.LiveConfig.buildAgentLiveOptions(agent,settings.audio,settings.models);
-                    if(guiJob?.source==='lens'){liveOptions.literalSelection=true;liveOptions.systemInstruction=globalThis.LiveConfig.LITERAL_NARRATION;}
+                    if(guiJob?.source==='lens'){liveOptions.literalSelection=true;liveOptions.selectionReadingInstruction=guiJob.lensMode==='interpret'?'':guiJob.lensReadingInstruction??globalThis.LiveConfig.lensInstructions(agent).lensReadingInstruction;liveOptions.systemInstruction=liveOptions.selectionReadingInstruction||globalThis.LiveConfig.LITERAL_NARRATION;}
                     const model=globalThis.LiveConfig.LIVE_TTS_MODELS.includes(live.preferredModel)?live.preferredModel:globalThis.LiveConfig.DEFAULTS.ttsModelId;
                     const models=globalThis.LiveConfig.modelChain('tts',model);
                     const keyOrderByModel=await liveKeyOrders(models,keys);
@@ -765,7 +773,7 @@ async function handleExtensionMessage(message, sender, guiJob, signal) {
                     await recoverGlobalJobs();
                     payload.globalVolume=(await globalJobs.get()).playback.volume;
                     if(guiJob)await globalJobs.preparePlayback(payload,signal);
-                    else await globalJobs.start({...payload,type:'TTS',origin:senderOrigin(sender),agentId:agent.metadata.id},undefined,signal);
+                    else await globalJobs.start({...payload,type:'TTS',origin:senderOrigin(sender),agentId:agent.metadata.id,agentSnapshot:agent},undefined,signal);
                     const playbackSender=guiJob?.origin.tabId?{...sender,tab:{id:guiJob.origin.tabId},frameId:guiJob.origin.frameId,...(guiJob.origin.documentId?{documentId:guiJob.origin.documentId}:{})}:sender;
                     let result;try{result=await backgroundPlayback_1.handlePlaybackCommand(payload,playbackSender,undefined,signal);signal?.throwIfAborted();if(!result?.success)throw new Error(result?.error||'Falha no TTS Live.');}catch(error){if(signal?.aborted)throw error;if(payload.narration)await globalJobs.event({jobId:payload.jobId,requestId:payload.requestId,narration:true,event:'error',error:error.message});else await globalJobs.fail(payload.jobId,error.message);throw error;}
                     return {success:true,data:{jobId:payload.jobId,modelUsed:model,blocks:result.blocks,live:true}};
@@ -924,15 +932,15 @@ async function handleExtensionMessage(message, sender, guiJob, signal) {
                 await recoverGlobalJobs();
                 const sttRecognition=globalThis.LiveConfig.normalizeSttRecognition(settings.sttRecognition);
                 const payload={...message.payload,schedulerPolicy:globalThis.SttScheduler.policy(settings.api?.sttScheduler),agentId:agent.metadata.id,operation:'STT_LIVE_START',apiKeys:keys,modelId,models,sttRecognition,thinkingLevel:stt.thinkingLevel,thinkingBudget:stt.thinkingBudget,vad:stt.vad,transformInstruction:transform?instruction:null,transformModels:globalThis.LiveConfig.modelChain('tts',migrated.live.preferredModel),voiceName:migrated.live.voiceName,playerId:message.payload.playerId||message.payload.jobId};
-                await globalJobs.start({...payload,type:'STT',origin:senderOrigin(sender),agentId:agent.metadata.id},'start-stt',signal);
+                await globalJobs.start({...payload,type:'STT',origin:senderOrigin(sender),agentId:agent.metadata.id,agentSnapshot:agent},'start-stt',signal);
                 try{const result=await backgroundPlayback_1.handlePlaybackCommand(payload,sender,async()=>{
                     const job=await globalJobs.find({jobId:payload.jobId});
                     return job?.originAvailable&&globalThis.GlobalJobs.holdsMicrophone(job)&&job.status==='connecting';
                 },signal);signal?.throwIfAborted();if(!result?.success)throw new Error(result?.error||'Falha no STT Live.');
-                    if(sender.tab?.id&&payload.editorDelivery===true&&
+                    if((sender.tab?.id&&payload.editorDelivery===true||cleanPage(sender)==='options.html')&&
                         await hybridRequested().catch(()=>false)){
                         signal?.throwIfAborted();
-                        vadOwner={id:payload.jobId,generation:payload.generation,documentId:sender.documentId,tabId:sender.tab.id,frameId:sender.frameId};
+                        vadOwner={id:payload.jobId,generation:payload.generation,documentId:sender.documentId,tabId:sender.tab?.id,frameId:sender.frameId,page:sender.tab?undefined:cleanPage(sender)};
                         return {...result,localVad:true};
                     }
                     return result;
@@ -941,12 +949,12 @@ async function handleExtensionMessage(message, sender, guiJob, signal) {
             case 'STT_LOCAL_VAD': {
                 const payload=message.payload;
                 if(!sameVadOwner(payload,sender))return{ok:false};
-                const {operation,seq,pcm,final,rollback,clientSentAt}=payload;
+                const {operation,seq,pcm,final,rollback,clientSentAt,packets}=payload;
                 const backgroundAt=performance.timeOrigin+performance.now();
-                if(!['open','analyze','close'].includes(operation))return{ok:false};
+                if(!['open','analyze','close','preserve'].includes(operation))return{ok:false};
                 if(operation==='close')vadOwner=undefined;
-                try{return await backgroundPlayback_1.localVad({operation,id:payload.jobId,seq,pcm,final,rollback,clientSentAt,backgroundAt,
-                    ...(operation==='open'?{origin:{tabId:sender.tab.id,documentId:sender.documentId,frameId:sender.frameId,generation:payload.generation}}:{})});}
+                try{return await backgroundPlayback_1.localVad({operation,id:payload.jobId,seq,pcm,final,rollback,clientSentAt,backgroundAt,packets,
+                    ...(operation==='open'?{origin:{tabId:sender.tab?.id,documentId:sender.documentId,frameId:sender.frameId,generation:payload.generation,page:sender.tab?undefined:cleanPage(sender)}}:{})});}
                 catch{return{ok:false};}
             }
             case 'STT_LIVE_AUDIO':
@@ -982,6 +990,8 @@ async function handleExtensionMessage(message, sender, guiJob, signal) {
                 if (!tabId) {
                     return { success: false, error: 'Aba não identificada para captura visual.' };
                 }
+                const mode=message.payload?.mode??'literal';
+                if(!['literal','interpret'].includes(mode))return{success:false,error:'Modo Lens inválido.'};
                 await recoverGlobalJobs();
                 const controller=new AbortController();
                 const cancel=()=>controller.abort(signal.reason);
@@ -991,7 +1001,7 @@ async function handleExtensionMessage(message, sender, guiJob, signal) {
                 lensOperations.set(jobId,controller);
                 let selectionJob;
                 try {
-                    selectionJob=await globalJobs.start({jobId,type:'TTS',source:'lens',origin:senderOrigin(sender),agentId:message.payload.agentId,collapsed:false},undefined,controller.signal);
+                    selectionJob=await globalJobs.start({jobId,type:'TTS',source:'lens',lensMode:mode,origin:senderOrigin(sender),agentId:message.payload.agentId,collapsed:false},undefined,controller.signal);
                     await (0, diagnosticLogger_1.logDiagnostic)({
                         level: 'info',
                         source: 'LENS',
@@ -999,11 +1009,11 @@ async function handleExtensionMessage(message, sender, guiJob, signal) {
                         message: `Iniciando captura e análise visual Lens para aba ${tabId}`,
                     });
                     const startTime = Date.now();
-                    let resolvedAgentId=message.payload.agentId;
-                    const description = await (0, tabCaptureHandler_1.captureAndAnalyzeTab)(tabId, message.payload.instruction, message.payload.agentId, message.payload.rect, sender.url,id=>{resolvedAgentId=id;},controller.signal);
+                    let resolvedAgentId=message.payload.agentId,readingInstruction;
+                    const description = await (0, tabCaptureHandler_1.captureAndAnalyzeTab)(tabId, message.payload.instruction, message.payload.agentId, message.payload.rect, sender.url,(id,reading)=>{resolvedAgentId=id;readingInstruction=reading;},controller.signal,mode);
                     controller.signal.throwIfAborted();
                     const extractedText=String(description).trim();
-                    selectionJob=await globalJobs.selectionResult({jobId,text:extractedText,agentId:resolvedAgentId,warning:extractedText?'':globalThis.LiveConfig.SELECTION_NO_TEXT},controller.signal);
+                    selectionJob=await globalJobs.selectionResult({jobId,text:extractedText,agentId:resolvedAgentId,lensReadingInstruction:readingInstruction,warning:extractedText?'':globalThis.LiveConfig.SELECTION_NO_TEXT},controller.signal);
                     const durationMs = Date.now() - startTime;
                     await addHistoryLog('vision', description.length > 80 ? description.substring(0, 80) + '...' : description, resolvedAgentId, 'success');
                     await (0, diagnosticLogger_1.logDiagnostic)({
@@ -2521,10 +2531,11 @@ class GeminiDirectClient {
                 const candidate=data.candidates?.[0];
                 if(data.error||data.promptFeedback?.blockReason||candidate?.finishReason&&candidate.finishReason!=='STOP')throw new Error('Resposta de visão bloqueada ou sem conclusão válida.');
                 const text=(candidate?.content?.parts||[]).filter(part=>part.thought!==true&&typeof part.text==='string').map(part=>part.text).join('').trim();
-                return options.literalOcr?JSON.stringify({text:globalThis.LiveConfig.parseSelectionOcr(text)}):text;
+                if(options.selectionMode==='interpret'&&!text)throw new Error('Resposta de interpretação vazia.');
+                return options.literalOcr?JSON.stringify({text:globalThis.LiveConfig.parseSelectionOcr(text)}):options.selectionMode==='interpret'?JSON.stringify({text}):text;
             }});
         });
-        return options.literalOcr?globalThis.LiveConfig.parseSelectionOcr(result):result;
+        return options.literalOcr||options.selectionMode==='interpret'?globalThis.LiveConfig.parseSelectionOcr(result):result;
     }
     async testApiKey(apiKey) {
         try {
@@ -2886,7 +2897,7 @@ const chromeStorageAdapter_1 = __require("extension/src/services/storage/chromeS
 const defaultAgents_1 = __require("shared/constants/defaultAgents.ts");
 const pcmWav_1 = __require("shared/utils/pcmWav.ts");
 const diagnosticLogger_1 = __require("extension/src/services/diagnosticLogger.ts");
-async function captureAndAnalyzeTab(tabId, instruction, agentId, rect, expectedUrl, onAgentResolved, parentSignal) {
+async function captureAndAnalyzeTab(tabId, instruction, agentId, rect, expectedUrl, onAgentResolved, parentSignal, mode = 'literal') {
     const controller=new AbortController(),signal=controller.signal;
     const cancel=()=>controller.abort(parentSignal.reason);
     parentSignal?.addEventListener('abort',cancel,{once:true});
@@ -2899,7 +2910,7 @@ async function captureAndAnalyzeTab(tabId, instruction, agentId, rect, expectedU
             throw new Error('Chave de API Gemini não configurada. Abra as opções da extensão.');
         }
         const agent=globalThis.LiveConfig.resolveAgent(agentsSettings,agentId,defaultAgents_1.DEFAULT_AGENTS,defaultAgents_1.AGENT_ID_ALIASES);
-        onAgentResolved?.(agent.metadata.id);
+        onAgentResolved?.(agent.metadata.id,globalThis.LiveConfig.lensInstructions(agent).lensReadingInstruction);
         // captureVisibleTab captura a aba ativa da JANELA, não recebe tabId.
         signal?.throwIfAborted();
         const target = await chrome.tabs.get(tabId);
@@ -2962,8 +2973,8 @@ async function captureAndAnalyzeTab(tabId, instruction, agentId, rect, expectedU
             }
         }
         signal?.throwIfAborted();
-        const prompt = globalThis.LiveConfig.LITERAL_SELECTION_OCR;
-        return geminiDirectClient_1.geminiDirectClient.inspectVisionContext(base64ToSend,prompt,apiSettings,agent.modelPreferences.visionModelId||modelsSettings.visionModelId,{literalOcr:true,agentId:agent.metadata.id,mimeType:'image/jpeg',signal});
+        const prompt = mode==='interpret'?(globalThis.LiveConfig.lensInstructions(agent).lensInspectionInstruction.trim()||'Descreva a região selecionada com clareza e objetividade.'):globalThis.LiveConfig.LITERAL_SELECTION_OCR;
+        return geminiDirectClient_1.geminiDirectClient.inspectVisionContext(base64ToSend,prompt,apiSettings,agent.modelPreferences.visionModelId||modelsSettings.visionModelId,{selectionMode:mode,literalOcr:mode!=='interpret',agentId:agent.metadata.id,mimeType:'image/jpeg',signal});
     })();
     let timerId,abort;
     const timeoutPromise = new Promise((_, reject) => {

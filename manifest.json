@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "FalaMermo",
-  "version": "1.0.7",
+  "version": "1.0.8",
   "description": "Narração e ditado Gemini Live, Lens, HUD e agentes personalizados com configurações avançadas.",
   "permissions": [
     "storage",
@@ -38,6 +38,7 @@
         "<all_urls>"
       ],
       "js": [
+        "diagnostics-runtime.js",
         "tts-config.js",
         "live-stt-diagnostics.js",
         "global-hud.js",
@@ -63,6 +64,13 @@
         "mac": "Alt+Shift+S"
       },
       "description": "Ler texto selecionado com o agente ativo"
+    },
+    "translate_selection": {
+      "suggested_key": {
+        "default": "Alt+Shift+Y",
+        "mac": "Alt+Shift+Y"
+      },
+      "description": "Traduzir seleção para PT-BR e narrar"
     },
     "start_dictation": {
       "suggested_key": {

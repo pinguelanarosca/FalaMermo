@@ -119,7 +119,7 @@ test('volume global multiplica saída sem reescrever volumes individuais dos car
  await e.control('a','STOP');await e.control('b','STOP');
 });
 test('prioridade é reservada antes de iniciar nova geração; PCM da solicitação anterior aguarda Play',async()=>{
- const e=await playbackFixture();await e.start('old',{playbackIntent:10});await e.command({operation:'PLAYBACK_INTENT',playbackIntent:20});await e.pcm('old');assert.equal((await e.snapshot()).jobs[0].status,'paused');assert.equal(e.nodes[0].sent.filter(p=>p.type==='enqueue').length,0);await e.control('old','STOP');
+ const e=await playbackFixture();await e.start('old',{playbackIntent:10});await e.command({operation:'PLAYBACK_INTENT',playbackIntent:20,tabId:1});await e.pcm('old');assert.equal((await e.snapshot()).jobs[0].status,'paused');assert.equal(e.nodes[0].sent.filter(p=>p.type==='enqueue').length,0);await e.control('old','STOP');
 });
 test('configuração antiga enviada com novo TTS não reverte volume global já ajustado',async()=>{
  const e=await playbackFixture();await e.command({operation:'SET_GLOBAL',volume:.3});await e.start('a',{globalVolume:1});await e.pcm('a');assert.equal((await e.snapshot()).playback.volume,.3);await e.control('a','STOP');

@@ -91,6 +91,7 @@ function create(services={}){
   if(jobs.has(jobId))throw error('Sessão STT duplicada.','REQUEST');
   if(waiting>=policy(config).maxWaiting)throw error('Fila de admissão STT cheia.','BACKPRESSURE');
   const j={jobId,generation,epoch:++sequence,signal,cfg:policy(config),attempted:new Set(),reserved:0,released:false,admitted:false,context:0,audioStarted:false,usageEpoch:0};jobs.set(jobId,j);waiting++;
+  const [diagnosticJobId,diagnosticSequence,diagnosticCopy]=(typeof jobId==='string'?jobId:'').split(':'),diagnosticQueue=root.FalaDiagnostics?.queue('stt-admission',diagnosticJobId),diagnostic=diagnosticQueue?.enter({sequence:Number(diagnosticSequence),copy:Number(diagnosticCopy)});let diagnosticCode;
   j.abort=()=>{release(j,'CANCELLED');wake();};signal?.addEventListener('abort',j.abort,{once:true});
   try{
    await ready;if(signal?.aborted)throw cancelled();
@@ -124,7 +125,7 @@ function create(services={}){
      // No await between selection and reservation: simultaneous jobs cannot steal this slot.
      Object.assign(j,{account:pick.a,metric:pick.m,modelId:id,keyIndex:pick.ref.keyIndex,reserved:pick.reservation});pick.a.active++;pick.m.reason=eligible.length>1?'LOWER_LOAD':'AVAILABLE';j.selectionReason=pick.m.reason;pick.m.choiceReason=pick.m.reason;pick.m.lastUsedAt=now();j.attempted.add(id+'|'+pick.ref.id);changed();
      blockAccounts?.add(pick.ref.id);
-     const began=now();
+     diagnosticQueue?.begin(diagnostic);const began=now();
      try{
       onAttempt({modelId:id,keyIndex:j.keyIndex});const session=await opening(j,open);
       if(session.closed===true)throw error('WebSocket STT fechado durante admissão.','NETWORK');
@@ -140,7 +141,7 @@ function create(services={}){
     }
    }
    throw last||error('Nenhuma conta/modelo STT elegível; confira cooldown e orçamento.','STT_UNAVAILABLE');
-  }catch(e){release(j,e.code||'UNKNOWN');throw e;}finally{waiting--;}
+  }catch(e){diagnosticCode=e.code||'UNKNOWN';release(j,e.code||'UNKNOWN');throw e;}finally{diagnosticQueue?.leave(diagnostic,diagnosticCode);waiting--;}
  }
  function assertLease(j){if(!j||j.released||!j.admitted||jobs.get(j.jobId)!==j||j.signal?.aborted)throw cancelled();}
  function sendAudio(j,bytes,send){

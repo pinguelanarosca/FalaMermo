@@ -7,7 +7,7 @@ const crypto = require('node:crypto');
 const {root, PUBLIC_VERSION, runtimeFiles, verify} = require('./verify-publication.cjs');
 const name = `FalaMermo-v${PUBLIC_VERSION}.zip`;
 try {
-    const files = [...runtimeFiles, 'README.md', `docs/RELEASE-v${PUBLIC_VERSION}.md`];
+    const files = [...runtimeFiles, 'README.md', 'DIAGNOSTICS.md', `docs/RELEASE-v${PUBLIC_VERSION}.md`];
     verify(root, files);
     const directory = path.join(root, 'dist');
     fs.mkdirSync(directory, {recursive: true});

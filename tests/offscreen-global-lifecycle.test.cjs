@@ -15,6 +15,11 @@ function fixture(deliver=()=>({success:true}),customize=()=>({})){
  return{command,sessions,events,timers,fire};
 }
 const start=id=>({operation:'STT_LIVE_START',jobId:id,modelId:'gemini-3.8-live',apiKeys:['fake-for-unit-test-'+id],tabId:12,frameId:0,documentId:'original-document'});
+test('Stop sem pacote confirmado pelo VAD encerra normalmente, sem transcrição inventada nem erro técnico',async()=>{
+ const e=fixture();await e.command({...start('no-speech-audit'),chunked:true,distributed:true});
+ await e.command({operation:'STT_LIVE_STOP',jobId:'no-speech-audit'});await flush();
+ const terminal=e.events.filter(e=>e.payload?.event==='stt-final');assert.equal(terminal.length,1);assert.equal(terminal[0].payload.text,'');assert.equal(terminal[0].payload.outcome,'NO_SPEECH');assert.equal(e.sessions.length,0);assert.ok(!e.events.some(e=>e.payload?.event==='stt-error'));
+});
 test('modo final delimita antes do Stop, atualiza um job e transforma consolidado uma única vez',async()=>{
  let transforms=0;const e=fixture(undefined,options=>options.mode==='agent'?{sendTurn:async text=>{transforms++;assert.equal(text,'Primeira. Segunda.');return{text:'Consolidado.'};}}:{endAudio(){this.endCount=(this.endCount||0)+1;}});await e.command({...start('live-chunks'),realtime:false,chunked:true,transformInstruction:'Instrução original do agente.'});let tail=Promise.resolve();
  const capture=new(require('../stt-realtime.js').CapturePipeline)({jobId:'live-chunks',realtime:true,submitAudioChunk:p=>{tail=tail.then(()=>e.command({operation:'STT_LIVE_AUDIO',jobId:'live-chunks',chunk:p.chunk,...(p.endOnly?{endOnly:true}:{audioBase64:Buffer.from(p.pcm).toString('base64')})}));}});

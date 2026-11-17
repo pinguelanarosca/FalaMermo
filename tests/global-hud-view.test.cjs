@@ -26,6 +26,23 @@ function fixture({initial=state(),clipboard={writeText:async()=>{}},send,jobId}=
   const view=GlobalHud.mount(d.container,{send:transport,clipboard,jobId});return{...d,view,requests};
 }
 
+test('HUD limita a quatro cards, prioriza tarefa ativa antiga e mantém lista completa nas Opções',async()=>{
+ const initial={revision:1,visible:true,hudTaskId:'job-1',activeTaskId:'job-7',jobs:Array.from({length:7},(_,i)=>({jobId:'job-'+(i+1),type:'TTS',createdAt:i+1,status:i===0?'playing':'completed',collapsed:i!==0,text:'Texto '+i,controls:{copy:true}}))};
+ const e=fixture({initial});await e.view.ready;
+ const ids=()=>e.find(n=>n.className==='fm-global-jobs').children.filter(n=>!n.hidden).map(n=>n.dataset.jobId);
+ assert.deepEqual(ids(),['job-1','job-7','job-6','job-5']);assert.equal(e.card('job-1').dataset.active,'true');assert.equal(e.card('job-1').dataset.collapsed,'false');assert.ok(['job-7','job-6','job-5'].every(id=>e.card(id).dataset.collapsed==='true'));
+ e.view.update({...initial,revision:2,hudTaskId:null,jobs:initial.jobs.map(j=>({...j,status:'completed',collapsed:true}))});assert.deepEqual(ids(),['job-7','job-6','job-5','job-4']);
+ const d=dom(),options=GlobalHud.mount(d.container,{surface:'options',panel:true,send:async()=>({success:true,state:initial})});await options.ready;assert.equal(d.all().filter(n=>n.dataset.jobId).length,7);assert.equal(initial.jobs.length,7);options.destroy();e.view.destroy();
+});
+
+test('card manual fora do limite fica oculto e preserva edição não salva',async()=>{
+ const initial={revision:1,visible:true,jobs:[{jobId:'draft',type:'TTS',manual:true,status:'ready',createdAt:1,text:'Original.',collapsed:false,controls:{edit:true}}]},e=fixture({initial,send:async m=>m.type==='HUD_GLOBAL_GET'?{success:true,state:initial}:{success:false,error:'Falha ao salvar.'}});await e.view.ready;
+ const editor=e.find(n=>n.tagName==='TEXTAREA');editor.value='Edição pendente.';await editor.oninput();
+ const jobs=[...initial.jobs,...Array.from({length:5},(_,i)=>({jobId:'new-'+i,type:'TTS',status:'completed',collapsed:true,createdAt:2+i,text:'Resultado.'}))];e.view.update({...initial,revision:2,jobs});
+ assert.equal(e.all().filter(n=>n.dataset.jobId&&!n.hidden).length,4);assert.equal(e.card('draft').hidden,true);assert.equal(editor.value,'Edição pendente.');
+ e.view.update({...initial,revision:3});assert.equal(e.card('draft').hidden,false);assert.equal(editor.value,'Edição pendente.');
+});
+
 test('HUD recupera todos os jobs sem iniciar sessões, usa cartões independentes e comandos isolados',async()=>{
   let current=state();const e=fixture({send:async message=>{
     if(message.type==='HUD_GLOBAL_COMMAND'){current={...current,revision:current.revision+1,jobs:current.jobs.map(job=>job.jobId===message.payload.jobId?{...job,status:'cancelled',controls:{copy:true,remove:true}}:job)};}

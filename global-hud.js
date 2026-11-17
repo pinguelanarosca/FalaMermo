@@ -4,7 +4,7 @@
   root.GlobalHud=api;
 })(typeof globalThis!=='undefined'?globalThis:this,function(){
   'use strict';
-  const STATUS={analyzing:'Analisando seleção',ready:'Pronto',connecting:'Conectando',recording:'Gravando',flushing:'Finalizando envio',waiting:'Aguardando Gemini',transforming:'Transformando',inserting:'Inserindo',playing:'Reproduzindo',paused:'Pausado',completed:'Concluído',error:'Erro',cancelled:'Cancelado',cancelling:'Encerrando',stopped:'Parado'};
+  const STATUS={translating:'Traduzindo',analyzing:'Analisando seleção',ready:'Pronto',connecting:'Conectando',recording:'Gravando',flushing:'Finalizando envio',waiting:'Aguardando Gemini',transforming:'Transformando',inserting:'Inserindo',playing:'Reproduzindo',paused:'Pausado',completed:'Concluído',error:'Erro',cancelled:'Cancelado',cancelling:'Encerrando',stopped:'Parado'};
   const SEEK_LIMITATION='Setas: 5 s de PCM já recebido (até 60 s de retrocesso). Seek por palavra indisponível.';
   const AGENTS=[['narrator','Narrador Fluido'],['translator','Tradutor Simultâneo'],['summarizer','Resumidor Executivo'],['editor','Revisor Gramatical & Ditado'],['explainer','Professor Didático'],['developer','Assistente de Código & Dev'],['podcast','Estilo Podcast'],['accessibility','Leitor de Acessibilidade']];
   const CSS=`
@@ -122,7 +122,7 @@
     }
     const playerControls={};let playerBusy=0;const pendingSettings=new Map();let settingTask=null;
     function setPlayerSettings(name,value){if(!Number.isFinite(value)||destroyed)return Promise.resolve();if(name==='volume')return request('HUD_GLOBAL_SET',{volume:value}).catch(error=>setText(message,error.message));const job=playbackJob();if(!job)return Promise.resolve();pendingSettings.set(job.jobId,{...pendingSettings.get(job.jobId),...(job.requestId?{requestId:job.requestId}:{}),[name]:value});if(settingTask)return settingTask;settingTask=(async()=>{try{while(pendingSettings.size&&!destroyed){const[id,values]=pendingSettings.entries().next().value;pendingSettings.delete(id);try{await request('HUD_GLOBAL_COMMAND',{jobId:id,action:'set',...values});}catch(error){setText(message,error.message||'Não foi possível ajustar a reprodução.');}}}finally{settingTask=null;}})();return settingTask;}
-    function activeJob(){return state.jobs.find(job=>job.jobId===(options.jobId||state.activeTaskId))||state.jobs.find(job=>job.type==='TTS')||state.jobs[0];}
+    function activeJob(){return state.jobs.find(job=>job.jobId===(options.jobId||((options.embedded||options.surface==='popup'||!options.panel)&&state.hudTaskId)||state.activeTaskId))||state.jobs.find(job=>job.type==='TTS')||state.jobs[0];}
     function playbackActive(job){return job?.status==='playing'||job?.status==='connecting'&&job.progress?.outputActive===true;}
     function playbackJob(){const audio=state.jobs.filter(audioAvailable).map(audioJob);return audio.find(job=>job.status==='playing')||audio.find(playbackActive)||audio.find(job=>job.jobId===state.playback?.selectedJobId&&job.status==='paused')||audio.filter(job=>job.status==='paused').sort((a,b)=>(b.pausedAt||0)-(a.pausedAt||0)||(b.updatedAt||0)-(a.updatedAt||0))[0];}
     async function playerCommand(action,values={}){
@@ -203,11 +203,11 @@
     }
     function renderCard(card,job){
       if(!job)return;card.job=job;const audio=audioJob(job),available=audioAvailable(job);
-      setText(card.kind,job.type==='STT'?'🎙 Ditado':job.manual?'✎ Manual':job.source==='lens'?(job.lensMode==='interpret'?'🔍 Análise':'🔍 Leitura'):'🔊 Narração');setText(card.status,job.type==='STT'&&job.narration&&!['ready','completed','cancelled','error'].includes(audio.status)?'Narração · '+(STATUS[audio.status]||'Gerando'):(STATUS[job.status]||'Em andamento'));card.node.dataset.active=String(activeJob()?.jobId===job.jobId);card.node.setAttribute('aria-current',String(activeJob()?.jobId===job.jobId));
+      setText(card.kind,job.type==='STT'?'🎙 Ditado':job.manual?'✎ Manual':job.source==='translation'?'🌐 Tradução':job.source==='lens'?(job.lensMode==='interpret'?'🔍 Análise':'🔍 Leitura'):'🔊 Narração');setText(card.status,job.type==='STT'&&job.narration&&!['ready','completed','cancelled','error'].includes(audio.status)?'Narração · '+(STATUS[audio.status]||'Gerando'):(job.outcome==='NO_SPEECH'?'Sem fala confirmada':job.status==='error'&&job.insertion?.inserted===false?'Texto não inserido':STATUS[job.status]||'Em andamento'));card.node.dataset.active=String(activeJob()?.jobId===job.jobId);card.node.setAttribute('aria-current',String(activeJob()?.jobId===job.jobId));
       const short=availableText(job).replace(/\s+/g,' ').trim().slice(0,80)||(job.manual?'Texto manual':job.type==='STT'?'Microfone':job.source==='lens'?'Área selecionada':'Gemini Live');setText(card.description,short);card.description.title=short;
       const source=job.origin||{};setText(card.origin,number(source.tabId)!==null&&source.tabId>0?`Origem: aba ${source.tabId}${number(source.frameId)!==null&&source.frameId!==0?' · frame '+source.frameId:''}`:'Origem: painel da extensão');if(options.jobId)setText(card.origin,card.origin.textContent+' · Agente: '+text(job.agentId)+' · Criado: '+(Number.isFinite(job.createdAt)?new Date(job.createdAt).toLocaleString('pt-BR'):'—')+' · ID: '+job.jobId);
       setText(card.progress,progressLabel(job.narration?.progress||job.progress));card.progress.hidden=!card.progress.textContent;
-      setText(card.label,job.type==='TTS'?'Texto da narração':'Transcrição confirmada');setText(card.body,text(job.text));card.body.hidden=card.label.hidden=!job.text;
+      setText(card.label,job.source==='translation'?'Tradução (PT-BR)':job.type==='TTS'?'Texto da narração':'Transcrição confirmada');setText(card.body,text(job.text));card.body.hidden=card.label.hidden=!job.text;
       setText(card.partial,text(job.partialText));card.partial.hidden=card.partialLabel.hidden=!job.partialText;
       card.editor.hidden=!(job.manual||options.jobId);card.editor.disabled=!can(job,'edit');if(!card.dirty){card.editBase=text(job.type==='STT'?job.workingText??job.text:job.text);if(card.editor.value!==card.editBase)card.editor.value=card.editBase;}if(job.type==='STT')card.editor.setAttribute('aria-label','Cópia de trabalho (não altera transcrição nem texto inserido)');else card.editor.setAttribute('aria-label','Texto da narração');if(!card.editor.hidden&&job.type==='TTS')card.body.hidden=true;
       const collapsed=job.collapsed===true&&!options.jobId;card.node.dataset.collapsed=String(collapsed);card.detail.hidden=collapsed;card.origin.hidden=collapsed;card.progress.hidden=collapsed||!card.progress.textContent;card.actions.hidden=collapsed;card.summary.hidden=true;card.feedback.hidden=collapsed;
@@ -220,7 +220,7 @@
       if(job.capacityWarning)notes.push('O estado ativo ultrapassou o orçamento de sessão; conclua tarefas e copie resultados importantes.');
       if(job.type==='STT'&&job.originAvailable===false&&!job.insertion?.inserted&&!['options.html'].includes(job.origin?.page))notes.push('Destino original indisponível; nenhum texto será inserido nesta aba.');
       if(job.type==='STT'&&job.insertion?.reason==='MANUAL_EDIT_PRESERVED')notes.push('Edição manual preservada.');
-      else if(job.type==='STT'&&job.insertion&&job.insertion.inserted===false&&job.insertion.reason!=='OPTIONS_PREVIEW')notes.push('Inserção não confirmada. Copie o texto para recuperá-lo.');
+      else if(job.type==='STT'&&job.insertion&&job.insertion.inserted===false&&!['OPTIONS_PREVIEW','EMPTY_TEXT'].includes(job.insertion.reason))notes.push('Inserção não confirmada. Copie o texto para recuperá-lo.');
       setText(card.note,notes.join(' '));card.note.hidden=collapsed||!notes.length;
       for(const action of ['stop','remove']){const b=card.buttons[action];b.hidden=action==='stop'&&available?false:!can(job,action);b.disabled=!can(job,action)||card.busy.has(action);}collapse.disabled=card.busy.has('collapse');
       for(const [action,delta]of [['previous',-5],['next',5]]){const b=card.buttons[action],reason=seekReason(job,delta);b.hidden=!available;b.disabled=!!reason;b.title=reason||(delta<0?'Retroceder':'Avançar')+' 5 segundos nesta tarefa';b.setAttribute('aria-label',b.title);}
@@ -238,8 +238,12 @@
       root.hidden=options.panel?false:!state.visible;root.dataset.minimized=String(!options.panel&&!options.embedded&&!options.jobId&&state.minimized);
       setText(minimize,state.minimized?'Expandir':'Minimizar');minimize.setAttribute('aria-expanded',String(!state.minimized));setText(visibility,state.visible?'Ocultar HUD':'Mostrar HUD');
       const present=new Set();let position=0;
-      for(const job of state.jobs){if(!job||typeof job.jobId!=='string'||present.has(job.jobId)||(options.jobId?job.jobId!==options.jobId:job.hidden))continue;present.add(job.jobId);let card=cards.get(job.jobId);if(!card){card=createCard(job.jobId);cards.set(job.jobId,card);}renderCard(card,job);if(list.children[position]!==card.node)list.insertBefore(card.node,list.children[position]||null);position++;}
-      for(const[id,card]of cards)if(!present.has(id)){if(card.dirty){setText(card.feedback,'Edição local não salva preservada. Copie o texto antes de fechar.');card.feedback.hidden=false;}else{card.node.remove();cards.delete(id);}}
+      const compact=options.embedded||options.surface==='popup'||!options.panel&&!options.jobId;
+      const candidates=state.jobs.filter(job=>options.jobId?job.jobId===options.jobId:!job.hidden);
+      const focus=compact?candidates.find(job=>job.jobId===state.hudTaskId):null;
+      const visibleJobs=compact?[...(focus?[focus]:[]),...candidates.filter(job=>job!==focus)].slice(0,4):candidates;
+      for(const job of visibleJobs){if(!job||typeof job.jobId!=='string'||present.has(job.jobId)||(options.jobId?job.jobId!==options.jobId:job.hidden))continue;present.add(job.jobId);let card=cards.get(job.jobId);if(!card){card=createCard(job.jobId);cards.set(job.jobId,card);}card.node.hidden=false;renderCard(card,job);if(list.children[position]!==card.node)list.insertBefore(card.node,list.children[position]||null);position++;}
+      for(const[id,card]of cards)if(!present.has(id)){if(card.dirty){card.node.hidden=true;setText(card.feedback,'Edição local não salva preservada. Copie o texto antes de fechar.');card.feedback.hidden=false;}else{card.node.remove();cards.delete(id);}}
       empty.hidden=present.size>0;setText(heading,`Tarefas globais (${present.size})`);
       renderPlayer();
       if(typeof options.onState==='function')options.onState(state);

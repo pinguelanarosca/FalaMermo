@@ -65,8 +65,30 @@ function sanitize(packet){
 function observe(capture,input,bytes){const m=capture.metrics||={capturedFrames:0,captureChunks:0,capturedBytes:0,ackChunks:0,ackBytes:0,signalSamples:0,peak:0,maxRms:0};if(bytes.byteLength)m.firstPcmMs??=Date.now()-(capture.startedAt??Date.now());let sum=0;for(const sample of input){const finite=Number.isFinite(sample),value=finite?sample:0;if(!finite)m.nonFiniteSamples=(m.nonFiniteSamples||0)+1;sum+=value*value;m.peak=Math.max(m.peak,Math.abs(value));if(Math.abs(value)>.005)m.signalSamples++;}m.capturedFrames+=input.length;m.captureChunks++;m.capturedBytes+=bytes.byteLength;m.maxRms=Math.max(m.maxRms,input.length?Math.sqrt(sum/input.length):0);
  const pcm=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength),samples=Math.floor(bytes.byteLength/2);let pcmSum=0;m.pcmSignalSamples||=0;for(let i=0;i<samples;i++){const value=pcm.getInt16(i*2,true)/32768;pcmSum+=value*value;m.pcmPeak=Math.max(m.pcmPeak||0,Math.abs(value));if(Math.abs(value)>.005)m.pcmSignalSamples++;}m.pcmSamples=(m.pcmSamples||0)+samples;m.pcmMaxRms=Math.max(m.pcmMaxRms||0,samples?Math.sqrt(pcmSum/samples):0);return m;}
 function captureSnapshot(capture,stage,extra={}){const track=capture.stream?.getAudioTracks?.()[0]||capture.stream?.getTracks?.()[0],settings=track?.getSettings?.()||{},ctx=capture.context;return sanitize({jobId:capture.jobId,scope:'capture',stage,...capture.metrics,stopReason:capture.stopReason,elapsedMs:Date.now()-(capture.startedAt??Date.now()),microphoneOpened:Boolean(capture.stream),workletReady:Boolean(capture.node),nodesConnected:Boolean(capture.source&&capture.node&&capture.mute),sourceRate:ctx?.sampleRate,sampleRate:16000,trackSampleRate:settings.sampleRate,trackChannels:settings.channelCount,contextState:ctx?.state,trackState:track?.readyState,trackMuted:track?.muted,trackEnabled:track?.enabled,released:Boolean(capture.released),...extra});}
-async function emit(packet){const safe=sanitize(packet);if(!safe)return;try{await root.chrome.runtime.sendMessage({type:'LIVE_STT_DIAGNOSTIC',payload:safe});}catch{/* Instrumentação não impede captura/cleanup; contexto inválido é tratado pelo controlador. */}}
-function capture(capture,stage,extra={}){capture.startedAt??=Date.now();capture.metrics||={capturedFrames:0,captureChunks:0,capturedBytes:0,ackChunks:0,ackBytes:0,signalSamples:0,peak:0,maxRms:0};const packet=captureSnapshot(capture,stage,extra);if(packet)void emit(packet);}
+async function emit(packet){const safe=sanitize(packet);if(!safe)return;if(root.FalaDiagnostics){root.FalaDiagnostics.legacy('stt',safe);return;}try{await root.chrome.runtime.sendMessage({type:'LIVE_STT_DIAGNOSTIC',payload:safe});}catch{/* Instrumentação não impede captura/cleanup; contexto inválido é tratado pelo controlador. */}}
+// Keep packet-level acoustic evidence in the pipeline/forensic tap. Operational telemetry
+// aggregates VAD decisions, avoiding a storage.session read/write round trip per packet.
+function flushVadDiagnostics(target){
+ const sample=target.vadDiagnostics;
+ if(!sample?.pending)return;
+ const packet=captureSnapshot(target,'vad-decision',sample.pending);
+ sample.pending=null;sample.at=Date.now();
+ if(packet)void emit(packet);
+}
+function capture(capture,stage,extra={}){
+ capture.startedAt??=Date.now();capture.metrics||={capturedFrames:0,captureChunks:0,capturedBytes:0,ackChunks:0,ackBytes:0,signalSamples:0,peak:0,maxRms:0};
+ if(stage==='vad-decision'){
+  const sample=capture.vadDiagnostics??={at:-Infinity,pending:null},previous=sample.pending||{},merged={...previous,...extra};
+  for(const key of ['analyzedFrames','hybridFrames','rescueFrames','tenFrames','dualConfirmations','dualRejections'])if(Number.isFinite(extra[key]))merged[key]=(previous[key]||0)+extra[key];
+  for(const key of ['sileroMaxProbability','tenMaxProbability'])if(Number.isFinite(extra[key]))merged[key]=Math.max(previous[key]||0,extra[key]);
+  sample.pending=merged;
+  if(Date.now()-sample.at>=1000)flushVadDiagnostics(capture);
+  return;
+ }
+ if(['capture-stopping','capture-ending','capture-released'].includes(stage))flushVadDiagnostics(capture);
+ const packet=captureSnapshot(capture,stage,extra);if(packet)void emit(packet);
+}
+
 function ending(target,reason){if(!target||target.stopReason)return;target.stopReason=enums.stopReason.includes(reason)?reason:'transport-error';capture(target,'capture-ending');if(reason==='context-invalidated')root.console?.warn('[STT capture-ending]',target.jobId,target.stopReason);}
 let queue=Promise.resolve();
 function enqueue(fn){const result=queue.catch(()=>{}).then(fn);queue=result;return result;}
@@ -97,6 +119,7 @@ function clean(raw,now=Date.now()){
 }
 function record(packet){
  const safe=sanitize(packet);if(!safe)return Promise.resolve({success:false});
+ if(root.DiagnosticsHub){root.FalaDiagnostics.legacy('stt',safe);return Promise.resolve({success:true});}
  return enqueue(async()=>{
   const now=Date.now(),storage=root.chrome.storage.session,state=clean((await storage.get(STORAGE_KEY))[STORAGE_KEY],now);
   let job=state.jobs.find(j=>j.jobId===safe.jobId);
@@ -120,7 +143,7 @@ function record(packet){
   await storage.set({[STORAGE_KEY]:clean(state,now)});return{success:true};
  });
 }
-function read(){return enqueue(async()=>{const storage=root.chrome.storage.session,state=clean((await storage.get(STORAGE_KEY))[STORAGE_KEY]);await storage.set({[STORAGE_KEY]:state});return state;});}
+function read(){if(root.DiagnosticsHub)return Promise.resolve(root.DiagnosticsHub.project('stt'));return enqueue(async()=>{const storage=root.chrome.storage.session,state=clean((await storage.get(STORAGE_KEY))[STORAGE_KEY]);await storage.set({[STORAGE_KEY]:state});return state;});}
 async function get(){const res=await root.chrome.runtime.sendMessage({type:'LIVE_STT_DIAGNOSTICS_GET'});if(!res?.success)throw Error('Diagnóstico STT indisponível.');return res.diagnostics;}
 return{sanitize,observe,captureSnapshot,capture,ending,emit,record,read,get,clean,STORAGE_KEY,MAX_JOBS,MAX_EVENTS};
 });

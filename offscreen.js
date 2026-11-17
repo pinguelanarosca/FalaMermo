@@ -6,6 +6,7 @@ const routeKey=p=>p.jobId||p.tabId+':'+(p.frameId||0)+':'+(p.playerId||'');
 const jobViews=new Map(),eventQueues=new Map(),unacknowledged=new Map();
 // Only this queue grants audible output. Synthesis may continue while another task plays.
 let playbackQueue=Promise.resolve(),latestIntent=0,globalVolume=1,globalVolumeInitialized=false;
+const tabIntents=new Map(),playbackScope=player=>player.payload?.tabId??player.tabId??0,latestFor=player=>tabIntents.get(playbackScope(player))||0;
 const playbackPlayers=new Set(),PLAYBACK_CACHE_LIMIT=128*1024*1024;
 function playbackBytes(){
  let bytes=0;
@@ -18,12 +19,12 @@ function playbackBytes(){
  }
  return bytes;
 }
-function playbackIntent(player,intent){player.intent=Number.isSafeInteger(intent)?intent:latestIntent+1;latestIntent=Math.max(latestIntent,player.intent);player.desired='play';playbackPlayers.add(player);}
+function playbackIntent(player,intent){player.intent=Number.isSafeInteger(intent)?intent:latestIntent+1;latestIntent=Math.max(latestIntent,player.intent);tabIntents.set(playbackScope(player),Math.max(latestFor(player),player.intent));player.desired='play';playbackPlayers.add(player);}
 function coordinate(work){const task=playbackQueue.catch(()=>{}).then(work);playbackQueue=task.catch(()=>{});return task;}
 function activatePlayback(player){
  return coordinate(async()=>{
   if(player.stopped||player.desired!=='play')return;
-  if(player.intent!==latestIntent){
+  if(player.intent!==latestFor(player)){
    player.desired='pause';
    await player.pause(true);
    return;
@@ -38,12 +39,12 @@ function activatePlayback(player){
    return;
   }
   for(const other of playbackPlayers){
-   if(other===player||other.stopped||!other.authorized)continue;
+   if(other===player||other.stopped||!other.authorized||playbackScope(other)!==playbackScope(player))continue;
    other.desired='pause';
    other.authorized=false;
    await other.pause(true);
   }
-  if(player.stopped||player.desired!=='play'||player.intent!==latestIntent){
+  if(player.stopped||player.desired!=='play'||player.intent!==latestFor(player)){
    if(!player.stopped){player.desired='pause';await player.pause(true);}
    return;
   }
@@ -52,7 +53,7 @@ function activatePlayback(player){
    if(player.managed){
     await player.pause(false);
     if(player.stopped)return;
-    if(player.desired!=='play'||player.intent!==latestIntent){
+    if(player.desired!=='play'||player.intent!==latestFor(player)){
      player.authorized=false;
      player.desired='pause';
      await player.pause(true);
@@ -90,10 +91,11 @@ function applyView(p,event,extra){if(!p.jobId)return;const v=viewFor(p);v.eventS
  return v;
 }
 function eventTimeout(promise){let timer;return Promise.race([promise,new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('Confirmação de evento indisponível.')),5000);})]).finally(()=>clearTimeout(timer));}
-function publicEvent(payload,event,extra={}){const current=jobs.get(routeKey(payload));if(current&&current.payload.requestId!==payload.requestId)return Promise.resolve();globalThis.LiveTtsDiagnostics?.captureEvent(payload,event,extra);const v=applyView(payload,event,extra);const {apiKeys,apiKey,schedulerPolicy,text,systemInstruction,advancedJson,customVocabulary,transformInstruction,previewAgent,sttRecognition,...safe}=payload;const packet={...safe,event,...extra,eventSeq:v?.eventSeq};
+function publicEvent(payload,event,extra={}){const current=jobs.get(routeKey(payload));if(current&&current.payload.requestId!==payload.requestId)return Promise.resolve();globalThis.LiveTtsDiagnostics?.captureEvent(payload,event,extra);if(event==='block-complete')globalThis.FalaDiagnostics?.event({component:'tts',category:'generation',stage:'block-complete',jobId:payload.jobId,details:{blockId:extra.blockId,blocks:extra.blocks,completed:extra.completed}});const v=applyView(payload,event,extra);const {apiKeys,apiKey,schedulerPolicy,text,systemInstruction,advancedJson,customVocabulary,transformInstruction,previewAgent,sttRecognition,...safe}=payload;const packet={...safe,event,...extra,eventSeq:v?.eventSeq};
+ const diagnosticQueue=globalThis.FalaDiagnostics?.queue('offscreen-events',payload.jobId),diagnostic=diagnosticQueue?.enter();
  const id=payload.jobId||'legacy',previous=eventQueues.get(id)||Promise.resolve();
- const delivered=previous.catch(()=>{}).then(async()=>{for(let attempt=0;attempt<3;attempt++){try{const ack=await eventTimeout(Promise.resolve().then(()=>chrome.runtime.sendMessage({type:'LIVE_OFFSCREEN_EVENT',target:'background',payload:packet})));if(ack?.success===false)throw Error('Evento não confirmado.');if(['stt-final','ended','stt-error','error','cancelled','stt-cancelled'].includes(event))unacknowledged.delete(id);return;}catch{unacknowledged.set(id,packet.eventSeq);}}void globalThis.LiveSttDiagnostics?.emit({jobId:id,scope:'transport',stage:'event-delivery-error',outcome:'EVENT_DELIVERY_FAILED'});});
- eventQueues.set(id,delivered);void delivered.finally(()=>{if(eventQueues.get(id)===delivered)eventQueues.delete(id);});return delivered;
+ const delivered=previous.catch(()=>{}).then(async()=>{diagnosticQueue?.begin(diagnostic);for(let attempt=0;attempt<3;attempt++){try{const ack=await eventTimeout(Promise.resolve().then(()=>chrome.runtime.sendMessage({type:'LIVE_OFFSCREEN_EVENT',target:'background',payload:packet})));if(ack?.success===false)throw Error('Evento não confirmado.');if(['stt-final','ended','stt-error','error','cancelled','stt-cancelled'].includes(event))unacknowledged.delete(id);return;}catch{unacknowledged.set(id,packet.eventSeq);}}void globalThis.LiveSttDiagnostics?.emit({jobId:id,scope:'transport',stage:'event-delivery-error',outcome:'EVENT_DELIVERY_FAILED'});});
+ eventQueues.set(id,delivered);void delivered.finally(()=>{diagnosticQueue?.leave(diagnostic);if(eventQueues.get(id)===delivered)eventQueues.delete(id);});return delivered;
 }
 function activeJobIds(){return[...jobs.values()].map(j=>j.payload.jobId).concat([...dictations.keys()]);}
 function notifyIdle(){if(jobs.size||dictations.size||legacyPlayers.size)return;void Promise.all([...eventQueues.values(),...(sttScheduler?[sttScheduler.flush()]:[])]).then(()=>{if(jobs.size||dictations.size||legacyPlayers.size||unacknowledged.size)return;chrome.runtime.sendMessage({type:'LIVE_OFFSCREEN_IDLE',target:'background',payload:{}}).catch(()=>{});});}
@@ -140,7 +142,7 @@ class OrderedPlaybackBuffer{
   const intensity=(p.ambienceIntensity??30)/100;if(p.ambience&&p.ambience!=='none'&&intensity>0){const seconds={studio:.35,room:.75,warm:1.1,hall:1.8}[p.ambience]||.6,length=Math.floor(this.ctx.sampleRate*seconds),impulse=this.ctx.createBuffer(2,length,this.ctx.sampleRate);for(let channel=0;channel<2;channel++){const values=impulse.getChannelData(channel);for(let i=0;i<length;i++)values[i]=(Math.random()*2-1)*Math.pow(1-i/length,p.ambience==='hall'?2:3);}this.convolver=this.ctx.createConvolver();this.convolver.buffer=impulse;const dry=this.ctx.createGain(),wet=this.ctx.createGain();dry.gain.value=1-Math.min(.75,intensity*.7);wet.gain.value=Math.min(.75,intensity*.75);output.connect(dry);output.connect(this.convolver);this.convolver.connect(wet);dry.connect(this.gain);wet.connect(this.gain);}else output.connect(this.gain);this.gain.connect(this.ctx.destination);this.node.port.postMessage({type:'pitch',value:p.pitchMultiplier??1});
  }
  init(){return this.ready||=this.initialize();}
- async initialize(){try{this.ctx=new AudioContext({sampleRate:24000,latencyHint:'interactive'});await this.ctx.audioWorklet.addModule(chrome.runtime.getURL('pcm-player-worklet.js'));if(this.stopped)throw Object.assign(new Error('Reprodução cancelada.'),{cancelled:true});this.node=new AudioWorkletNode(this.ctx,'gemini-pcm-player');this.record('worklet-ready');this.node.port.onmessage=e=>{if(this.stopped)return;const data=e.data;if(data.type==='control-ack'){const pending=this.controlAcks.get(data.controlSeq);if(!pending||data.command!==pending.command||typeof data.paused!=='boolean'||!Number.isFinite(data.frame)||!Number.isFinite(data.availableStart))return;if(pending.command==='pause'&&data.paused!==pending.value)return;this.controlAcks.delete(data.controlSeq);clearTimeout(pending.timer);this.ackSeq=data.controlSeq;this.workletPaused=data.paused;this.positionFrame=data.frame;this.availableStart=data.availableStart;pending.resolve(data);return;}if(data.type==='position'){this.positionFrame=data.frame;this.availableStart=data.availableStart;if(!this.controlling)publicEvent(this.payload,'position',{status:this.status()});this.maybeEnd();}if(data.type==='drain'){this.pending=Math.max(0,this.pending-1);this.maybeEnd();}if(data.type==='first-played'&&this.firstPlayedAt===null){
+ async initialize(){try{this.ctx=new AudioContext({sampleRate:24000,latencyHint:'interactive'});await this.ctx.audioWorklet.addModule(chrome.runtime.getURL('pcm-player-worklet.js'));if(this.stopped)throw Object.assign(new Error('Reprodução cancelada.'),{cancelled:true});this.node=new AudioWorkletNode(this.ctx,'gemini-pcm-player');this.record('worklet-ready');this.node.port.onmessage=e=>{if(this.stopped)return;const data=e.data;if(data.type==='control-ack'){const pending=this.controlAcks.get(data.controlSeq);if(!pending||data.command!==pending.command||typeof data.paused!=='boolean'||!Number.isFinite(data.frame)||!Number.isFinite(data.availableStart))return;if(pending.command==='pause'&&data.paused!==pending.value)return;this.controlAcks.delete(data.controlSeq);clearTimeout(pending.timer);this.ackSeq=data.controlSeq;this.workletPaused=data.paused;this.positionFrame=data.frame;this.availableStart=data.availableStart;pending.resolve(data);return;}if(data.type==='position'){this.positionFrame=data.frame;this.availableStart=data.availableStart;if(!this.controlling)publicEvent(this.payload,'position',{status:this.status()});this.maybeEnd();}if(data.type==='drain'){const diagnosticIndex=++this.diagnosticDrained;this.diagnosticQueue?.leave(this.diagnosticPlaying?.get(diagnosticIndex));this.diagnosticPlaying?.delete(diagnosticIndex);this.pending=Math.max(0,this.pending-1);this.maybeEnd();}if(data.type==='first-played'&&this.firstPlayedAt===null){
  this.firstPlayedAt=performance.now();
  this.record('first-frame-consumed',data);
  if(!this.managed&&!this.paused&&!this.controlling){
@@ -175,12 +177,14 @@ if(data.type==='playback-state'&&this.managed&&data.controlSeq===this.ackSeq){
     block.received=true;
     this.record('pcm-received',{blockId:index,...chunk.format});
    }
+   this.diagnosticQueue??=globalThis.FalaDiagnostics?.queue('tts-player',this.payload.jobId);
+   chunk.diagnostic=this.diagnosticQueue?.enter({blockId:index,bytes:chunk.bytes.length});
    block.chunks.push(chunk);
   }
   if(done)block.done=true;
   this.flush();
  }
- discard(index){if(index>=this.next)this.blocks.delete(index);}
+ discard(index){if(index>=this.next){for(const chunk of this.blocks.get(index)?.chunks||[])this.diagnosticQueue?.leave(chunk.diagnostic,'CANCELLED');this.blocks.delete(index);}}
  flush(){if(this.stopped||this.paused)return;if(this.managed&&!this.authorized){
   while(this.blocks.get(this.next)?.done&&!this.blocks.get(this.next).chunks.length){this.blocks.delete(this.next);this.next++;}this.maybeEnd();
   if(this.blocks.get(this.next)?.chunks.length&&!this.activation&&this.desired==='play'){
@@ -191,7 +195,8 @@ if(data.type==='playback-state'&&this.managed&&data.controlSeq===this.ackSeq){
   const block=this.blocks.get(this.next);
   if(!block)return;
   while(block.chunks.length){
-   const {bytes,format,rate}=block.chunks.shift(),pcm=toFloat(bytes,rate);
+   const {bytes,format,rate,diagnostic}=block.chunks.shift(),pcm=toFloat(bytes,rate);
+   this.diagnosticQueue?.begin(diagnostic);this.diagnosticEnqueued=(this.diagnosticEnqueued||0)+1;this.diagnosticDrained??=0;if(diagnostic)(this.diagnosticPlaying??=new Map()).set(this.diagnosticEnqueued,diagnostic);
    const frames=pcm.length;
    this.node.port.postMessage({type:'rate',value:this.rate});
    this.node.port.postMessage({type:'enqueue',buffer:pcm.buffer,blockId:this.next},[pcm.buffer]);
@@ -211,9 +216,10 @@ if(data.type==='playback-state'&&this.managed&&data.controlSeq===this.ackSeq){
  async contextAction(action,state){let timer;try{await Promise.race([this.ctx[action](),new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('Timeout AudioContext '+action+'.')),3000);})]);if(this.stopped||this.ctx.state!==state)throw Error('AudioContext não confirmou '+action+': '+this.ctx.state);}finally{clearTimeout(timer);}}
  workletCommand(command,values){const controlSeq=++this.controlSeq;return new Promise((resolve,reject)=>{const timer=setTimeout(()=>{this.controlAcks.delete(controlSeq);reject(Error('Worklet não confirmou '+command+'.'));},3000);this.controlAcks.set(controlSeq,{resolve,reject,timer,command,value:values.value});this.node.port.postMessage({type:command,...values,controlSeq});});}
  seek(deltaSeconds){return this.control(async()=>{if(![-5,5].includes(deltaSeconds)||!this.enqueuedFrames)throw Error('Buffer PCM navegável indisponível.');if(this.paused)await this.contextAction('resume','running');await this.workletCommand('seek',{deltaSeconds});if(this.paused)await this.contextAction('suspend','suspended');this.record('seeked',{...this.status()});await publicEvent(this.payload,'position',{status:this.status()});return this.status();});}
- pause(value){return this.control(async()=>{if(this.paused===value&&this.workletPaused===value&&this.ctx.state===(value?'suspended':'running'))return this.status();if(value){this.rendering=false;this.gain.gain.value=0;if(this.ctx.state==='suspended')await this.contextAction('resume','running');await this.workletCommand('pause',{value:true});await this.contextAction('suspend','suspended');}else{await this.contextAction('resume','running');if(this.managed&&this.authorized&&(this.desired!=='play'||this.intent!==latestIntent))return this.status();this.gain.gain.value=!this.managed||this.authorized?effectiveVolume(this):0;await this.workletCommand('pause',{value:false});}if(this.stopped)throw Error('Player PCM encerrado.');this.paused=value;if(!value&&!this.managed)this.flush();this.record(value?'paused':'resumed',{...this.status()});if(value)this.publishedPlaybackState='paused';if(value||!this.managed)await publicEvent(this.payload,value?'pause':'play',{status:this.status()});return this.status();});}
+ pause(value){return this.control(async()=>{if(this.paused===value&&this.workletPaused===value&&this.ctx.state===(value?'suspended':'running'))return this.status();if(value){this.rendering=false;this.gain.gain.value=0;if(this.ctx.state==='suspended')await this.contextAction('resume','running');await this.workletCommand('pause',{value:true});await this.contextAction('suspend','suspended');}else{await this.contextAction('resume','running');if(this.managed&&this.authorized&&(this.desired!=='play'||this.intent!==latestFor(this)))return this.status();this.gain.gain.value=!this.managed||this.authorized?effectiveVolume(this):0;await this.workletCommand('pause',{value:false});}if(this.stopped)throw Error('Player PCM encerrado.');this.paused=value;if(!value&&!this.managed)this.flush();this.record(value?'paused':'resumed',{...this.status()});if(value)this.publishedPlaybackState='paused';if(value||!this.managed)await publicEvent(this.payload,value?'pause':'play',{status:this.status()});return this.status();});}
  set(volume,rate){if(Number.isFinite(volume)){this.volume=Math.max(0,Math.min(1,volume));if(this.gain&&!this.paused&&!this.controlling&&(!this.managed||this.authorized))this.gain.gain.value=effectiveVolume(this);}if(Number.isFinite(rate)){this.rate=Math.max(.5,Math.min(2,rate));this.node?.port.postMessage({type:'rate',value:this.rate});}this.record('settings-applied',{volume:this.volume,playbackRate:this.rate});publicEvent(this.payload,'settings',{status:this.status()});}
  stop(){
+  this.diagnosticQueue?.abandon();this.diagnosticPlaying?.clear();
   if(this.stopped)return this.closed;
   this.stopped=true;
   this.authorized=false;
@@ -486,12 +492,13 @@ function distributedTransport(d,models,scheduler){
 }
 function finalizeDictation(d){
  if(!d.stopped||d.finalized||d.controller.signal.aborted)return;
- if(!d.distributed&&LiveConfig.caps(d.payload.modelId).requiresInteractionIdle&&d.interactionStatus!=='IDLE'){
+ if(!d.distributed&&!(d.chunkTransport&&!d.receivedBytes)&&LiveConfig.caps(d.payload.modelId).requiresInteractionIdle&&d.interactionStatus!=='IDLE'){
   d.controller.abort();clearTimeout(d.finalTimer);void recoveryState(d,'interrupted');if(d.session)retireDictation(d);if(dictations.get(d.payload.jobId)===d)dictations.delete(d.payload.jobId);sttDiagnostic(d,'error',{outcome:'TIMEOUT'});publicEvent(d.payload,'stt-error',{incomplete:true,recoveryAvailable:!!d.retainedBytes,error:'Timeout aguardando interactionStatus IDLE no ditado Live.'});notifyIdle();return;
  }
  commitNativeDictation(d);d.finalized=true;clearTimeout(d.finalTimer);const text=d.finalParts.join(' ').trim();
  const finish=async()=>{
   try{
+   if(!text&&d.chunkTransport&&!d.receivedBytes){await recoveryState(d,'completed');if(d.controller.signal.aborted)return;sttDiagnostic(d,'final',{outcome:'NO_SPEECH',characters:0});await publicEvent(d.payload,'stt-final',{text:'',confirmedText:'',partialText:'',outcome:'NO_SPEECH',incomplete:false,publishedAt:Date.now()});return;}
    if(!text){const outcome=d.chunkTransport&&!d.receivedBytes?'NO_SPEECH':!d.receivedBytes?'CAPTURE_NOT_SENT':d.sawInterim?'INTERIM_ONLY':'NO_TRANSCRIPTION';sttDiagnostic(d,'error',{outcome});throw new Error(outcome==='NO_SPEECH'?'Nenhuma fala detectada pelo VAD; confira o nível do microfone.':!d.receivedBytes?'Nenhum PCM chegou ao WebSocket STT.':d.sawInterim?'Timeout: apenas transcrição provisória recebida; nenhum resultado final.':'PCM enviado ao Gemini sem transcrição conclusiva.'+(d.retainedBytes?' Áudio preservado localmente para recuperação em Opções.':''));}
    let final=text;
    if(d.payload.transformInstruction){publicEvent(d.payload,'stt-status',{status:'Transformando com agente'});const started=performance.now();sttDiagnostic(d,'transform-start');final=await transformTranscript(d,text);sttDiagnostic(d,'transform-complete',{transformDurationMs:performance.now()-started});}
@@ -624,7 +631,7 @@ async function command(payload){
  if(payload.operation==='STT_SCHEDULER_SNAPSHOT')return{success:true,diagnostics:sttScheduler?.snapshot()||{version:1,activeJobs:0,accounts:[]}};
  if(payload.operation==='GLOBAL_JOBS_SNAPSHOT')return globalSnapshot();
  if(payload.operation==='GLOBAL_JOBS_ACK'){for(const [id,seq]of Object.entries(payload.sequences||{}))if(Number.isFinite(seq)&&seq>=(unacknowledged.get(id)??Infinity))unacknowledged.delete(id);notifyIdle();return{success:true};}
- if(payload.operation==='PLAYBACK_INTENT'){if(Number.isSafeInteger(payload.playbackIntent))latestIntent=Math.max(latestIntent,payload.playbackIntent);return{success:true};}
+ if(payload.operation==='PLAYBACK_INTENT'){if(Number.isSafeInteger(payload.playbackIntent)){latestIntent=Math.max(latestIntent,payload.playbackIntent);const scope=payload.tabId||0;tabIntents.set(scope,Math.max(tabIntents.get(scope)||0,payload.playbackIntent));}return{success:true};}
  if(payload.operation==='SET_GLOBAL'){
   globalVolumeInitialized=true;
   if(Number.isFinite(payload.volume))globalVolume=Math.max(0,Math.min(1,payload.volume));

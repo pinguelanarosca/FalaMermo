@@ -210,6 +210,14 @@ function initialize() {
                 sendResponse({success:true,...sttController_1.stt.getJobState(message.payload?.jobId)});
                 break;
             }
+            case 'CMD_TRANSLATE_SELECTION': {
+                const targetText=message.payload?.text||(0,textExtractor_1.getCleanSelectedText)().cleaned;
+                void chrome.runtime.sendMessage({type:'TRANSLATE_REQUEST',payload:{text:targetText,agentId:message.payload?.agentId||cachedActiveAgentId}}).then(result=>{
+                    if(!result?.success&&!result?.cancelled){hudController_1.hud.setStatus('idle','Erro na tradução');hudController_1.hud.setTextPreview(result?.error||'Falha ao traduzir a seleção.');}
+                    sendResponse(result);
+                }).catch(error=>{hudController_1.hud.setStatus('idle','Erro na tradução');hudController_1.hud.setTextPreview(error.message||String(error));sendResponse({success:false,error:error.message});});
+                return true;
+            }
             case 'CMD_READ_SELECTION': {
                 const payloadText = message.payload?.text;
                 const targetText = payloadText || (0, textExtractor_1.getCleanSelectedText)().cleaned;
@@ -459,8 +467,9 @@ class HudController {
             this.setStatus('idle', 'Pausado');
         }
     }
-    show({tabOnly=false,expand=false}={}) {
+    show({tabOnly=false,expand=false,manual=false}={}) {
         this.container?.classList.remove('hidden');
+        if(globalThis.GlobalHud&&!manual)return;
         this.updateGlobalUi({visible:true,...(expand?{minimized:false}:{}),...(tabOnly?{scope:'tab'}:{})});
     }
     hide() {
@@ -471,7 +480,7 @@ class HudController {
     applyGlobalState(state){if(!state||Number.isFinite(this.globalRevision)&&state.revision<this.globalRevision)return;this.globalRevision=state.revision;this.globalMinimized=state.minimized===true;this.container?.setAttribute?.('data-minimized',String(this.globalMinimized));this.container?.classList.toggle('hidden',state.visible===false);for(const element of this.container?.querySelectorAll('.ext-hud-body')||[]){element.hidden=this.globalMinimized;element.inert=this.globalMinimized;}const jobs=state.jobs||[],playing=jobs.filter(job=>job.type==='TTS'&&job.status==='playing').length,recording=jobs.filter(job=>job.type==='STT'&&job.status==='recording').length,active=jobs.filter(job=>!['ready','completed','error','cancelled'].includes(job.status)).length,badge=this.container?.querySelector('#ext-badge');if(badge){badge.textContent=recording||playing?[recording?recording+' gravando':'',playing?playing+' narrando':''].filter(Boolean).join(' · '):active?active+' em andamento':jobs.some(job=>job.status==='paused')?'Pausado':'Pronto';badge.dataset.state=recording?'recording':playing?'playing':'idle';badge.className='ext-hud-badge '+badge.dataset.state;}const button=this.container?.querySelector('#ext-btn-min');if(button){button.title=this.globalMinimized?'Restaurar HUD':'Minimizar HUD';button.setAttribute('aria-expanded',String(!this.globalMinimized));button.setAttribute('aria-label',button.title);button.textContent=this.globalMinimized?'▢':'−';}this.globalView?.update(state);}
     toggle() {
         if (this.container?.classList.contains('hidden')) {
-            this.show();
+            this.show({manual:true});
         }
         else {
             this.hide();
@@ -1459,13 +1468,15 @@ class SttController {
         this.contextWatch = null;
     }
     async sendLiveMessage(message) {
+        const diagnostic=globalThis.FalaDiagnostics?.start('chrome','capture-message',message.payload?.jobId,{messageType:message.type});let diagnosticCode;
         try {
             if (!this.ensureExtensionContext()) throw new Error('Extension context invalidated.');
             return await chrome.runtime.sendMessage(message);
         } catch (error) {
+            diagnosticCode='MESSAGE_FAILED';
             if (/extension context invalidated/i.test(error?.message || String(error))) this.invalidateExtensionContext();
             throw error;
-        }
+        }finally{globalThis.FalaDiagnostics?.finish(diagnostic,{},diagnosticCode);}
     }
     cancelLiveJob(jobId) {
         // Cleanup local precede o envio: sendMessage também pode lançar antes de retornar uma Promise.
@@ -1536,7 +1547,7 @@ class SttController {
             }
             if(!reservation?.success)throw new Error(reservation?.error||'Não foi possível reservar o microfone.');
             capture.reserved=true;
-            hudController_1.hud.show({tabOnly:true,expand:true});
+            if(!globalThis.GlobalHud)hudController_1.hud.show({tabOnly:true,expand:true});
             for(const previous of this.liveJobs.values()){
                 if(previous.generation<generation&&previous.target?.element===job.target.element)previous.insertion.invalidate('TARGET_CHANGED');
             }
@@ -1600,7 +1611,7 @@ class SttController {
             void Promise.resolve(opening).catch(()=>{}).then(()=>send('close',{rollback})).catch(()=>{});
         };
         pipeline.config.preRollMs=800;
-        const vad=capture.vad=new CaptureVad({
+        const vad=capture.vad=new CaptureVad({jobId:capture.jobId,
             analyze:({pcm,seq,final})=>send('analyze',{seq,final,clientSentAt:performance.timeOrigin+performance.now(),pcm:btoa(String.fromCharCode(...pcm))}),
             consume:(pcm,decision)=>pipeline.push(pcm,decision.base||Boolean((pipeline.chunk||pipeline.pendingActivityEnd)&&decision.continuation),decision),
             recover:()=>{opening=send('open');return opening;},
@@ -1702,7 +1713,7 @@ class SttController {
         if(capture.metrics&&!capture.metrics.capturedBytes){job.cancelled=true;job.insertion.invalidate('NO_CAPTURE');job.insertion.dispose();this.liveJobs.delete(job.jobId);this.cancelLiveJob(job.jobId);void globalThis.LiveSttDiagnostics?.emit({jobId:capture.jobId,scope:'result',stage:'error',outcome:'NO_CAPTURE'});if(this.liveGeneration===capture.generation){hudController_1.hud.setStatus('idle','Nenhum PCM capturado');hudController_1.hud.setTextPreview('O microfone abriu, mas o worklet não entregou amostras. Verifique dispositivo, permissão e AudioContext.');}return;}
         this.publishCapture(job,'waiting');if(this.liveGeneration===capture.generation)hudController_1.hud.setStatus('loading','Aguardando Gemini');
         const result=await this.sendLiveMessage({type:'STT_LIVE_STOP',payload:{jobId:capture.jobId,playerId:capture.jobId,generation:capture.generation,stopReason}});if(!result?.success)throw new Error(result?.error||'Falha ao finalizar ditado.');}
-        catch(error){if(error.code==='FLUSH_TIMEOUT')globalThis.LiveSttDiagnostics?.capture(capture,'flush-timeout',{outcome:'FLUSH_TIMEOUT'});await this.handleLiveEvent({jobId:capture.jobId,generation:capture.generation,event:'stt-error',error:error.message});}
+        catch(error){if(this.contextInvalidated||/extension context invalidated/i.test(error?.message||'')){this.invalidateExtensionContext();return;}if(error.code==='FLUSH_TIMEOUT')globalThis.LiveSttDiagnostics?.capture(capture,'flush-timeout',{outcome:'FLUSH_TIMEOUT'});await this.handleLiveEvent({jobId:capture.jobId,generation:capture.generation,event:'stt-error',error:error.message});}
     }
     async cancelGlobalJob(jobId){
         const job=this.liveJobs.get(jobId);
@@ -1760,7 +1771,7 @@ class SttController {
             const text=payload.text||job.committed;this.publishCapture(job,'inserting');if(showLegacy())hudController_1.hud.setStatus('loading','Inserindo');const result=await this.insertJobText(job,text,true,payload);if(job.cancelled)return;
             this.rememberJobResult(job.jobId,result);
             if(!payload.editorDelivery)this.publishCapture(job,result.inserted?'completed':'insertion-failed');
-            if(showLegacy()){hudController_1.hud.setStatus('idle',result.inserted?'Parado · texto inserido':'Parado · texto não inserido');hudController_1.hud.setTextPreview(result.inserted?text:text?'O campo original não está disponível ou foi alterado. Copie a transcrição: '+text:'Nenhuma fala reconhecida.');}
+            if(showLegacy()){hudController_1.hud.setStatus('idle',payload.outcome==='NO_SPEECH'?'Parado · sem fala confirmada':result.inserted?'Parado · texto inserido':'Parado · texto não inserido');hudController_1.hud.setTextPreview(payload.outcome==='NO_SPEECH'?'Nenhuma fala confirmada por Silero + TEN.':result.inserted?text:text?'O campo original não está disponível ou foi alterado. Copie a transcrição: '+text:'Nenhuma fala reconhecida.');}
             job.insertion.dispose();this.liveJobs.delete(job.jobId);
             return result;
         }
@@ -1772,9 +1783,9 @@ class SttController {
         void globalThis.LiveSttDiagnostics?.emit({jobId:job.jobId,scope:'result',stage:'inserting',insertionAttempts:metrics.insertionAttempts,characters:text?.length||0});
         const isCurrent=()=>!job.cancelled&&(!payload.editorDelivery||payload.eventSeq===job.editorEventSeq);
         const editorTrace=payload.editorDelivery&&globalThis.LiveSttDiagnostics?{}:undefined;
-        let result;try{result=await job.insertion.apply(text,{final,isCurrent,editorTrace,confirmedText:payload.confirmedText,partialText:payload.partialText,sequence:payload.sequence,textBoundaries:payload.textBoundaries});}catch(error){result={inserted:false,reason:'EDITOR_ERROR'};console.error('[STT insertion]',error?.name||'Error');}
+        let result;try{result=payload.outcome==='NO_SPEECH'&&!text?{inserted:false,reason:'EMPTY_TEXT',characters:0}:await job.insertion.apply(text,{final,isCurrent,editorTrace,confirmedText:payload.confirmedText,partialText:payload.partialText,sequence:payload.sequence,textBoundaries:payload.textBoundaries});}catch(error){result={inserted:false,reason:'EDITOR_ERROR'};console.error('[STT insertion]',error?.name||'Error');}
         const first=result.inserted&&!metrics.insertionVerified;if(result.inserted){metrics.insertionVerified=(metrics.insertionVerified||0)+1;metrics.firstInsertionMs??=Date.now()-job.capture.startedAt;}
-        if(first||final||!result.inserted||payload.editorDelivery&&!payload.partialText)void globalThis.LiveSttDiagnostics?.emit({jobId:job.jobId,scope:'result',stage:result.inserted?'inserted':'insertion-failed',outcome:result.inserted?'INSERTED':'INSERTION_FAILED',inserted:result.inserted,characters:text?.length||0,firstInsertionMs:metrics.firstInsertionMs,insertionDurationMs:Date.now()-started,finalInsertion:final,whileRecording:this.liveCapture===job.capture&&!job.capture.stopping,sequence:payload.sequence,revision:payload.eventSeq,provisional:!!payload.partialText,editorReceivedMs:started-job.capture.startedAt,publicationToEditorMs:Number.isFinite(payload.publishedAt)?started-payload.publishedAt:undefined,dispatchToEditorMs:Number.isFinite(payload.dispatchedAt)?started-payload.dispatchedAt:undefined});
+        if(first||final||!result.inserted||payload.editorDelivery&&!payload.partialText)void globalThis.LiveSttDiagnostics?.emit({jobId:job.jobId,scope:'result',stage:result.inserted?'inserted':'insertion-failed',outcome:result.inserted?'INSERTED':'INSERTION_FAILED',editorReason:result.reason,inserted:result.inserted,characters:text?.length||0,firstInsertionMs:metrics.firstInsertionMs,insertionDurationMs:Date.now()-started,finalInsertion:final,whileRecording:this.liveCapture===job.capture&&!job.capture.stopping,sequence:payload.sequence,revision:payload.eventSeq,provisional:!!payload.partialText,editorReceivedMs:started-job.capture.startedAt,publicationToEditorMs:Number.isFinite(payload.publishedAt)?started-payload.publishedAt:undefined,dispatchToEditorMs:Number.isFinite(payload.dispatchedAt)?started-payload.dispatchedAt:undefined});
         if(payload.editorDelivery){
             if(result.inserted)job.appliedEditorRevision=payload.eventSeq;
             if(editorTrace&&(first||final||!result.inserted||!payload.partialText))void globalThis.LiveSttDiagnostics.emit({

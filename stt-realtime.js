@@ -20,7 +20,7 @@ function pcmRms(bytes,forVad=false){
 class CapturePipeline{
  constructor({jobId,realtime=false,continuous=false,adaptive=false,submitAudioChunk,onDiagnostic=()=>{},config={}}){this.jobId=jobId;this.realtime=realtime;this.continuous=continuous;this.adaptive=adaptive;this.submitAudioChunk=submitAudioChunk;this.onDiagnostic=onDiagnostic;this.config={...CONFIG,...config,...(continuous?{overlapMs:0}:{})};const c=this.config;if(!jobId||typeof submitAudioChunk!=='function'||![c.minChunkMs,c.maxChunkMs,c.silenceMs,c.preRollMs,c.overlapMs,c.rmsThreshold].every(Number.isFinite)||c.minChunkMs<0||c.maxChunkMs<c.minChunkMs||c.maxChunkMs<=0||c.silenceMs<=0||c.preRollMs<0||c.preRollMs>c.maxChunkMs||c.overlapMs<0||c.overlapMs>=c.minChunkMs||c.rmsThreshold<=0)throw failure('Configuração VAD inválida.');this.sequence=0;this.packetSequence=0;this.samples=0;this.noise=0;this.closed=false;this.chunk=null;this.tail=new Uint8Array();this.idle=new Uint8Array();this.skippedSilenceBytes=0;this.prefix=null;}
  diagnostic(stage,extra={}){this.onDiagnostic({stage,...extra});}
- emit(pcm,endOnly=false,cutReason){const c=this.chunk,meta={jobId:this.jobId,chunkId:c.chunkId,sequence:c.sequence,packetSequence:++this.packetSequence,startMs:c.startMs,endMs:this.samples/16,durationMs:this.samples/16-c.startMs,overlapMs:c.overlapMs,speechAfterOverlap:c.speechAfterOverlap,status:endOnly?'closed':'streaming',...(cutReason?{cutReason}:{})};this.submitAudioChunk({pcm,endOnly,chunk:meta});if(endOnly)this.diagnostic('chunk-created',{...meta,...c.evidence});}
+ emit(pcm,endOnly=false,cutReason){const c=this.chunk,meta={jobId:this.jobId,chunkId:c.chunkId,sequence:c.sequence,packetSequence:++this.packetSequence,startMs:c.startMs,endMs:this.samples/16,durationMs:this.samples/16-c.startMs,overlapMs:c.overlapMs,speechAfterOverlap:c.speechAfterOverlap,status:endOnly?'closed':'streaming',...(cutReason?{cutReason}:{})};globalThis.FalaDiagnostics?.aggregate({component:'stt',category:'capture',stage:'packet-created',jobId:this.jobId,chunkId:c.chunkId,details:{packetSequence:meta.packetSequence,sequence:c.sequence,bytes:pcm.byteLength,overlapMs:c.overlapMs}});this.submitAudioChunk({pcm,endOnly,chunk:meta});if(endOnly)this.diagnostic('chunk-created',{...meta,...c.evidence});}
  push(bytes,decision,analysis){if(this.closed)return false;if(!(bytes instanceof Uint8Array)||!bytes.length||bytes.byteLength%2)throw failure('PCM STT inválido.');if(!this.realtime){this.submitAudioChunk({pcm:bytes});return true;}
   const ms=bytes.byteLength/32,rms=pcmRms(bytes,true),threshold=Math.max(this.config.rmsThreshold,this.noise*3),rmsVoiced=rms>=(this.chunk?.speech?threshold*.7:threshold);if(!rmsVoiced)this.noise=this.noise*.98+rms*.02;
   const voiced=decision??rmsVoiced;
@@ -94,7 +94,32 @@ class RecoveryStore{
  async ensureRecoverySlot(){let items=await this.list(),archived=0;while(items.length>=129){if(!await this.archiveOldest())throw failure('Não há recuperação encerrada e não fixada que possa ser arquivada; nenhuma captura foi removida.','RECOVERY_LIMIT');archived++;items=await this.list();}if(archived)this.onArchive(archived);}
  async ensureAudioRoom(incoming,excludeJobId){let items=await this.list(),size=items.reduce((sum,job)=>sum+(job.bytes||0),0),archived=0;while(size+incoming>this.maxTotalBytes){if(!await this.archiveOldest(excludeJobId))throw failure('Limite de áudio das recuperações ativas atingido; não há recuperação encerrada e não fixada que possa ser arquivada.','RECOVERY_LIMIT');archived++;items=await this.list();size=items.reduce((sum,job)=>sum+(job.bytes||0),0);}if(archived)this.onArchive(archived);}
  async start(jobId,rawSettings={}){let existing=await this.list();if(existing.some(job=>job.jobId===jobId))throw failure('Recuperação STT já existe para este job; nenhum replay foi iniciado.','REQUEST');await this.ensureRecoverySlot();const allowed=['agentId','modelId','models','sttRecognition','transformInstruction','transformModels','thinkingLevel','thinkingBudget','vad','chunked','distributed','realtime'],secrets=Array.isArray(rawSettings.apiKeys)?rawSettings.apiKeys.filter(value=>typeof value==='string'&&value.length):[],clean=value=>{if(typeof value==='string')return secrets.reduce((safe,key)=>safe.split(key).join('[segredo removido]'),value);if(Array.isArray(value))return value.map(clean);if(value&&typeof value==='object')return Object.fromEntries(Object.entries(value).filter(([key])=>!/(api.?key|token|secret|authorization)/i.test(key)).map(([key,item])=>[key,clean(item)]));return value;},settings=Object.fromEntries(allowed.filter(key=>rawSettings?.[key]!==undefined).map(key=>[key,clean(rawSettings[key])]));return this.transaction(['jobs'],(tx,done,fail)=>{const store=tx.objectStore('jobs'),r=store.getAll();r.onsuccess=()=>{if(r.result.some(j=>j.jobId===jobId))return fail(failure('Recuperação STT já existe para este job; nenhum replay foi iniciado.','REQUEST'));if(r.result.filter(j=>j.jobId!=='__budget').length>=129)return fail(failure('Todas as recuperações estão ativas ou não podem ser arquivadas.','RECOVERY_LIMIT'));const job={jobId,createdAt:Date.now(),state:'recording',bytes:0,packets:0,blocks:0,unresolved:0,pinned:false,settings};store.add(job);done(job);};});}
- async append(jobId,packet){const current=(await this.list()).find(item=>item.jobId===jobId);if(!current||current.state!=='recording')throw failure('Recuperação STT não está disponível para gravação.','RECOVERY_STORAGE');if(current.bytes+packet.pcm.byteLength>this.maxJobBytes)throw failure('A captura atingiu o limite de áudio por ditado; o material já retido foi preservado.','RECOVERY_LIMIT');await this.ensureAudioRoom(packet.pcm.byteLength,jobId);return this.transaction(['jobs','audio'],(tx,done,fail)=>{const jobs=tx.objectStore('jobs'),r=jobs.get(jobId);r.onsuccess=()=>{const job=r.result;if(!job||job.state!=='recording')return fail(failure('Recuperação STT não está disponível para gravação.','RECOVERY_STORAGE'));const b=jobs.get('__budget');b.onsuccess=()=>{const budget=b.result||{jobId:'__budget',bytes:0},size=packet.pcm.byteLength;if(job.bytes+size>this.maxJobBytes)return fail(failure('A captura atingiu o limite de áudio por ditado; o material já retido foi preservado.','RECOVERY_LIMIT'));if(budget.bytes+size>this.maxTotalBytes)return fail(failure('O orçamento ativo de áudio continua cheio após arquivamento; o material já retido foi preservado.','RECOVERY_LIMIT'));tx.objectStore('audio').add({jobId,packetSequence:packet.chunk.packetSequence,sequence:packet.chunk.sequence,startMs:packet.chunk.startMs,endMs:packet.chunk.endMs,overlapMs:packet.chunk.overlapMs,pcm:packet.pcm.slice().buffer});job.bytes+=size;job.packets++;budget.bytes+=size;jobs.put(job);jobs.put(budget);done(job);};};});}
+ async append(jobId,packet){
+  const diagnostic=globalThis.FalaDiagnostics?.start('stt','persist-packet',jobId,{packetSequence:packet.chunk?.packetSequence,sequence:packet.chunk?.sequence,bytes:packet.pcm.byteLength});let diagnosticCode;
+  try{for(;;){
+   try{return await this.transaction(['jobs','audio'],(tx,done,fail)=>{
+    const jobs=tx.objectStore('jobs'),jobRequest=jobs.get(jobId),budgetRequest=jobs.get('__budget');
+    let received=0;
+    const append=()=>{
+     if(++received!==2)return;
+     const job=jobRequest.result,budget=budgetRequest.result||{jobId:'__budget',bytes:0},size=packet.pcm.byteLength;
+     if(!job||job.state!=='recording')return fail(failure('Recuperação STT não está disponível para gravação.','RECOVERY_STORAGE'));
+     if(job.bytes+size>this.maxJobBytes)return fail(failure('A captura atingiu o limite de áudio por ditado; o material já retido foi preservado.','RECOVERY_LIMIT'));
+     // The persisted counter is authoritative across extension contexts. No full journal scans on the hot path.
+     if(budget.bytes+size>this.maxTotalBytes)return fail(failure('Arquivamento necessário para liberar o orçamento ativo.','RECOVERY_ARCHIVE_NEEDED'));
+     tx.objectStore('audio').add({jobId,packetSequence:packet.chunk.packetSequence,sequence:packet.chunk.sequence,startMs:packet.chunk.startMs,endMs:packet.chunk.endMs,overlapMs:packet.chunk.overlapMs,pcm:packet.pcm.slice().buffer});
+     job.bytes+=size;job.packets++;budget.bytes+=size;jobs.put(job);jobs.put(budget);done(job);
+    };
+    jobRequest.onsuccess=budgetRequest.onsuccess=append;
+   });}catch(error){
+    if(error.code!=='RECOVERY_ARCHIVE_NEEDED')throw error;
+    // Compression/migration belongs only to the exceptional capacity path. Retry with a fresh atomic budget check.
+    if(!this.archiving)this.archiving=this.ensureAudioRoom(packet.pcm.byteLength,jobId).finally(()=>{this.archiving=null;});
+    await this.archiving;
+   }
+  }}catch(error){diagnosticCode=error.code||'RECOVERY_STORAGE';throw error;}finally{globalThis.FalaDiagnostics?.finish(diagnostic,{},diagnosticCode);}
+ }
+
  update(jobId,patch){return this.transaction(['jobs'],(tx,done)=>{const store=tx.objectStore('jobs'),r=store.get(jobId);r.onsuccess=()=>{if(!r.result)return;const job=r.result;for(const key of ['state','blocks','unresolved','transcribed','noSpeech','ambiguous','unresolvedSequences'])if(patch[key]!==undefined)job[key]=patch[key];store.put(job);done(job);};});}
  async list(){const db=await this.open();return new Promise((resolve,reject)=>{const tx=db.transaction('jobs'),r=tx.objectStore('jobs').getAll();r.onsuccess=()=>resolve(r.result.filter(j=>j.jobId!=='__budget'));r.onerror=()=>reject(failure('Falha ao ler recuperações STT.','RECOVERY_STORAGE'));});}
  pin(jobId,pinned){return this.transaction(['jobs'],(tx,done)=>{const store=tx.objectStore('jobs'),request=store.get(jobId);request.onsuccess=()=>{if(!request.result)return done(false);const job=request.result;job.pinned=pinned===true;store.put(job);done(true);};});}
@@ -212,9 +237,12 @@ class DistributedDictation {
    this.fail(error);
    return Promise.reject(error);
   }
+  this.diagnosticPersist??=globalThis.FalaDiagnostics?.queue('persist-send',this.jobId);
+  const diagnostic=this.diagnosticPersist?.enter({bytes,packetSequence:packet.chunk?.packetSequence??packet.packetSequence,sequence:packet.chunk?.sequence});
   this.queuedPackets++;
   this.queuedBytes+=bytes;
-  const work=this.work.then(()=>this.accept(packet)).finally(()=>{
+  const work=this.work.then(()=>{this.diagnosticPersist?.begin(diagnostic);return this.accept(packet);}).finally(()=>{
+   this.diagnosticPersist?.leave(diagnostic);
    this.queuedPackets--;
    this.queuedBytes-=bytes;
   });
@@ -263,7 +291,7 @@ class DistributedDictation {
    this.tail.set(prefix);
    this.tail.set(suffix,prefix.length);
   }
-  this.enqueue(block,pcm,chunk.speechAfterOverlap!==false);
+  this.enqueue(block,pcm,chunk.speechAfterOverlap!==false,chunk.packetSequence);
  }
  createBlock(chunk){
   const context=chunk.startMs===this.previousEnd&&chunk.overlapMs===0?this.tail:new Uint8Array();
@@ -271,22 +299,34 @@ class DistributedDictation {
   const block={sequence:chunk.sequence,startMs:chunk.startMs,endMs:chunk.endMs,
    sourceOverlapMs:chunk.overlapMs,overlapMs:chunk.overlapMs+context.length/32,speechAfterOverlap:chunk.speechAfterOverlap,
    lanes:[],packets:[],offset:0,admitted:0};
+  this.diagnosticBlocks??=globalThis.FalaDiagnostics?.queue('block-admission',this.jobId);
+  block.diagnostic=this.diagnosticBlocks?.enter({sequence:block.sequence,overlapMs:block.overlapMs});
   this.blocks.set(block.sequence,block);
   this.current=block;
   this.counts.blocks++;
-  if(this.pendingBlocks>=this.config.maxQueuedChunks)return block;
-  block.processing=true;
-  this.pendingBlocks++;
-  const accounts=new Set();
-  for(let copy=1;copy<=this.copies;copy++){
-   const lane={copy,cursor:0,text:'',interim:'',controller:new AbortController()};
-   block.lanes.push(lane);
-   void this.connect(block,lane,accounts);
-  }
+  this.admitWaiting();
   if(context.length)this.enqueue(block,context);
   return block;
  }
+ admitWaiting(){
+  if(this.cancelled)return;
+  for(const block of this.blocks.values()){
+   if(this.pendingBlocks>=this.config.maxQueuedChunks)break;
+   if(block.processing||block.settled)continue;
+   this.diagnosticBlocks?.begin(block.diagnostic);
+   block.processing=true;
+   this.pendingBlocks++;
+   const accounts=new Set();
+   for(let copy=1;copy<=this.copies;copy++){
+    const lane={copy,cursor:block.offset,text:'',interim:'',controller:new AbortController()};
+    block.lanes.push(lane);
+    void this.connect(block,lane,accounts);
+   }
+  }
+ }
+
  async connect(block,lane,accounts){
+  const diagnostic=globalThis.FalaDiagnostics?.start('stt','lane-open',this.jobId,{sequence:block.sequence,copy:lane.copy});let diagnosticCode;
   try{
    const session=await this.openLane({
     sequence:block.sequence,copy:lane.copy,accounts,signal:lane.controller.signal,
@@ -297,22 +337,26 @@ class DistributedDictation {
    lane.session=session;
    block.admitted++;
    this.flushLane(block,lane);
-  }catch(error){this.endLane(block,lane,error);}
+  }catch(error){diagnosticCode=error.code||'CONNECTION';this.endLane(block,lane,error);}finally{globalThis.FalaDiagnostics?.finish(diagnostic,{},diagnosticCode);}
  }
- enqueue(block,pcm,hasNewSpeech=false){
-  if(block.lanes.every(lane=>lane.done))return;
+ enqueue(block,pcm,hasNewSpeech=false,packetSequence){
+  if(block.settled||block.lanes.length&&block.lanes.every(lane=>lane.done))return;
   if(this.bufferedBytes+pcm.length>this.config.maxQueuedBytes||!this.budget.take(pcm.length)){
+   if(!block.processing)throw failure('Buffer STT cheio enquanto aguarda uma vaga de processamento.','BACKPRESSURE');
    // Only lanes still waiting for setup hold PCM after the other lane has sent it.
    for(const lane of block.lanes)if(!lane.session&&!lane.done)this.endLane(block,lane,failure('Buffer STT cheio.','BACKPRESSURE'));
    for(const lane of block.lanes)if(!lane.done)this.send(block,lane,{pcm,hasNewSpeech});
    return;
   }
   this.bufferedBytes+=pcm.length;
-  block.packets.push({pcm,hasNewSpeech});
+  this.diagnosticSend??=globalThis.FalaDiagnostics?.queue('gemini-send',this.jobId);
+  block.packets.push({pcm,hasNewSpeech,packetSequence,diagnostic:this.diagnosticSend?.enter({sequence:block.sequence,packetSequence,bytes:pcm.length})});
   for(const lane of block.lanes)this.flushLane(block,lane);
   this.trim(block);
  }
- send(block,lane,{pcm,hasNewSpeech}){
+ send(block,lane,{pcm,hasNewSpeech,diagnostic,packetSequence}){
+  this.diagnosticSend?.begin(diagnostic);
+  globalThis.FalaDiagnostics?.aggregate({component:'stt',category:'transport',stage:'chunk-send',jobId:this.jobId,chunkId:this.jobId+':'+block.sequence,details:{sequence:block.sequence,copy:lane.copy,packetSequence,bytes:pcm.length}});
   if(hasNewSpeech)lane.sentNewSpeech=true;
   try{lane.session.send(pcm,hasNewSpeech);}catch(error){this.endLane(block,lane,error);}
  }
@@ -328,8 +372,10 @@ class DistributedDictation {
   try{lane.session.end();}catch(error){this.endLane(block,lane,error);}
  }
  trim(block){
+  if(!block.processing)return;
   const consumed=Math.min(block.offset+block.packets.length,...block.lanes.filter(lane=>!lane.done).map(lane=>lane.cursor));
-  for(const {pcm} of block.packets.splice(0,consumed-block.offset)){
+  for(const {pcm,diagnostic} of block.packets.splice(0,consumed-block.offset)){
+   this.diagnosticSend?.leave(diagnostic);
    this.bufferedBytes-=pcm.length;
    this.budget.release(pcm.length);
   }
@@ -389,7 +435,7 @@ class DistributedDictation {
   if(reason!=='maximum')this.tail=new Uint8Array();
   this.current=null;
   for(const lane of block.lanes)this.flushLane(block,lane);
-  if(block.lanes.every(lane=>lane.done))this.complete(block);
+  if(block.processing&&block.lanes.every(lane=>lane.done))this.complete(block);
  }
  endLane(block,lane,error){
   if(lane.done)return;
@@ -404,6 +450,7 @@ class DistributedDictation {
  }
  complete(block,winner){
   if(block.settled||this.cancelled)return;
+  this.diagnosticBlocks?.leave(block.diagnostic,winner?undefined:'NO_TRANSCRIPTION');
   block.settled=true;
   block.text=winner?.text.trim()||'';
   if(block.processing)this.pendingBlocks--;
@@ -417,6 +464,7 @@ class DistributedDictation {
   for(const lane of block.lanes)this.endLane(block,lane);
   if(!winner||block.admitted<2)this.onWarning({sequence:block.sequence,gap:!winner});
   this.publish();
+  this.admitWaiting();
  }
  publish(){
   let advanced=false;
@@ -459,11 +507,16 @@ class DistributedDictation {
   }).catch(error=>this.fail(error));
   return this.finishing;
  }
- fail(error){if(!this.cancelled){this.cancel(error);this.onFailure(error);}}
+ fail(error){if(!this.cancelled){globalThis.FalaDiagnostics?.event({component:'stt',category:'transport',stage:'chunk-error',jobId:this.jobId,severity:'error',code:error.code||'STT_PIPELINE'});this.cancel(error);this.onFailure(error);}}
  cancel(error=failure('Ditado cancelado.','CANCELLED')){
   if(this.cancelled)return;
+  this.diagnosticPersist?.abandon(error.code);this.diagnosticBlocks?.abandon(error.code);this.diagnosticSend?.abandon(error.code);
   this.cancelled=true;
-  for(const block of this.blocks.values())for(const lane of block.lanes)this.endLane(block,lane);
+  for(const block of this.blocks.values()){
+   for(const lane of block.lanes)this.endLane(block,lane);
+   // Blocks waiting for admission have no lanes to release their PCM.
+   for(const {pcm} of block.packets.splice(0)){this.bufferedBytes-=pcm.length;this.budget.release(pcm.length);}
+  }
   this.blocks.clear();
   this.tail=new Uint8Array();
   this.reject?.(error);

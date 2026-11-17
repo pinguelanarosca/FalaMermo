@@ -5,7 +5,7 @@ const stages=new Set(['offscreen-command-received','socket-created','socket-open
 const enums={model:['gemini-3.8-live','gemini-3.8-live-extended-thinking','gemini-3.1-flash-live-preview','gemini-2.5-flash-native-audio-preview-12-2025'],schema:['BidiGenerateContentSetup'],family:['native-audio','level','budget'],phase:['created','connecting','socket-open','awaiting-setup-complete','ready','awaiting-first-pcm','streaming'],contextState:['suspended','running','closed','interrupted'],interactionStatus:['IN_PROGRESS','IDLE'],encoding:['PCM signed Int16'],endianness:['little']};
 const numberFields=['blockId','bytes','frames','sampleRate','channels','bitDepth','contextSampleRate','sourceBytes','volume','playbackRate','elapsedMs','readyState','code','blocks','socketOpenMs','setupCompleteMs','systemInstructionCharacters','textCharacters','wireTextCharacters','controlSeq','positionFrame','currentTime','availableStart','availableEnd'];
 const booleanFields=['muted','paused','local','socketOpen','setupCompleteReceived','systemInstructionPresent','workletPaused','outputMuted'];
-const validJob=id=>typeof id==='string'&&/^(?:job|manual)-\d{13}-[a-z0-9]{1,20}$/.test(id);
+const validJob=id=>typeof id==='string'&&/^(?:job|manual|lens)-\d{13}-[a-z0-9]{1,20}$/.test(id);
 const validSession=id=>typeof id==='string'&&/^live-\d{13}-[a-z0-9]{1,20}$/.test(id);
 function fields(input={}){
  const out={};for(const [key,values] of Object.entries(enums))if(values.includes(input[key]))out[key]=input[key];
@@ -25,7 +25,7 @@ function sanitize(packet){
  if(packet.protocol){const p=packet.protocol;out.protocol=fields(p);if(validSession(p.sessionId))out.protocol.sessionId=p.sessionId;out.protocol.milestones={};for(const stage of ['socket-open','setup-sent','setup-complete','turn-sent','first-pcm','turn-complete','turn-error'])if(p.milestones?.[stage]===true)out.protocol.milestones[stage]=true;}
  return out;
 }
-function emit(packet){const safe=sanitize(packet);if(!safe||!root.chrome?.runtime?.sendMessage)return;try{Promise.resolve(root.chrome.runtime.sendMessage({type:'LIVE_TTS_DIAGNOSTIC',payload:safe})).catch(()=>{});}catch{/* Diagnóstico nunca interrompe áudio. */}}
+function emit(packet){const safe=sanitize(packet);if(!safe)return;if(root.FalaDiagnostics){root.FalaDiagnostics.legacy('tts',safe);return;}if(!root.chrome?.runtime?.sendMessage)return;try{Promise.resolve(root.chrome.runtime.sendMessage({type:'LIVE_TTS_DIAGNOSTIC',payload:safe})).catch(()=>{});}catch{/* Diagnóstico nunca interrompe áudio. */}}
 function captureProtocol(snapshot){
  if(!snapshot)return;const event=snapshot.events?.at(-1);if(!event||!stages.has(event.event))return;
  const protocol={...fields(snapshot),...fields(snapshot.setup||{}),...fields(snapshot.turn||{}),sessionId:snapshot.sessionId,milestones:Object.fromEntries((snapshot.events||[]).map(e=>[e.event,true]))};
@@ -50,13 +50,13 @@ function clean(raw,now){
  return{version:1,jobs:jobs.sort((a,b)=>b.updatedAt-a.updatedAt).slice(0,MAX_JOBS)};
 }
 async function load(now){return clean((await storage().get(STORAGE_KEY))[STORAGE_KEY],now);}
-function record(packet){const safe=sanitize(packet);if(!safe)return Promise.resolve({success:false});return enqueue(async()=>{
+function record(packet){const safe=sanitize(packet);if(!safe)return Promise.resolve({success:false});if(root.DiagnosticsHub){root.FalaDiagnostics.legacy('tts',safe);return Promise.resolve({success:true});}return enqueue(async()=>{
  const now=Date.now(),state=await load(now);let job=state.jobs.find(j=>j.jobId===safe.jobId);if(!job){job={jobId:safe.jobId,updatedAt:now,events:[],sessions:[],milestones:{}};state.jobs.unshift(job);}
  job.updatedAt=now;job.milestones[safe.stage]=true;job.events.push({...safe,at:now});job.events=job.events.slice(-MAX_EVENTS);
  if(safe.protocol?.sessionId){const index=job.sessions.findIndex(s=>s.sessionId===safe.protocol.sessionId);if(index>=0){safe.protocol.milestones={...job.sessions[index].milestones,...safe.protocol.milestones};job.sessions.splice(index,1);}job.sessions.push(safe.protocol);job.sessions=job.sessions.slice(-MAX_SESSIONS);}
  await storage().set({[STORAGE_KEY]:clean(state,now)});return{success:true};
 });}
-function read(){return enqueue(async()=>{const state=await load(Date.now());await storage().set({[STORAGE_KEY]:state});return state;});}
+function read(){if(root.DiagnosticsHub)return Promise.resolve(root.DiagnosticsHub.project('tts'));return enqueue(async()=>{const state=await load(Date.now());await storage().set({[STORAGE_KEY]:state});return state;});}
 async function get(){const response=await root.chrome.runtime.sendMessage({type:'LIVE_TTS_DIAGNOSTICS_GET'});if(!response?.success)throw new Error('Não foi possível ler os diagnósticos TTS Live.');return response.diagnostics;}
-return{captureProtocol,capturePlayback,captureEvent,record,read,get,sanitize,STORAGE_KEY,MAX_JOBS,MAX_EVENTS,MAX_SESSIONS,TTL_MS};
+return{captureProtocol,capturePlayback,captureEvent,record,read,get,sanitize,clean,STORAGE_KEY,MAX_JOBS,MAX_EVENTS,MAX_SESSIONS,TTL_MS};
 });

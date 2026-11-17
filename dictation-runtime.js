@@ -4,12 +4,12 @@ const ACK_TIMEOUT_MS=10000;
 function timeout(promise,ms,code){let timer;return Promise.race([Promise.resolve(promise),new Promise((_,reject)=>{timer=setTimeout(()=>{const error=new Error(code);error.code=code;reject(error);},ms);})]).finally(()=>clearTimeout(timer));}
 class AudioQueue{
  constructor({send,onFailure=()=>{},onProgress=()=>{},metrics={},ackTimeoutMs=ACK_TIMEOUT_MS,maxPendingChunks=root.SttRealtime?.CONFIG.maxPendingPackets??320,maxPendingBytes=root.SttRealtime?.CONFIG.maxQueuedBytes??960000}){this.send=send;this.onFailure=onFailure;this.onProgress=onProgress;this.metrics=metrics;this.ackTimeoutMs=ackTimeoutMs;this.maxPendingChunks=maxPendingChunks;this.maxPendingBytes=maxPendingBytes;this.tail=Promise.resolve();this.failure=null;this.closed=false;Object.assign(metrics,{queuedChunks:0,queuedBytes:0,pendingChunks:0,pendingBytes:0,forwardedChunks:0,forwardedBytes:0,ackTimeouts:0});}
- push(payload,bytes){if(this.closed||this.failure)return false;const queuedAt=Date.now(),m=this.metrics;if(m.pendingChunks>=this.maxPendingChunks||m.pendingBytes+bytes>this.maxPendingBytes){const error=Object.assign(Error('Fila STT cheia; captura interrompida sem descarte silencioso.'),{code:'BACKPRESSURE'});this.failure=error;const cleanup=Promise.resolve().then(()=>this.onFailure(error)).catch(reason=>console.error('[STT queue cleanup]',reason?.name||'Error'));this.tail=Promise.all([this.tail,cleanup]).then(()=>{});return false;}m.queuedChunks++;m.queuedBytes+=bytes;m.pendingChunks++;m.pendingBytes+=bytes;this.onProgress(m);
-  const work=this.tail.then(async()=>{if(this.failure||this.closed)return;const waiting=Date.now()-queuedAt;m.queueWaitMs=waiting;m.maxQueueWaitMs=Math.max(m.maxQueueWaitMs||0,waiting);m.forwardedChunks++;m.forwardedBytes+=bytes;this.onProgress(m);const reply=await timeout(this.send(payload),this.ackTimeoutMs,'ACK_TIMEOUT');if(!reply?.success)throw Error(reply?.error||'Áudio Live sem confirmação de envio.');m.ackChunks=(m.ackChunks||0)+1;m.ackBytes=(m.ackBytes||0)+bytes;m.pendingChunks--;m.pendingBytes-=bytes;this.onProgress(m);});
-  this.tail=work.catch(error=>{if(this.failure||this.closed)return;this.failure=error;if(error.code==='ACK_TIMEOUT')m.ackTimeouts++;this.onProgress(m);return Promise.resolve(this.onFailure(error)).catch(failure=>console.error('[STT queue cleanup]',failure));});return true;
+ push(payload,bytes){if(this.closed||this.failure)return false;const queuedAt=Date.now(),m=this.metrics;if(m.pendingChunks>=this.maxPendingChunks||m.pendingBytes+bytes>this.maxPendingBytes){const error=Object.assign(Error('Fila STT cheia; captura interrompida sem descarte silencioso.'),{code:'BACKPRESSURE'});this.failure=error;const cleanup=Promise.resolve().then(()=>this.onFailure(error)).catch(reason=>console.error('[STT queue cleanup]',reason?.name||'Error'));this.tail=Promise.all([this.tail,cleanup]).then(()=>{});return false;}const diagnostics=root.FalaDiagnostics;this.diagnosticQueue??=diagnostics?.queue('capture-send',payload.jobId??payload.chunk?.jobId);const diagnostic=this.diagnosticQueue?.enter({bytes,packetSequence:payload.chunk?.packetSequence??payload.packetSequence,sequence:payload.chunk?.sequence});m.queuedChunks++;m.queuedBytes+=bytes;m.pendingChunks++;m.pendingBytes+=bytes;this.onProgress(m);
+  const work=this.tail.then(async()=>{if(this.failure||this.closed)return;this.diagnosticQueue?.begin(diagnostic);const waiting=Date.now()-queuedAt;m.queueWaitMs=waiting;m.maxQueueWaitMs=Math.max(m.maxQueueWaitMs||0,waiting);m.forwardedChunks++;m.forwardedBytes+=bytes;this.onProgress(m);const reply=await timeout(this.send(payload),this.ackTimeoutMs,'ACK_TIMEOUT');if(!reply?.success)throw Error(reply?.error||'Áudio Live sem confirmação de envio.');m.ackChunks=(m.ackChunks||0)+1;m.ackBytes=(m.ackBytes||0)+bytes;m.pendingChunks--;m.pendingBytes-=bytes;this.diagnosticQueue?.leave(diagnostic);this.onProgress(m);});
+  this.tail=work.catch(error=>{this.diagnosticQueue?.leave(diagnostic,error.code||'MESSAGE_FAILED');if(this.failure||this.closed)return;this.failure=error;if(error.code==='ACK_TIMEOUT')m.ackTimeouts++;this.onProgress(m);return Promise.resolve(this.onFailure(error)).catch(failure=>console.error('[STT queue cleanup]',failure));});return true;
  }
  async drain(){await this.tail;if(this.failure)throw this.failure;if(this.closed&&this.metrics.pendingChunks)throw Error('A fila STT foi encerrada antes de confirmar todo o áudio.');}
- close(){this.closed=true;}
+ close(){this.closed=true;this.diagnosticQueue?.abandon();}
 }
 // Apenas captura STT: falhas reais de dispositivo/worklet não podem parecer um Stop.
 function watchCapture(capture,{onFailure,onState=()=>{}}){
@@ -53,7 +53,7 @@ function atRangeOffset(element,offset,forward=false){
 }
 function captureTarget(doc=root.document){let element=doc.activeElement;while(element?.shadowRoot?.activeElement)element=element.shadowRoot.activeElement;if(!editable(element)||element.getRootNode?.().host?.id==='ext-tts-stt-host')return null;const original=textOf(element),snapshot={element,document:doc,original,documentAlive:true};
  if(typeof element.value==='string'){snapshot.selectionStart=element.selectionStart;snapshot.selectionEnd=element.selectionEnd;}
- else{const selection=(doc.defaultView||root.window)?.getSelection(),range=selection?.rangeCount?selection.getRangeAt(0):null;if(!range||!element.contains(range.startContainer)||!element.contains(range.endContainer))return null;snapshot.originalVisual=visualText(element);snapshot.range=range.cloneRange();snapshot.startNode=range.startContainer;snapshot.endNode=range.endContainer;snapshot.selectionStart=offsetOf(element,range.startContainer,range.startOffset);snapshot.selectionEnd=offsetOf(element,range.endContainer,range.endOffset);}
+ else{const selection=(doc.defaultView||root.window)?.getSelection(),range=selection?.rangeCount?selection.getRangeAt(0):null;if(!range||!element.contains(range.startContainer)||!element.contains(range.endContainer))return null;snapshot.originalVisual=visualText(element);snapshot.range=range.cloneRange();snapshot.rangeBaseline={value:rangeText(element),start:rangeOffset(element,range.startContainer,range.startOffset),end:rangeOffset(element,range.endContainer,range.endOffset)};snapshot.startNode=range.startContainer;snapshot.endNode=range.endContainer;snapshot.selectionStart=offsetOf(element,range.startContainer,range.startOffset);snapshot.selectionEnd=offsetOf(element,range.endContainer,range.endOffset);}
  return snapshot;
 }
 function inputEvent(type,text){if(typeof root.InputEvent==='function')return new root.InputEvent(type,{bubbles:true,composed:true,cancelable:type==='beforeinput',inputType:'insertText',data:text});return new root.Event(type,{bubbles:true,cancelable:type==='beforeinput'});}
@@ -82,6 +82,7 @@ class Insertion{
    expectedVisual:target?.originalVisual??(element?visualText(element):''),start:target?.selectionStart,end:target?.selectionEnd,
    invalidReason:null,writing:false,finalized:false,serial:Promise.resolve(),checkpoints:[]});
   this.textControl=typeof element?.value==='string';
+  if(target?.range&&element)this.rangeBaseline=target.rangeBaseline||(element.contains(target.range.startContainer)&&element.contains(target.range.endContainer)?{value:rangeText(element),start:rangeOffset(element,target.range.startContainer,target.range.startOffset),end:rangeOffset(element,target.range.endContainer,target.range.endOffset)}:undefined);
   this.onBeforeInput=event=>{
    if(this.writing||!this.textControl)return;
    this.manual={start:element.selectionStart,end:element.selectionEnd,type:event.inputType};
@@ -231,11 +232,20 @@ class Insertion{
   this.editorRebinds=(this.editorRebinds||0)+1;
   return true;
  }
+ rebindInitialRange(element){
+  const range=this.target.range,saved=this.rangeBaseline;
+  if(!saved||textOf(element)!==this.expected||rangeText(element)!==saved.value)return false;
+  if(element.contains(range.startContainer)&&element.contains(range.endContainer)&&
+     rangeOffset(element,range.startContainer,range.startOffset)===saved.start&&rangeOffset(element,range.endContainer,range.endOffset)===saved.end)return true;
+  // Somente markup mudou; o conteúdo completo e os offsets capturados continuam iguais.
+  const a=atRangeOffset(element,saved.start,true),b=atRangeOffset(element,saved.end);
+  range.setStart(a.node,a.offset);range.setEnd(b.node,b.offset);
+  this.target.startNode=a.node;this.target.endNode=b.node;this.editorRebinds=(this.editorRebinds||0)+1;
+  return true;
+ }
  async performRange(text,final,element,doc){
   const range=this.target.range;
-  const validRange=()=>this.hasOwned?this.rangeMatchesOwned(element):
-   textOf(element)===this.expected&&range.startContainer===this.target.startNode&&range.endContainer===this.target.endNode&&
-    element.contains(range.startContainer)&&element.contains(range.endContainer);
+  const validRange=()=>this.hasOwned?this.rangeMatchesOwned(element):this.rebindInitialRange(element);
   if(!text&&!this.hasOwned)return{inserted:false,reason:'EMPTY_TEXT'};
   if(!validRange())return{inserted:false,reason:'TARGET_CHANGED'};
   this.spacer??=this.start>0&&!/\s$/.test(this.expected.slice(0,this.start))&&text?' ':'';
@@ -416,7 +426,7 @@ class SessionInsertion{
   let range;
   if(caret&&selected&&element.contains(selected.endContainer)){range=selected.cloneRange();range.collapse(false);}
   else{const a=atRangeOffset(element,start??rangeText(element).length,true),b=atRangeOffset(element,end??start??rangeText(element).length);range=doc.createRange();range.setStart(a.node,a.offset);range.setEnd(b.node,b.offset);}
-  return{element,document:doc,original,originalVisual:visualText(element),range,startNode:range.startContainer,endNode:range.endContainer,
+  return{element,document:doc,original,originalVisual:visualText(element),range,rangeBaseline:{value:rangeText(element),start:rangeOffset(element,range.startContainer,range.startOffset),end:rangeOffset(element,range.endContainer,range.endOffset)},startNode:range.startContainer,endNode:range.endContainer,
    selectionStart:rangeOffset(element,range.startContainer,range.startOffset),selectionEnd:rangeOffset(element,range.endContainer,range.endOffset)};
  }
  replaceWriter(target){

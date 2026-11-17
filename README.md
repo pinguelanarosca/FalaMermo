@@ -2,34 +2,35 @@
 
 Extensão Chrome Manifest V3 para narração, ditado e seleção visual com Gemini, agentes personalizados e HUD na página.
 
-FalaMermo v1.0.7 consolida a dupla confirmação local Silero + TEN, recuperação automática do VAD, arquivamento de tarefas e diagnósticos do ditado. A versão do manifesto é `1.0.7`; ZIP e checksum acompanham a [release v1.0.7](https://github.com/pinguelanarosca/FalaMermo/releases/tag/v1.0.7).
+FalaMermo v1.0.8 consolida a Central de Diagnóstico, tradução pelo atalho, automação e isolamento do HUD e correções de inserção, encerramento e recuperação do ditado. A versão do manifesto é `1.0.8`; ZIP e checksum acompanham a [release v1.0.8](https://github.com/pinguelanarosca/FalaMermo/releases/tag/v1.0.8).
 
 ## Instalação no Chrome
 
-1. Baixe e extraia `FalaMermo-v1.0.7.zip` da [release v1.0.7](https://github.com/pinguelanarosca/FalaMermo/releases/tag/v1.0.7), ou clone [este repositório](https://github.com/pinguelanarosca/FalaMermo) na branch `main`.
+1. Baixe e extraia `FalaMermo-v1.0.8.zip` da [release v1.0.8](https://github.com/pinguelanarosca/FalaMermo/releases/tag/v1.0.8), ou clone [este repositório](https://github.com/pinguelanarosca/FalaMermo) na branch `main`.
 2. Mantenha o código em uma pasta permanente. `manifest.json` deve estar diretamente nessa pasta.
 3. Abra `chrome://extensions`, ative **Modo do desenvolvedor** e escolha **Carregar sem compactação**.
 4. Selecione a pasta extraída, abra as opções da extensão e configure sua chave Gemini.
 5. Atualize as páginas que já estavam abertas. Após atualizar/recarregar a extensão, atualize também essas páginas.
 
-Não há etapa de build obrigatória. Para atualizar uma instalação descompactada, feche trabalhos ativos, atualize o código na mesma pasta já carregada e clique **Recarregar** em `chrome://extensions`. Não remova a extensão nem limpe seu armazenamento; mantenha a pasta para preservar a instalação e as preferências. Atualize também as páginas abertas. Pacotes anteriores não contêm as mudanças da v1.0.7.
+Não há etapa de build obrigatória. Para atualizar uma instalação descompactada, feche trabalhos ativos, atualize o código na mesma pasta já carregada e clique **Recarregar** em `chrome://extensions`. Não remova a extensão nem limpe seu armazenamento; mantenha a pasta para preservar a instalação e as preferências. Atualize também as páginas abertas. Pacotes anteriores não contêm as mudanças da v1.0.8.
 
 ## Configuração e utilização
 
 Nas opções, salve sua chave Gemini e escolha o agente ativo. É possível configurar até nove chaves, criar/editar agentes e ajustar os parâmetros disponíveis por modelo. Cada tentativa real pode consumir cota; criar um agente local não cria uma voz remota.
 
 - **Narração:** selecione texto na página e use o atalho ou o item direto **Narrar** no menu de contexto. HUD e popup controlam tarefas já criadas; não iniciam leitura de uma nova seleção da página.
+- **Tradução:** selecione texto e use `Alt+Shift+Y` para traduzir para PT-BR e narrar o resultado, sem substituir a seleção original. O comando é configurável em `chrome://extensions/shortcuts`. O menu de contexto mantém somente **Narrar**, diretamente.
 - **Ditado:** posicione o cursor em um campo editável, use o atalho de ditado, autorize o microfone e aguarde “Gravando” antes de falar. Use novamente o atalho ou **Parar** no cartão daquele ditado para concluir. O Gemini 3.8 Live usa VAD manual por padrão para delimitar a fala; preferências explícitas de VAD são preservadas. A inserção usa o campo/seleção original; não deve acompanhar uma mudança de foco para outro campo. Se o campo desaparecer, copie o resultado mostrado no HUD. Nas opções, o botão **Copiar diagnóstico STT** fornece contadores e estados sem exigir Console.
 - **Lens:** extrai apenas o texto legível da área e o narra literalmente, preservando palavras, pontuação e quebras relevantes, sem análise da persona. Duas contas disputam a primeira resposta válida; há substituição progressiva, fallback e Stop, com uma tarefa e uma narração. Sem texto legível, o cartão informa a ausência e não gera áudio. Use o atalho Lens e selecione uma região. Quando necessário, a extensão abre sua própria interface para pedir autorização opcional de captura. A autorização exige acesso a todos os sites por uma limitação da API de captura do Chrome. Pode ser recusada ou revogada; não é concedida permanentemente na instalação. A captura depende de uma ação explícita do usuário.
 - **Personalização:** agentes compartilham identidade e mantêm instruções próprias para narração e ditado; o Lens usa um contrato fixo de OCR literal. Há configurações por modelo e editor avançado com painel, override JSON, JSON completo e preview. Parâmetros incompatíveis não devem ser enviados indiscriminadamente entre STT e TTS.
 
 A narração separa o texto-fonte literal das instruções de estilo do agente. A transcrição do áudio gerado usa `outputTranscription`, sem misturar pensamentos do modelo. Volume, velocidade, pitch, equalização e ambiência são processados localmente; pitch por resampling também altera a duração. A literalidade é um contrato enviado ao modelo, não garantia absoluta de reconhecimento ou geração.
 
-Atalhos internos padrão: `Ctrl+B` para ler seleção, `Ctrl+Shift+Space` para iniciar/parar ditado, `Ctrl+Shift+L` para Lens, `Pause` para pausar/retomar e `Alt+Shift+H` para alternar o HUD. São configuráveis nas opções. O Chrome também oferece os comandos `Alt+Shift+S`, `Alt+Shift+D` e `Alt+Shift+H`, configuráveis em `chrome://extensions/shortcuts`; atalhos podem conflitar com a página ou o sistema.
+Atalhos internos padrão: `Ctrl+B` para ler seleção, `Ctrl+Shift+Space` para iniciar/parar ditado, `Ctrl+Shift+L` para Lens, `Pause` para pausar/retomar e `Alt+Shift+H` para alternar o HUD. São configuráveis nas opções. O Chrome também oferece os comandos `Alt+Shift+S`, `Alt+Shift+D`, `Alt+Shift+H` e `Alt+Shift+Y`, configuráveis em `chrome://extensions/shortcuts`; atalhos podem conflitar com a página ou o sistema.
 
 ### HUD/Popup compartilhados
 
-Cada narração e ditado tem um cartão próprio, sincronizado entre páginas, popup, opções e janela individual. Novas tarefas aparecem no topo por data de criação; cartões automáticos começam recolhidos, com chevron, maximizar e X. O X apenas oculta o cartão global, sem parar o job nem apagar o resultado. **Parar** é um controle separado. Ao minimizar o HUD, a barra superior mantém os três controles globais, o badge de atividade e restaurar/fechar; popup e opções continuam acessíveis. A lista do popup tem rolagem própria sem esconder cabeçalho, agente ou player. As barras de rolagem são visualmente ocultas, sem desativar teclado, toque ou roda do mouse.
+Cada narração e ditado tem um cartão próprio, sincronizado entre páginas, popup, opções e janela individual. Uma tarefa iniciada na própria aba abre o HUD e aparece expandida, recolhendo as demais. O HUD exibe até quatro cartões, com a tarefa em destaque e as anteriores mais recentes; a expansão manual é preservada. Após toda atividade terminar, o HUD automático fecha em cinco segundos, com cancelamento do fechamento se outra tarefa começar. Consultas abertas manualmente não recebem esse fechamento automático. Tarefas globais continuam sincronizadas, mas abrir uma página ou PWA sem atividade própria não torna seu HUD visível. O histórico completo permanece acessível nas Opções. O X apenas oculta o cartão global, sem parar o job nem apagar o resultado. **Parar** é um controle separado. Ao minimizar o HUD, a barra superior mantém os três controles globais, o badge de atividade e restaurar/fechar; popup e opções continuam acessíveis. A lista do popup tem rolagem própria sem esconder cabeçalho, agente ou player. As barras de rolagem são visualmente ocultas, sem desativar teclado, toque ou roda do mouse.
 
 Os controles globais **⏪ ▶/⏸ ⏩** ficam lado a lado: Pause pausa a narração em reprodução; sem nenhuma reproduzindo, Play retoma a narração pausada selecionada ou a mais recente. Sem pausadas, Play fica desabilitado e nunca inicia uma tarefa concluída. Cada cartão TTS expandido e sua janela têm **⏪ ▶/⏸ ⏩ ■** individuais; Play explícito após conclusão cria nova reprodução. O volume global afeta a saída da extensão. Velocidade e setas globais afetam a narração ativa; os controles individuais afetam somente seu cartão. Em páginas restritas, consulte e controle as tarefas pelo popup ou pelas opções.
 
@@ -116,7 +117,7 @@ O seek exato por palavra ainda está indisponível. No ciclo de correção anter
 
 Não há ganho comparativo de latência comprovado para o scheduler nem teto real de TPM conhecido automaticamente. Os testes reais anteriores do scheduler usaram áudio sintético e não substituem homologação física da instalação atual.
 
-Consulte as [notas da v1.0.7](docs/RELEASE-v1.0.7.md), as [notas da v1.0.6](docs/RELEASE-v1.0.6.md), as [notas da v1.0.5](docs/RELEASE-v1.0.5.md), as [notas da v1.0.4](docs/RELEASE-v1.0.4.md), as [notas da v1.0.3](docs/RELEASE-v1.0.3.md), o [histórico v1.0.2](docs/RELEASE-v1.0.2.md), as [notas v1.0.1](docs/RELEASE-v1.0.1.md) e a [release v1.0.0](https://github.com/pinguelanarosca/FalaMermo/releases/tag/v1.0.0).
+Consulte as [notas da v1.0.8](docs/RELEASE-v1.0.8.md), as [notas da v1.0.7](docs/RELEASE-v1.0.7.md), as [notas da v1.0.6](docs/RELEASE-v1.0.6.md), as [notas da v1.0.5](docs/RELEASE-v1.0.5.md), as [notas da v1.0.4](docs/RELEASE-v1.0.4.md), as [notas da v1.0.3](docs/RELEASE-v1.0.3.md), o [histórico v1.0.2](docs/RELEASE-v1.0.2.md), as [notas v1.0.1](docs/RELEASE-v1.0.1.md) e a [release v1.0.0](https://github.com/pinguelanarosca/FalaMermo/releases/tag/v1.0.0).
 
 ## Validação do código
 
@@ -137,3 +138,9 @@ O ditado no campo e na página de Opções usa Silero + TEN VAD, ambos locais e 
 Falhas de inferência reinicializam o worker e reprocessam apenas o PCM ainda não entregue, aquecendo os estados com contexto recente sem reenviá-lo. Deadline por análise: 1.500 ms; fila normal até 5 segundos de PCM, limite de emergência 10 segundos. Após falhas repetidas o envio fica bloqueado e o PCM pendente é salvo nas recuperações locais. O HUD mostra as duas probabilidades e os diagnósticos incluem confirmações, rejeições, deadlines e recuperações.
 
 O TEN WASM oficial e seu JavaScript estão em `vad-assets/ten/`, com origem e commit em `SOURCE.txt` e licença integral em `LICENSE`. Os artefatos são empacotados na extensão, sem CDN. Validação acústica automatizada: `node tests/stt-dual-vad-chrome.cjs [segmento47.wav] [fala-humana.wav]`. O teste usa um perfil Chrome isolado, os modelos reais e nenhuma chave Gemini.
+
+## Central de Diagnóstico
+
+Após recarregar a extensão em `chrome://extensions`, abra **Opções → Central de Diagnóstico**. A aba independente reúne captura, VAD, persistência, transporte, Gemini, TTS, mensagens Chrome e tarefas. Selecione Normal para métricas agregadas ou Forense para rastreamento detalhado; filtre por componente, severidade e tarefa e use **Salvar logs** para exportar JSON sanitizado.
+
+A coleta continua com a Central fechada, com buffer circular configurável e transporte em lotes. Pausar e limpar afetam somente a visualização. Não são registrados áudio, transcrições, instruções ou credenciais. Métricas, testes, custo medido e limites de observabilidade estão em [DIAGNOSTICS.md](DIAGNOSTICS.md).

@@ -34,7 +34,7 @@
   `;
 
 /* Visual transplant from visualstttts: CSS-only glass skin. All task state and commands stay authoritative. */
-const GLASS_SKIN_CSS=String.raw\`
+const GLASS_SKIN_CSS=String.raw`
   .ext-hud-card {
     width:min(440px,calc(100vw - 24px));
     background:linear-gradient(158deg,rgba(23,32,53,.57),rgba(9,15,28,.49) 82%);
@@ -135,7 +135,7 @@ const GLASS_SKIN_CSS=String.raw\`
   @media(prefers-reduced-motion:reduce){
     .ext-hud-header::after{animation:none!important}
   }
-\`;
+`;
   function text(value){return typeof value==='string'?value:'';}
   function number(value){return typeof value==='number'&&Number.isFinite(value)?value:null;}
   function can(job,action){const c=job.controls;return Array.isArray(c)?c.includes(action):!!(c&&c[action]);}

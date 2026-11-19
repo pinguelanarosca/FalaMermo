@@ -3,7 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
 const root = path.resolve(__dirname, '..');
-const PUBLIC_VERSION = '1.0.8';
+const PUBLIC_VERSION = '1.0.9';
 const runtimeFiles = [
     'diagnostics-runtime.js', 'diagnostics-background.js', 'diagnostics.html', 'diagnostics.css', 'diagnostics.js',
     'manifest.json', 'background.js', 'content.js', 'content.css',
@@ -18,7 +18,7 @@ const runtimeFiles = [
     'icons/icon16.png', 'icons/icon48.png', 'icons/icon128.png',
 ];
 function publicFiles() {
-    return [...runtimeFiles, 'README.md', 'DIAGNOSTICS.md', '.gitignore', 'docs/RELEASE-v1.0.0.md', 'docs/RELEASE-v1.0.1.md', 'docs/RELEASE-v1.0.2.md', 'docs/RELEASE-v1.0.3.md', 'docs/RELEASE-v1.0.4.md', 'docs/RELEASE-v1.0.5.md', 'docs/RELEASE-v1.0.6.md', 'docs/RELEASE-v1.0.7.md', 'docs/RELEASE-v1.0.8.md',
+    return [...runtimeFiles, 'README.md', 'DIAGNOSTICS.md', '.gitignore', 'docs/RELEASE-v1.0.0.md', 'docs/RELEASE-v1.0.1.md', 'docs/RELEASE-v1.0.2.md', 'docs/RELEASE-v1.0.3.md', 'docs/RELEASE-v1.0.4.md', 'docs/RELEASE-v1.0.5.md', 'docs/RELEASE-v1.0.6.md', 'docs/RELEASE-v1.0.7.md', 'docs/RELEASE-v1.0.8.md', 'docs/RELEASE-v1.0.9.md',
         'tools/verify-publication.cjs', 'tools/package-release.cjs',
         ...fs.readdirSync(path.join(root, 'tests')).filter(name =>
             name.endsWith('.test.cjs') || ['hud-border-states-chrome.cjs', 'hud-conflict-chrome.cjs', 'hud-interactions-chrome.cjs', 'hud-refinements-chrome.cjs', 'hud-rail-border-chrome.cjs', 'hud-adjustments-chrome.cjs', 'hud-transparency-chrome.cjs', 'hud-windows-chrome.cjs', 'hud-homologation-chrome.cjs', 'hud-glass-chrome.cjs', 'task-float-chrome.cjs', 'task-float-stt-chrome.cjs', 'task-float-drag-chrome.cjs', 'hud-audio-chrome-cases.cjs', 'diagnostics-chrome.cjs', 'pwa-hud-chrome.cjs', 'runtime-audit-chrome.cjs', 'stt-persistence-performance.cjs', 'translation-hud-chrome.cjs', 'selection-chrome.cjs', 'stt-editors-chrome.cjs', 'stt-editors-browser.html', 'stt-continuous-browser.html', 'load-background.cjs', 'stt-audio-fixture.cjs', 'controls-chrome.cjs', 'stt-vad-chrome-cases.cjs', 'vad-go-sintetico.pcm', 'vad-oh-sintetico.pcm', 'audio-controls-browser.html', 'audio-controls-browser.js', 'stt-native-browser.html', 'AUDIO-CONTROLS.md'].includes(name)).map(name => 'tests/' + name)].sort();

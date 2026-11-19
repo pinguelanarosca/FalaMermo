@@ -2,17 +2,17 @@
 
 Extensão Chrome Manifest V3 para narração, ditado e seleção visual com Gemini, agentes personalizados e HUD na página.
 
-FalaMermo v1.0.8 consolida a Central de Diagnóstico, tradução pelo atalho, automação e isolamento do HUD e correções de inserção, encerramento e recuperação do ditado. A versão do manifesto é `1.0.8`; ZIP e checksum acompanham a [release v1.0.8](https://github.com/pinguelanarosca/FalaMermo/releases/tag/v1.0.8).
+FalaMermo v1.0.9 publica o HUD Glass, com barra compacta, transparências independentes, tamanho global persistente, apresentação local por aba e tarefas flutuantes dentro da página. A versão do manifesto é `1.0.9`; ZIP e checksum acompanham a [release v1.0.9](https://github.com/pinguelanarosca/FalaMermo/releases/tag/v1.0.9).
 
 ## Instalação no Chrome
 
-1. Baixe e extraia `FalaMermo-v1.0.8.zip` da [release v1.0.8](https://github.com/pinguelanarosca/FalaMermo/releases/tag/v1.0.8), ou clone [este repositório](https://github.com/pinguelanarosca/FalaMermo) na branch `main`.
+1. Baixe e extraia `FalaMermo-v1.0.9.zip` da [release v1.0.9](https://github.com/pinguelanarosca/FalaMermo/releases/tag/v1.0.9), ou clone [este repositório](https://github.com/pinguelanarosca/FalaMermo) na branch `main`.
 2. Mantenha o código em uma pasta permanente. `manifest.json` deve estar diretamente nessa pasta.
 3. Abra `chrome://extensions`, ative **Modo do desenvolvedor** e escolha **Carregar sem compactação**.
 4. Selecione a pasta extraída, abra as opções da extensão e configure sua chave Gemini.
 5. Atualize as páginas que já estavam abertas. Após atualizar/recarregar a extensão, atualize também essas páginas.
 
-Não há etapa de build obrigatória. Para atualizar uma instalação descompactada, feche trabalhos ativos, atualize o código na mesma pasta já carregada e clique **Recarregar** em `chrome://extensions`. Não remova a extensão nem limpe seu armazenamento; mantenha a pasta para preservar a instalação e as preferências. Atualize também as páginas abertas. Pacotes anteriores não contêm as mudanças da v1.0.8.
+Não há etapa de build obrigatória. Para atualizar uma instalação descompactada, feche trabalhos ativos, atualize o código na mesma pasta já carregada e clique **Recarregar** em `chrome://extensions`. Não remova a extensão nem limpe seu armazenamento; mantenha a pasta para preservar a instalação e as preferências. Atualize também as páginas abertas. Pacotes anteriores não contêm as mudanças da v1.0.9.
 
 ## Configuração e utilização
 
@@ -30,7 +30,11 @@ Atalhos internos padrão: `Ctrl+B` para ler seleção, `Ctrl+Shift+Space` para i
 
 ### HUD/Popup compartilhados
 
-Cada narração e ditado tem um cartão próprio, sincronizado entre páginas, popup, opções e janela individual. Uma tarefa iniciada na própria aba abre o HUD e aparece expandida, recolhendo as demais. O HUD exibe até quatro cartões, com a tarefa em destaque e as anteriores mais recentes; a expansão manual é preservada. Após toda atividade terminar, o HUD automático fecha em cinco segundos, com cancelamento do fechamento se outra tarefa começar. Consultas abertas manualmente não recebem esse fechamento automático. Tarefas globais continuam sincronizadas, mas abrir uma página ou PWA sem atividade própria não torna seu HUD visível. O histórico completo permanece acessível nas Opções. O X apenas oculta o cartão global, sem parar o job nem apagar o resultado. **Parar** é um controle separado. Ao minimizar o HUD, a barra superior mantém os três controles globais, o badge de atividade e restaurar/fechar; popup e opções continuam acessíveis. A lista do popup tem rolagem própria sem esconder cabeçalho, agente ou player. As barras de rolagem são visualmente ocultas, sem desativar teclado, toque ou roda do mouse.
+Cada narração e ditado tem um cartão próprio, sincronizado entre páginas, Popup, Opções e apresentações individuais. Novas tarefas abrem o HUD recolhido na barra vertical; o raio expande/restaura o painel, preservando uma expansão já escolhida manualmente. Mostrar, ocultar, minimizar e posicionar afetam somente a aba de origem. O tamanho escolhido é global, persistente e sincronizado entre abas e janelas, limitado visualmente à viewport sem alterar a preferência salva.
+
+O HUD exibe até quatro cartões, com expansão independente, indicadores compactos e telemetria nos detalhes da tarefa. O botão ↗ abre uma janela flutuante dentro da própria aba, com edição, cópia, narração, controles, arraste e redimensionamento; fechá-la não interrompe a tarefa. O X do cartão apenas o oculta, sem parar a execução nem apagar o resultado. **Parar** é um controle separado. A barra recolhida mantém os três transportes globais, pânico, Opções e ocultação. O agente ativo continua acessível pelo Popup e pelas Opções.
+
+Os dois sliders do Popup ajustam separadamente a transparência estrutural e dos elementos internos, sem alterar o blur. As bordas refletem tipo/atividade, e a waveform fica dentro de cada tarefa expandida, animada somente com atividade real. Após toda atividade terminar, o HUD automático pode fechar em cinco segundos; nova atividade ou clique dentro do HUD cancela o fechamento, e a consulta manual é preservada. Abrir uma página/PWA sem atividade própria não revela o HUD de outra aba. O histórico completo permanece nas Opções. A rolagem interna continua acessível por teclado, toque e roda do mouse.
 
 Os controles globais **⏪ ▶/⏸ ⏩** ficam lado a lado: Pause pausa a narração em reprodução; sem nenhuma reproduzindo, Play retoma a narração pausada selecionada ou a mais recente. Sem pausadas, Play fica desabilitado e nunca inicia uma tarefa concluída. Cada cartão TTS expandido e sua janela têm **⏪ ▶/⏸ ⏩ ■** individuais; Play explícito após conclusão cria nova reprodução. O volume global afeta a saída da extensão. Velocidade e setas globais afetam a narração ativa; os controles individuais afetam somente seu cartão. Em páginas restritas, consulte e controle as tarefas pelo popup ou pelas opções.
 
@@ -117,7 +121,7 @@ O seek exato por palavra ainda está indisponível. No ciclo de correção anter
 
 Não há ganho comparativo de latência comprovado para o scheduler nem teto real de TPM conhecido automaticamente. Os testes reais anteriores do scheduler usaram áudio sintético e não substituem homologação física da instalação atual.
 
-Consulte as [notas da v1.0.8](docs/RELEASE-v1.0.8.md), as [notas da v1.0.7](docs/RELEASE-v1.0.7.md), as [notas da v1.0.6](docs/RELEASE-v1.0.6.md), as [notas da v1.0.5](docs/RELEASE-v1.0.5.md), as [notas da v1.0.4](docs/RELEASE-v1.0.4.md), as [notas da v1.0.3](docs/RELEASE-v1.0.3.md), o [histórico v1.0.2](docs/RELEASE-v1.0.2.md), as [notas v1.0.1](docs/RELEASE-v1.0.1.md) e a [release v1.0.0](https://github.com/pinguelanarosca/FalaMermo/releases/tag/v1.0.0).
+Consulte as [notas da v1.0.9](docs/RELEASE-v1.0.9.md), as [notas da v1.0.8](docs/RELEASE-v1.0.8.md), as [notas da v1.0.7](docs/RELEASE-v1.0.7.md), as [notas da v1.0.6](docs/RELEASE-v1.0.6.md), as [notas da v1.0.5](docs/RELEASE-v1.0.5.md), as [notas da v1.0.4](docs/RELEASE-v1.0.4.md), as [notas da v1.0.3](docs/RELEASE-v1.0.3.md), o [histórico v1.0.2](docs/RELEASE-v1.0.2.md), as [notas v1.0.1](docs/RELEASE-v1.0.1.md) e a [release v1.0.0](https://github.com/pinguelanarosca/FalaMermo/releases/tag/v1.0.0).
 
 ## Validação do código
 

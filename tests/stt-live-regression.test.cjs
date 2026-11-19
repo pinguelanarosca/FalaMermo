@@ -7,7 +7,7 @@ function contentEnv({slowMic=false,slowModule=false,slowStart=false,diagnostics=
  class Input{constructor(value='original'){this._value=value;this.selectionStart=0;this.selectionEnd=0;this.isConnected=true;this.events=[];}get value(){return this._value;}set value(v){this._value=v;this.nativeWrites=(this.nativeWrites||0)+1;}focus(){doc.activeElement=this;}dispatchEvent(e){this.events.push(e.type);}getRootNode(){return{};}}
  class Textarea extends Input{get value(){return super.value;}set value(v){super.value=v;}}
  const input=new Textarea(),other=new Textarea('outro'),doc={activeElement:input,addEventListener(name,fn){events[name]=fn;},createTextNode:text=>({text}),createRange(){throw Error('range não configurado');}};
- const hud={init(){},setStatus:(kind,label)=>states.push([kind,label]),setTextPreview(text){this.preview=text;},setCaptureNotice(text){this.captureNotice=text;},show(){}};
+ const hud={init(){},setStatus:(kind,label)=>states.push([kind,label]),setTextPreview(text){this.preview=text;},setCaptureNotice(text){this.captureNotice=text;},showMicrophoneBusyNotice(text){this.microphoneNotice=text;},show(){}};
  function stream(){const track=Object.assign(new EventTarget(),{stopped:false,stop(){this.stopped=true;}});const item={track,getTracks:()=>[track]};streams.push(item);return item;}
  class AudioContext extends EventTarget{constructor(){super();this.sampleRate=48000;this.state='suspended';this.destination={};this.audioWorklet={addModule:()=>slowModule?moduleReady.promise:Promise.resolve()};contexts.push(this);}createMediaStreamSource(){return{connect:x=>{this.sourceConnected=true;return x;},disconnect(){}};}createGain(){return{gain:{value:1},connect:x=>x,disconnect(){}};}async resume(){this.state='running';this.dispatchEvent(new Event('statechange'));}async close(){this.state='closed';this.dispatchEvent(new Event('statechange'));}}
  class Node extends EventTarget{constructor(){super();nodes.push(this);this.port={postMessage:msg=>{if(msg.type==='flush')this.port.onmessage({data:{type:'flushed'}});}};}connect(x){return x;}disconnect(){this.disconnected=true;}}
@@ -44,7 +44,7 @@ test('reserva recusada por ditado em outra aba exibe aviso sem abrir microfone n
  e.runtime.sendMessage=async message=>{
   if(message.type==='STT_CAPTURE_RESERVE'){
    e.messages.push(message);
-   return {success:false,code:'STT_CAPTURE_BUSY',otherTab:true};
+   return {success:false,code:'STT_CAPTURE_BUSY',otherTab:true,error:'O microfone já está em uso na aba “ChatGPT”.'};
   }
   return send(message);
  };
@@ -53,7 +53,7 @@ test('reserva recusada por ditado em outra aba exibe aviso sem abrir microfone n
  assert.equal(e.streams.length,0);
  assert.equal(e.stt.liveCapture,null);
  assert.equal(e.timers.size,0);
- assert.equal(e.hud.captureNotice,'Já existe um ditado em andamento em outra aba.');
+ assert.equal(e.hud.microphoneNotice,'O microfone já está em uso na aba “ChatGPT”.');
  assert.ok(e.states.every(([,label])=>!/Falha|Atualize/.test(label)));
  e.runtime.sendMessage=send;
  await e.stt.toggleRecording('narrator');

@@ -230,7 +230,7 @@ function liveFixture() {
     const press = async session => { await key('rawKeyDown', false, session); await key('keyUp', false, session); };
     const sttCount = async () => ((await state())?.jobs || []).filter(item => item.type === 'STT').length;
     let sttJobId;
-    if(!process.env.FALAMERMO_PANIC_ONLY&&!process.env.FALAMERMO_VAD_ONLY)for (const mode of ['final', 'realtime']) {
+    if(!process.env.FALAMERMO_HUD_AUDIO_ONLY&&!process.env.FALAMERMO_PANIC_ONLY&&!process.env.FALAMERMO_VAD_ONLY)for (const mode of ['final', 'realtime']) {
         await waitFor('background inicializado', () => evaluate(worker, 'typeof chrome !== "undefined" && typeof GlobalJobs !== "undefined"'));
     await evaluate(worker, 'chrome.storage.local.set({ui:{dictationInsertion:' + JSON.stringify(mode) + '}})');
         await waitFor(mode, () => content('fixtureStt.insertionMode === ' + JSON.stringify(mode)));
@@ -272,7 +272,7 @@ function liveFixture() {
     const defaultInstructions = require('../live-config.js').STT_DEFAULT_INSTRUCTIONS;
     const editedInstructions = 'Preserve siglas.\nMantenha nomes próprios.';
     const editedVocabulary = ['FalaMermo', 'Banco de Dados'];
-    if(!process.env.FALAMERMO_VAD_ONLY){
+    if(!process.env.FALAMERMO_HUD_AUDIO_ONLY&&!process.env.FALAMERMO_VAD_ONLY){
     options = await target(base + 'options.html');
     const recognitionForm = () => optionsEval(`(() => ({
         instructions:document.querySelector('#sttRecognitionInstructions')?.value,
@@ -340,6 +340,11 @@ function liveFixture() {
             if (!/target|session|context/i.test(error.message)) throw error;
         }
     });
+    if(process.env.FALAMERMO_HUD_AUDIO_ONLY){
+        popup=await target(base+'popup.html');
+        await require('./hud-audio-chrome-cases.cjs')({content,evaluate,worker,status,job,offscreen,waitFor,target,attach,base,click,act,card,toggle,sleep,call,page});
+        return;
+    }
     if(process.env.FALAMERMO_VAD_ONLY){
         await require(process.env.FALAMERMO_GHOST_ONLY?'./stt-ghost-chrome-cases.cjs':'./stt-vad-chrome-cases.cjs')({call,worker,content,evaluate,waitFor,offscreen,locate,base,status,job,sleep,page,click,target});
         return;
@@ -491,9 +496,9 @@ function liveFixture() {
     await call('Page.bringToFront',{},page.session);
     await press();
     const activeDictation = await waitFor('primeiro ditado', () => content('fixtureStt.isRecording && fixtureStt.liveJobId'));
-    await waitFor('HUD aberto e expandido na origem',async()=>{
+    await waitFor('HUD aberto recolhido na origem',async()=>{
         const current=await appearance(content);
-        return current.visible&&!current.minimized;
+        return current.visible&&current.minimized;
     });
     for(const observer of observers){
         await waitFor('tarefa sincronizada no observador',()=>observer.view(
@@ -501,31 +506,32 @@ function liveFixture() {
         ));
         assert.deepEqual(await appearance(observer.view),observer.before);
     }
-    console.log('HUD: abertura e expansão somente na origem, com outras abas e outra janela sincronizadas');
+    console.log('HUD: abertura recolhida somente na origem; tarefas sincronizadas sem transferir apresentação');
     const dictationsBefore = await sttCount();
-    await click('#ext-btn-min', content);
-    await waitFor('HUD minimizado na segunda aba', () => secondContent('fixtureHud.querySelector(".ext-hud-body").hidden'));
-    await waitFor('minimização manual sincronizada na outra janela', () => windowContent('fixtureHud.querySelector(".ext-hud-body").hidden'));
+    await click('#ext-btn-toggle', content);
+    await waitFor('expansão manual somente na origem', () => content('!fixtureHud.querySelector(".ext-hud-body").hidden'));
+    for(const observer of observers)assert.deepEqual(await appearance(observer.view),observer.before);
     await call('Target.closeTarget',{targetId:hiddenPage.targetId});
     await call('Target.closeTarget',{targetId:otherWindow.targetId});
     await secondContent('fixtureStt.toggleRecording()');
     assert.equal(await secondContent('fixtureStt.liveCapture'), null);
     assert.equal(await sttCount(), dictationsBefore);
     assert.equal(await secondContent('fixtureHud.querySelector(".ext-hud-card").classList.contains("hidden")'), false);
-    assert.equal(await secondContent(`(() => {
+    assert.match(await secondContent(`(() => {
         const alert = [...fixtureHud.querySelectorAll('[role="alert"]')].find(node => node.getBoundingClientRect().height > 0);
         return alert?.textContent;
-    })()`), 'Já existe um ditado em andamento em outra aba.');
+    })()`), /^O microfone já está (?:em uso na aba|sendo usado por outro ditado)/);
     assert.equal(await secondContent('fixtureHud.querySelector(".ext-hud-body").hidden'), true);
     assert.doesNotMatch(await secondContent('fixtureHud.querySelector(".ext-hud-card").innerText'), /atualize|recarregue|F5/i);
-    await waitFor('confianças Silero e TEN no HUD da captura',()=>content('/Silero.*TEN/.test(fixtureHud.querySelector("#ext-capture-notice").textContent)'));
-    assert.equal(await content('fixtureHud.querySelector("#ext-capture-notice").hidden'), false);
+    const telemetry='[data-job-id="'+activeDictation+'"] .fm-hud-metrics';
+    await waitFor('Silero e TEN nos detalhes da tarefa de captura',()=>content('(()=>{const d=fixtureHud.querySelector('+JSON.stringify(telemetry)+');return d&&/Silero: (?!—)/.test(d.textContent)&&/TEN: (?!—)/.test(d.textContent)})()'));
+    assert.equal(await content('fixtureHud.querySelector("#ext-capture-telemetry")'), null);
     assert.equal(await content('fixtureStt.liveJobId'), activeDictation);
-    await click('#ext-btn-min', content);
-    await waitFor('HUD restaurado', () => content('!fixtureHud.querySelector(".ext-hud-body").hidden'));
+    await click('#ext-btn-toggle', content);
+    await waitFor('HUD recolhido manualmente', () => content('fixtureHud.querySelector(".ext-hud-body").hidden'));
     options = await openHudSettings();
     assert.equal((await job(activeDictation)).status, 'recording');
-    assert.equal((await state()).minimized, false);
+    assert.equal((await appearance(content)).minimized, true);
     await waitFor('Opções carregadas', () => optionsEval('typeof toggleLiveSttTest === "function" && !!currentAgent'));
     await optionsEval('toggleLiveSttTest()');
     assert.equal(await optionsEval('liveMic'), null);
@@ -535,7 +541,7 @@ function liveFixture() {
     await status(activeDictation, 'completed');
     await secondContent('fixtureStt.toggleRecording()');
     const retried = await waitFor('ditado na segunda aba após liberação', () => secondContent('fixtureStt.isRecording && fixtureStt.liveJobId'));
-    assert.equal(await secondContent('fixtureHud.querySelector(".ext-hud-card").innerText.includes("Já existe um ditado")'), false);
+    assert.equal(await secondContent('fixtureHud.querySelector("#ext-microphone-notice")?.hidden??true'), true);
     await waitFor('PCM da segunda aba', () => secondContent('fixtureStt.liveCapture?.metrics?.forwardedBytes > 0'));
     await secondContent('fixtureStt.toggleRecording()');
     await status(retried, 'completed');
@@ -548,7 +554,7 @@ function liveFixture() {
     await status(optionsJob, 'completed');
     await call('Target.closeTarget', {targetId: options.targetId});
     options = await openHudSettings();
-    assert.equal((await state()).minimized, false);
+    assert.equal((await appearance(content)).minimized, true);
     await call('Target.closeTarget', {targetId: options.targetId});
     console.log('HUD minimizado: aviso local, exclusividade e novo ditado após liberação. Engrenagem abriu options.html durante e após o ditado');
 
@@ -1073,13 +1079,14 @@ x.XSync(d,0); x.XCloseDisplay(d)
     await call('Target.closeTarget', {targetId: popup.targetId});
     assert.equal((await player(a)).playbackState, 'playing');
     await click('#ext-btn-close', content);
-    await waitFor('HUD fechado', async () => (await state()).visible === false);
+    await waitFor('HUD fechado na origem', async () => (await appearance(content)).visible === false);
     assert.equal((await player(a)).playbackState, 'playing');
     await content('chrome.runtime.sendMessage({type:"HUD_GLOBAL_UI_SET",payload:{visible:true}})');
-    await waitFor('HUD reaberto', async () => (await state()).visible === true);
+    await waitFor('HUD reaberto na origem', async () => (await appearance(content)).visible === true);
+    const beforeOptions=await appearance(content);
     options = await openHudSettings();
     assert.equal((await player(a)).playbackState, 'playing');
-    assert.equal((await state()).minimized, false);
+    assert.deepEqual(await appearance(content),beforeOptions);
     await call('Target.closeTarget', {targetId: options.targetId});
     console.log('Engrenagem abriu options.html durante a narração, sem alterar a reprodução');
     console.log('TTS exclusivo, volumes independentes, posição preservada e fechamento do HUD e pop-up');

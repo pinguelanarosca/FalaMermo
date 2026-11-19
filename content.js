@@ -187,6 +187,10 @@ function initialize() {
     // Listener para mensagens vindas do Background / Popup / Menus
     chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         switch (message.type) {
+            case 'HUD_TASK_OPEN': {
+                void hudController_1.hud.openTask(message.payload?.jobId).then(()=>sendResponse({success:true}),()=>sendResponse({success:false}));
+                return true;
+            }
             case 'HUD_GLOBAL_STATE': {
                 const state=message.state||message.payload?.state;
                 ttsController_1.tts.applyGlobalState?.(state);
@@ -332,6 +336,16 @@ class HudController {
     dragStartY = 0;
     posX = 24;
     posY = 24;
+    panel = null;
+    rail = null;
+    waveform = null;
+    notices = null;
+    telemetry = null;
+    telemetryJobId = null;
+    motionFrame = 0;
+    layoutFrame = 0;
+    motion = {x:0,y:0,vx:0,vy:0,time:0};
+    reducedMotion = false;
     static getInstance() {
         if (!HudController.instance) {
             HudController.instance = new HudController();
@@ -341,6 +355,7 @@ class HudController {
     init(cssContent) {
         if (this.container)
             return;
+        this.cssContent=cssContent;
         shadowDomWrapper_1.shadowDom.injectStyles(cssContent);
         const root = shadowDomWrapper_1.shadowDom.getRoot();
         const wrapper = document.createElement('div');
@@ -349,25 +364,60 @@ class HudController {
         wrapper.style.right = `${this.posX}px`;
         wrapper.style.bottom = `${this.posY}px`;
         wrapper.innerHTML = `
-      <div class="ext-hud-header" id="ext-drag-handle">
+      <div class="ext-hud-header" id="ext-drag-handle" tabindex="0" role="group" aria-label="Mover HUD. Use as setas quando esta barra estiver em foco.">
+        <span class="ext-hud-glass" aria-hidden="true"></span>
+        <button class="ext-btn-icon ext-hud-toggle" id="ext-btn-toggle" type="button" title="Minimizar HUD" aria-label="Minimizar HUD" aria-expanded="true" aria-controls="ext-hud-panel"><svg class="ext-hud-mark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="m13 2-9 12h7l-1 8L21 9h-8z"/></svg></button>
         <div class="ext-hud-title">
-          <span>⚡ FalaMermo</span>
+          <span>FalaMermo</span>
           <span class="ext-hud-badge idle" id="ext-badge">Pronto</span>
         </div>
         <div id="ext-global-compact" class="fm-global-mini-controls" hidden></div>
         <div class="ext-hud-controls" id="ext-global-emergency">
-          <button class="ext-btn-icon" id="ext-btn-min" title="Ocultar">−</button>
-          <button class="ext-btn-icon" id="ext-btn-close" title="Fechar">✕</button>
+          <button class="ext-btn-icon" id="ext-btn-options" type="button" title="Abrir Opções" aria-label="Abrir Opções">⚙️</button>
+          <button class="ext-btn-icon" id="ext-btn-close" title="Ocultar HUD sem parar tarefas" aria-label="Ocultar HUD sem parar tarefas">✕</button>
         </div>
       </div>
-      <div class="fm-global-message fm-hud-capture-notice" id="ext-panic-notice" role="status"></div>
-      <div class="fm-global-message fm-hud-capture-notice" id="ext-capture-notice" role="alert" hidden></div>
-      <div class="ext-hud-body">
-        <div id="ext-global-jobs"></div>
+      <div class="ext-hud-notices" id="ext-hud-notices">
+        <div class="fm-global-message fm-hud-capture-notice" id="ext-panic-notice" role="status" aria-live="polite"></div>
+        <div class="fm-global-message fm-hud-capture-notice" id="ext-capture-notice" role="alert" hidden></div>
+        <div class="fm-global-message fm-hud-capture-notice fm-hud-microphone-notice" id="ext-microphone-notice" role="alert" hidden><span></span><button class="ext-btn-icon" type="button" title="Dispensar aviso" aria-label="Dispensar aviso de microfone ocupado">✕</button></div>
+      </div>
+      <div class="ext-hud-panel" id="ext-hud-panel">
+        <span class="ext-hud-glass" aria-hidden="true"></span>
+        <button id="ext-resize-handle" type="button" aria-label="Redimensionar HUD. Use as setas." title="Redimensionar HUD (arraste ou use as setas)">⌜</button>
+        <div class="ext-hud-body"><div id="ext-global-jobs"></div></div>
       </div>
     `;
         root.appendChild(wrapper);
         this.container = wrapper;
+        this.applyTransparency(50);
+        this.applyContentTransparency(50);
+        // One durable appearance preference; storage events update existing HUDs.
+        // It is deliberately separate from per-tab presentation in the registry.
+        if(globalThis.chrome?.storage?.local){
+            let appearanceRevision=0,sizeRevision=0;
+            const changed=(changes,area)=>{if(area!=='local')return;if(changes.hudTransparency||changes.hudContentTransparency)appearanceRevision++;if(changes.hudSize)sizeRevision++;if(changes.hudTransparency)this.applyTransparency(changes.hudTransparency.newValue);if(changes.hudContentTransparency)this.applyContentTransparency(changes.hudContentTransparency.newValue);if(changes.hudSize&&!this.resizing)this.applySize(changes.hudSize.newValue);};
+            chrome.storage.onChanged?.addListener(changed);
+            const read=()=>{const revision=appearanceRevision,sizeReadRevision=sizeRevision;const failed=()=>this.globalView?.notice('Não foi possível recuperar as preferências do HUD.');try{void chrome.storage.local.get(['hudTransparency','hudContentTransparency','hudSize']).then(saved=>{if(revision===appearanceRevision){this.applyTransparency(saved.hudTransparency);this.applyContentTransparency(saved.hudContentTransparency);}if(sizeReadRevision===sizeRevision&&!this.resizing)this.applySize(saved.hudSize);}).catch(failed);}catch{failed();}};
+            window.addEventListener('pageshow',read);read();
+        }
+        this.panel = wrapper.querySelector('.ext-hud-panel');
+        this.rail = wrapper.querySelector('#ext-drag-handle');
+
+        this.notices = wrapper.querySelector('#ext-hud-notices');
+        this.setupResize(wrapper);
+        wrapper.inert = true;
+        const motionPreference = window.matchMedia('(prefers-reduced-motion: reduce)');
+        this.reducedMotion = motionPreference.matches;
+        motionPreference.addEventListener('change', event => { this.reducedMotion=event.matches; if(event.matches)this.resetMotion(); });
+        window.addEventListener('resize', () => this.queueLayout());
+        window.visualViewport?.addEventListener('resize', () => this.queueLayout());
+        window.visualViewport?.addEventListener('scroll', () => this.queueLayout());
+        if(typeof ResizeObserver!=='undefined'){
+            this.layoutObserver = new ResizeObserver(() => this.queueLayout());
+            this.layoutObserver.observe(wrapper);
+            this.layoutObserver.observe(this.notices);
+        }
         this.badgeElement = wrapper.querySelector('#ext-badge');
         this.previewElement = wrapper.querySelector('#ext-preview');
         this.playPauseBtn = wrapper.querySelector('#ext-btn-play');
@@ -375,13 +425,22 @@ class HudController {
         this.speedSlider = wrapper.querySelector('#ext-speed');
         this.setupListeners(wrapper);
         if(globalThis.GlobalHud){
-            this.globalView=globalThis.GlobalHud.mount(wrapper.querySelector('#ext-global-jobs'),{embedded:true,panicContainer:wrapper.querySelector('#ext-global-emergency'),panicNotice:wrapper.querySelector('#ext-panic-notice'),compactControls:wrapper.querySelector('#ext-global-compact'),agentSelector:true,send:message=>chrome.runtime.sendMessage(message),onState:state=>this.applyGlobalState(state)});
+            this.globalView=globalThis.GlobalHud.mount(wrapper.querySelector('#ext-global-jobs'),{embedded:true,panicContainer:wrapper.querySelector('#ext-global-emergency'),panicNotice:wrapper.querySelector('#ext-panic-notice'),compactControls:wrapper.querySelector('#ext-global-compact'),noticeContainer:this.notices,send:message=>chrome.runtime.sendMessage(message),onState:state=>this.applyGlobalState(state),openTask:jobId=>this.openTask(jobId)});
         }
     }
+    openTask(jobId){return globalThis.GlobalHud.openTask(jobId,{doc:document,css:this.cssContent,appearanceSource:this.container,send:message=>chrome.runtime.sendMessage(message)});}
     setupListeners(wrapper) {
+        // Capture reaches texts, empty surfaces and controls that stop bubbling.
+        wrapper.addEventListener?.('click',()=>this.updateGlobalUi({interaction:true}),true);
+        wrapper.querySelector('#ext-microphone-notice button')?.addEventListener('click',()=>this.dismissMicrophoneNotice());
         const handle = wrapper.querySelector('#ext-drag-handle');
         const closeBtn = wrapper.querySelector('#ext-btn-close');
-        const minBtn = wrapper.querySelector('#ext-btn-min');
+        const minBtn = wrapper.querySelector('#ext-btn-toggle');
+        wrapper.querySelector('#ext-btn-options')?.addEventListener('click', event => {
+            event.stopPropagation();
+            const fail=error=>this.globalView?.notice(/context invalidated/i.test(error?.message||'')?'Extensão atualizada. Atualize esta página (F5).':error?.message||'Não foi possível abrir Opções.');
+            try{void chrome.runtime.sendMessage({type:'HUD_OPEN_OPTIONS'}).then(result=>{if(!result?.success)fail(new Error(result?.error||'Não foi possível abrir Opções.'));}).catch(fail);}catch(error){fail(error);}
+        });
         const micBtn = wrapper.querySelector('#ext-btn-mic');
         const lensBtn = wrapper.querySelector('#ext-btn-lens');
         const stopBtn = wrapper.querySelector('#ext-btn-stop');
@@ -389,7 +448,7 @@ class HudController {
             this.hide();
             this.onCloseClick?.();
         });
-        minBtn?.addEventListener('click', () => this.updateGlobalUi({minimized:!this.globalMinimized}));
+        minBtn?.addEventListener('click', () => this.updateGlobalUi({toggleMinimized:true}));
         this.playPauseBtn?.addEventListener('click', () => this.onPlayPauseClick?.());
         micBtn?.addEventListener('click', () => this.onRecordClick?.());
         lensBtn?.addEventListener('click', () => this.onLensClick?.());
@@ -402,35 +461,161 @@ class HudController {
             const val = parseFloat(e.target.value);
             this.onSpeedChange?.(val);
         });
-        // Suporte a arrastar (Drag and drop)
-        handle?.addEventListener('mousedown', (e) => {
-            if(e.button!==0||e.target.closest?.('button,input,a,[data-no-drag]'))return;
-            this.isDragging = true;
-            this.dragStartX = e.clientX;
-            this.dragStartY = e.clientY;
-            const rect = wrapper.getBoundingClientRect();
-            this.posX = window.innerWidth - rect.right;
-            this.posY = window.innerHeight - rect.bottom;
-            const onMouseMove = (ev) => {
-                if (!this.isDragging)
-                    return;
-                const dx = ev.clientX - this.dragStartX;
-                const dy = ev.clientY - this.dragStartY;
-                wrapper.style.right = `${Math.max(10, this.posX - dx)}px`;
-                wrapper.style.bottom = `${Math.max(10, this.posY - dy)}px`;
+        // Pointer capture keeps the rail usable with mouse, pen and touch.
+        handle?.addEventListener('pointerdown', event => {
+            if(event.button!==0||event.target.closest?.('button,input,select,textarea,a,[contenteditable],[data-no-drag]'))return;
+            event.preventDefault();
+            this.isDragging=true;
+            wrapper.dataset.dragging='true';
+            let lastX=event.clientX,lastY=event.clientY;
+            handle.setPointerCapture(event.pointerId);
+            const move=ev=>{
+                if(ev.pointerId!==event.pointerId)return;
+                this.moveHud(ev.clientX-lastX,ev.clientY-lastY);
+                lastX=ev.clientX;lastY=ev.clientY;
             };
-            const onMouseUp = (ev) => {
-                this.isDragging = false;
-                const dx = ev.clientX - this.dragStartX;
-                const dy = ev.clientY - this.dragStartY;
-                this.posX = Math.max(10, this.posX - dx);
-                this.posY = Math.max(10, this.posY - dy);
-                window.removeEventListener('mousemove', onMouseMove);
-                window.removeEventListener('mouseup', onMouseUp);
+            const finish=ev=>{
+                if(ev?.pointerId!==undefined&&ev.pointerId!==event.pointerId)return;
+                this.isDragging=false;wrapper.dataset.dragging='false';
+                window.removeEventListener('pointermove',move);
+                window.removeEventListener('pointerup',finish);
+                window.removeEventListener('pointercancel',finish);
+                window.removeEventListener('blur',finish);
+                handle.removeEventListener('lostpointercapture',finish);
+                if(handle.hasPointerCapture(event.pointerId))handle.releasePointerCapture(event.pointerId);
+                this.endDrag=null;
+                this.queueLayout();
             };
-            window.addEventListener('mousemove', onMouseMove);
-            window.addEventListener('mouseup', onMouseUp);
+            this.endDrag=finish;
+            window.addEventListener('pointermove',move);
+            window.addEventListener('pointerup',finish);
+            window.addEventListener('pointercancel',finish);
+            window.addEventListener('blur',finish);
+            handle.addEventListener('lostpointercapture',finish);
         });
+        handle?.addEventListener('keydown',event=>{
+            if(event.target!==handle||!['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(event.key))return;
+            event.preventDefault();const step=event.shiftKey?1:10;
+            this.moveHud(event.key==='ArrowLeft'?-step:event.key==='ArrowRight'?step:0,event.key==='ArrowUp'?-step:event.key==='ArrowDown'?step:0);
+        });
+    }
+    queueLayout(){
+        if(!this.panel||this.layoutFrame)return;
+        this.layoutFrame=window.requestAnimationFrame(()=>{this.layoutFrame=0;this.constrainPosition();});
+    }
+    applyTransparency(raw){
+        if(!this.container)return;
+        const value=typeof raw==='number'&&Number.isFinite(raw)?Math.max(0,Math.min(100,raw)):50;
+        const material=(base,opaque,clear)=>value<=50?base+(opaque-base)*(50-value)/50:base+(clear-base)*(value-50)/50;
+        for(const [key,base,opaque,clear]of [
+            ['panel',.49,.97,.025],['rail',.44,.97,.035]
+        ])this.container.style.setProperty('--hud-'+key+'-alpha',String(Number(material(base,opaque,clear).toFixed(4))));
+        this.container.dataset.transparency=String(value);
+    }
+    applyContentTransparency(raw){
+        if(!this.container)return;
+        const value=typeof raw==='number'&&Number.isFinite(raw)?Math.max(0,Math.min(100,raw)):50;
+        for(const [key,base,opaque,clear]of [['card',.76,.96,.68],['active',.8,.97,.72],['control',.78,.96,.74],['surface',.76,.96,.7],['title',.8,.97,.74],['panic',.8,.96,.75],['transport',.6,.9,.55],['button',.04,.2,.02],['indicator',.055,.16,.025],['muted',.025,.12,.01],['transcript',.17,.4,.08]]){
+            const alpha=value<=50?base+(opaque-base)*(50-value)/50:base+(clear-base)*(value-50)/50;
+            this.container.style.setProperty('--hud-'+key+'-alpha',String(Number(alpha.toFixed(4))));
+        }
+        this.container.style.setProperty('--hud-border-strength',String(Number((1-value*.008).toFixed(4))));
+        this.container.dataset.contentTransparency=String(value);
+    }
+    applySize(size){
+        if(!this.container||!Number.isFinite(size?.width)||!Number.isFinite(size?.height))return;
+        // Keep the preference intact; viewport constraints only affect its rendering.
+        const width=Math.max(320,Math.min(10000,size.width)),height=Math.max(260,Math.min(10000,size.height));
+        const vw=globalThis.window?.visualViewport?.width||document.documentElement.clientWidth,vh=globalThis.window?.visualViewport?.height||document.documentElement.clientHeight;
+        this.hudSize={width,height};this.container.dataset.resized='true';
+        this.container.style.setProperty('--hud-width',Math.min(width,vw-24)+'px');this.container.style.setProperty('--hud-height',Math.min(height,vh-48)+'px');
+        this.queueLayout();
+    }
+    queueSizeSave(){
+        if(this.sizeSaveFrame)return;
+        this.sizeSaveFrame=window.requestAnimationFrame(()=>{
+            this.sizeSaveFrame=0;const size={...this.hudSize};
+            try{void chrome.storage.local.set({hudSize:size}).catch(()=>this.globalView?.notice('Não foi possível salvar o tamanho do HUD.'));}catch{this.globalView?.notice('Não foi possível salvar o tamanho do HUD.');}
+        });
+    }
+    setupResize(wrapper){
+        const handle=wrapper.querySelector('#ext-resize-handle');
+        handle.addEventListener('pointerdown',event=>{
+            if(event.button!==0)return;event.preventDefault();event.stopPropagation();this.resetMotion();this.resizing=true;
+            const rect=wrapper.getBoundingClientRect(),x=event.clientX,y=event.clientY;
+            handle.setPointerCapture(event.pointerId);
+            const move=e=>{if(e.pointerId===event.pointerId){this.applySize({width:rect.width+x-e.clientX,height:rect.height+y-e.clientY});this.queueSizeSave();}};
+            const end=e=>{if(e.pointerId!==undefined&&e.pointerId!==event.pointerId)return;this.resizing=false;window.removeEventListener('pointermove',move);window.removeEventListener('pointerup',end);window.removeEventListener('pointercancel',end);window.removeEventListener('blur',end);handle.removeEventListener('lostpointercapture',end);if(handle.hasPointerCapture(event.pointerId))handle.releasePointerCapture(event.pointerId);if(this.hudSize)this.updateGlobalUi({size:this.hudSize});};
+            window.addEventListener('pointermove',move);window.addEventListener('pointerup',end);window.addEventListener('pointercancel',end);window.addEventListener('blur',end);handle.addEventListener('lostpointercapture',end);
+        });
+        handle.addEventListener('keydown',event=>{
+            if(!['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(event.key))return;event.preventDefault();const r=wrapper.getBoundingClientRect(),step=event.shiftKey?1:10;
+            this.applySize({width:r.width+(event.key==='ArrowLeft'?step:event.key==='ArrowRight'?-step:0),height:r.height+(event.key==='ArrowUp'?step:event.key==='ArrowDown'?-step:0)});this.updateGlobalUi({size:this.hudSize});
+        });
+    }
+    constrainPosition(){
+        if(!this.panel)return;
+        if(this.hudSize&&this.container.dataset.minimized!=='true'){const w=(window.visualViewport?.width||document.documentElement.clientWidth)-24,h=(window.visualViewport?.height||document.documentElement.clientHeight)-48;this.container.style.setProperty('--hud-width',Math.min(this.hudSize.width,w)+'px');this.container.style.setProperty('--hud-height',Math.min(this.hudSize.height,h)+'px');}
+        const envelope=this.container.getBoundingClientRect(),viewport=window.visualViewport;
+        // The preferred size includes empty space above short/collapsed cards.
+        // Bound actual surfaces, excluding the panel's temporary elastic transform.
+        let rect=envelope;
+        if(this.rail&&Number.isFinite(this.panel.offsetHeight)){
+            const rail=this.rail.getBoundingClientRect(),expanded=this.container.dataset.minimized!=='true';
+            const panel={left:envelope.left+this.panel.offsetLeft,top:envelope.top+this.panel.offsetTop,right:envelope.left+this.panel.offsetLeft+this.panel.offsetWidth,bottom:envelope.top+this.panel.offsetTop+this.panel.offsetHeight};
+            rect=expanded?{left:Math.min(rail.left,panel.left),top:Math.min(rail.top,panel.top),right:Math.max(rail.right,panel.right),bottom:Math.max(rail.bottom,panel.bottom)}:{left:rail.left,top:rail.top,right:rail.right,bottom:rail.bottom};
+            rect.width=rect.right-rect.left;rect.height=rect.bottom-rect.top;
+        }
+        const layoutWidth=document.documentElement.clientWidth||window.innerWidth,layoutHeight=document.documentElement.clientHeight||window.innerHeight;
+        const width=viewport?.width||layoutWidth,height=viewport?.height||layoutHeight;
+        const left=viewport?.offsetLeft||0,top=viewport?.offsetTop||0;
+        const x=Math.min(Math.max(left+12,rect.left),Math.max(left+12,left+width-rect.width-12));
+        const y=Math.min(Math.max(top+12,rect.top),Math.max(top+12,top+height-rect.height-12));
+        // Correct only an actual viewport overflow. Converting every DOM rect
+        // back into right/bottom feeds gutter/rounding differences into the anchor.
+        const correctionX=x-rect.left,correctionY=y-rect.top;
+        if(Math.abs(correctionX)>.01){this.posX-=correctionX;this.container.style.right=this.posX+'px';}
+        if(Math.abs(correctionY)>.01){this.posY-=correctionY;this.container.style.bottom=this.posY+'px';}
+        // Notices stay reachable even when the narrow rail is dragged to an edge.
+        const notice=this.notices.getBoundingClientRect();
+        let noticeX=Math.max(left+12,Math.min(x+rect.width-notice.width,left+width-notice.width-12));
+        let noticeY=Math.max(top+12,Math.min(y-notice.height-8,top+height-notice.height-12));
+        if(notice.height&&y-notice.height-8<top+12){
+            // Near the top edge, use a side instead of covering the lightning/panic controls.
+            if(x-notice.width-8>=left+12){noticeX=x-notice.width-8;noticeY=Math.min(y,top+height-notice.height-12);}
+            else if(x+rect.width+notice.width+8<=left+width-12){noticeX=x+rect.width+8;noticeY=Math.min(y,top+height-notice.height-12);}
+            else if(y+rect.height+8+notice.height<=top+height-12)noticeY=y+rect.height+8;
+        }
+        this.notices.style.left=noticeX+'px';this.notices.style.top=Math.max(top+12,noticeY)+'px';
+    }
+    moveHud(dx,dy){
+        const previousX=this.posX,previousY=this.posY;
+        this.posX-=dx;this.posY-=dy;
+        this.container.style.right=this.posX+'px';this.container.style.bottom=this.posY+'px';
+        this.constrainPosition();
+        if(this.reducedMotion||this.globalMinimized)return;
+        this.motion.x=Math.max(-18,Math.min(18,this.motion.x+(this.posX-previousX)*.65));
+        this.motion.y=Math.max(-18,Math.min(18,this.motion.y+(this.posY-previousY)*.65));
+        if(!this.motionFrame){this.motion.time=0;this.motionFrame=window.requestAnimationFrame(time=>this.animatePanel(time));}
+    }
+    animatePanel(time){
+        const m=this.motion,dt=Math.min(.032,(time-m.time)/1000||.016);m.time=time;
+        m.vx+=(-210*m.x-20*m.vx)*dt;m.vy+=(-210*m.y-20*m.vy)*dt;
+        m.x+=m.vx*dt;m.y+=m.vy*dt;
+        const rect=this.container.getBoundingClientRect(),panelHeight=this.panel.offsetHeight;
+        const viewport=window.visualViewport,left=viewport?.offsetLeft||0,top=viewport?.offsetTop||0,width=viewport?.width||document.documentElement.clientWidth,height=viewport?.height||document.documentElement.clientHeight;
+        const x=Math.max(left+12-rect.left,Math.min(left+width-12-(rect.right-this.rail.offsetWidth-10),m.x));
+        const y=Math.max(top+12-(rect.bottom-panelHeight),Math.min(top+height-12-rect.bottom,m.y));
+        this.panel.style.transform=`translate3d(${x}px,${y}px,0) rotate(${Math.max(-.8,Math.min(.8,x*.04))}deg)`;
+        this.container.dataset.moving='true';
+        if(Math.abs(m.x)+Math.abs(m.y)+Math.abs(m.vx)+Math.abs(m.vy)<.08){this.resetMotion();return;}
+        this.motionFrame=window.requestAnimationFrame(next=>this.animatePanel(next));
+    }
+    resetMotion(){
+        if(this.motionFrame)window.cancelAnimationFrame(this.motionFrame);
+        this.motionFrame=0;this.motion={x:0,y:0,vx:0,vy:0,time:0};
+        if(this.panel)this.panel.style.transform='';
+        if(this.container)this.container.dataset.moving='false';
     }
     setStatus(badge, label) {
         if(typeof this.globalView?.notice==='function'){
@@ -450,10 +635,36 @@ class HudController {
         }
     }
     setCaptureNotice(text) {
+        if(text&&typeof text==='object'){return this.setCaptureTelemetry(text);}
+        if(!text)this.setCaptureTelemetry(null);
         const notice=this.container?.querySelector('#ext-capture-notice');
         if(!notice)return;
         notice.hidden=!text;
         notice.textContent=text;
+        this.queueLayout();
+    }
+    showMicrophoneBusyNotice(message) {
+        if(this.microphoneNoticeTimer)return; // Repeated conflicts never blink or restart the deadline.
+        const notice=this.container?.querySelector('#ext-microphone-notice');
+        if(!notice)return;
+        notice.querySelector('span').textContent=message||'O microfone já está sendo usado por outro ditado.';
+        notice.hidden=false;
+        // Keep this explicitly requested error reachable for its complete lifetime.
+        this.updateGlobalUi({visible:true});
+        this.microphoneNoticeTimer=setTimeout(()=>this.dismissMicrophoneNotice(),8000);
+        this.queueLayout();
+    }
+    dismissMicrophoneNotice() {
+        clearTimeout(this.microphoneNoticeTimer);this.microphoneNoticeTimer=null;
+        const notice=this.container?.querySelector('#ext-microphone-notice');
+        if(notice){notice.hidden=true;notice.querySelector('span').textContent='';}
+        this.queueLayout();
+    }
+    setCaptureTelemetry(sample){
+        // Same authoritative task and origin-checked capture channel as other metrics.
+        // A null sample ends local display only; retain final values on its task.
+        if(!sample?.jobId)return;
+        try{return chrome.runtime.sendMessage({type:'HUD_CAPTURE_STATE',payload:{jobId:sample.jobId,captureTelemetry:sample}}).then(result=>{if(result?.success&&result.state)this.applyGlobalState(result.state);}).catch(()=>{});}catch{}
     }
     setPlayingState(isPlaying) {
         const label = this.container?.querySelector('#ext-play-label');
@@ -468,16 +679,61 @@ class HudController {
         }
     }
     show({tabOnly=false,expand=false,manual=false}={}) {
-        this.container?.classList.remove('hidden');
-        if(globalThis.GlobalHud&&!manual)return;
-        this.updateGlobalUi({visible:true,...(expand?{minimized:false}:{}),...(tabOnly?{scope:'tab'}:{})});
+        const revealLocally=()=>{
+            // Messaging may be unavailable after an extension reload. Keep the
+            // error notice reachable without opening a previously compact panel.
+            if(globalThis.GlobalHud&&(this.globalMinimized!==false||this.container?.classList.contains?.('hidden'))){
+                this.globalMinimized=true;
+                this.container?.setAttribute?.('data-minimized','true');
+                for(const element of this.container?.querySelectorAll?.('.ext-hud-body')||[]){element.hidden=true;element.inert=true;}
+                if(this.panel)this.panel.inert=true;
+                const button=this.container?.querySelector?.('#ext-btn-toggle');
+                if(button){button.title='Restaurar HUD';button.setAttribute('aria-expanded','false');button.setAttribute('aria-label',button.title);}
+            }
+            this.container?.classList.remove('hidden');
+            if(this.container)this.container.inert=false;
+            this.queueLayout();
+        };
+        if(globalThis.GlobalHud){
+            // Automatic opening uses the registry so it cannot flash an expanded
+            // panel or override a manual presentation choice in this tab.
+            return this.updateGlobalUi({visible:true,minimized:true,...(!manual?{automatic:true}:{}),...(tabOnly?{scope:'tab'}:{})},revealLocally);
+        }
+        // Keep the original local opening for errors before a job exists,
+        // including invalidated contexts where messaging is unavailable.
+        revealLocally();
     }
     hide() {
-        this.container?.classList.add('hidden');
+        if(!globalThis.GlobalHud){this.container?.classList.add('hidden');if(this.container)this.container.inert=true;return;}
         this.updateGlobalUi({visible:false});
     }
-    updateGlobalUi(payload){if(!globalThis.GlobalHud)return;try{void chrome.runtime.sendMessage({type:'HUD_GLOBAL_UI_SET',payload}).then(result=>{if(result?.success&&result.state)this.applyGlobalState(result.state);}).catch(error=>console.error('[HUD visibility]',error?.message||String(error)));}catch(error){console.error('[HUD visibility]',error?.message||String(error));}}
-    applyGlobalState(state){if(!state||Number.isFinite(this.globalRevision)&&state.revision<this.globalRevision)return;this.globalRevision=state.revision;this.globalMinimized=state.minimized===true;this.container?.setAttribute?.('data-minimized',String(this.globalMinimized));this.container?.classList.toggle('hidden',state.visible===false);for(const element of this.container?.querySelectorAll('.ext-hud-body')||[]){element.hidden=this.globalMinimized;element.inert=this.globalMinimized;}const jobs=state.jobs||[],playing=jobs.filter(job=>job.type==='TTS'&&job.status==='playing').length,recording=jobs.filter(job=>job.type==='STT'&&job.status==='recording').length,active=jobs.filter(job=>!['ready','completed','error','cancelled'].includes(job.status)).length,badge=this.container?.querySelector('#ext-badge');if(badge){badge.textContent=recording||playing?[recording?recording+' gravando':'',playing?playing+' narrando':''].filter(Boolean).join(' · '):active?active+' em andamento':jobs.some(job=>job.status==='paused')?'Pausado':'Pronto';badge.dataset.state=recording?'recording':playing?'playing':'idle';badge.className='ext-hud-badge '+badge.dataset.state;}const button=this.container?.querySelector('#ext-btn-min');if(button){button.title=this.globalMinimized?'Restaurar HUD':'Minimizar HUD';button.setAttribute('aria-expanded',String(!this.globalMinimized));button.setAttribute('aria-label',button.title);button.textContent=this.globalMinimized?'▢':'−';}this.globalView?.update(state);}
+    updateGlobalUi(payload,onFailure){
+        if(!globalThis.GlobalHud)return;
+        const fail=error=>{this.globalView?.notice(/context invalidated/i.test(error?.message||'')?'Extensão atualizada. Atualize esta página (F5).':error?.message||'Não foi possível atualizar o HUD.');onFailure?.();};
+        try{return chrome.runtime.sendMessage({type:'HUD_GLOBAL_UI_SET',payload:{...payload,scope:'tab'}}).then(result=>{if(result?.success&&result.state)this.applyGlobalState(result.state);else fail(new Error(result?.error||'Comando não confirmado.'));}).catch(fail);}catch(error){fail(error);}
+    }
+    applyGlobalState(state){
+        if(!state||Number.isFinite(this.globalRevision)&&state.revision<this.globalRevision)return;
+        this.globalRevision=state.revision;this.globalMinimized=state.minimized===true;
+        this.container?.setAttribute?.('data-minimized',String(this.globalMinimized));
+        this.container?.classList.toggle('hidden',state.visible===false);
+        if(this.container)this.container.inert=state.visible===false;
+        for(const element of this.container?.querySelectorAll('.ext-hud-body')||[]){element.hidden=this.globalMinimized;element.inert=this.globalMinimized;}
+        if(this.panel){this.panel.inert=this.globalMinimized;if(this.globalMinimized||state.visible===false){this.endDrag?.();this.resetMotion();}this.queueLayout();}
+        const jobs=state.jobs||[];
+        const recording=jobs.filter(job=>job.type==='STT'&&job.status==='recording'&&job.microphoneReleased!==true).length;
+        const playing=jobs.filter(job=>{const audio=job.type==='STT'?job.narration:job;return audio?.status==='playing'||audio?.status==='connecting'&&audio.progress?.outputActive===true;}).length;
+        const active=jobs.filter(job=>!['ready','completed','error','cancelled','paused'].includes(job.status)).length;
+        const paused=jobs.some(job=>job.status==='paused'||job.narration?.status==='paused');
+        const failed=jobs.some(job=>job.status==='error'||job.narration?.status==='error');
+        const phase=recording?'recording':playing?'playing':active?'loading':paused?'paused':failed?'error':'idle';
+        if(this.rail){this.rail.dataset.state=phase;const border=globalThis.GlobalHud?.activeBorder?.(jobs);this.rail.dataset.taskType=border?.type||'neutral';this.rail.dataset.taskRunning=String(border?.running===true);this.rail.dataset.borderJobId=border?.jobId||'';}
+        const badge=this.badgeElement;
+        if(badge){badge.textContent=recording||playing?[recording?recording+' gravando':'',playing?playing+' narrando':''].filter(Boolean).join(' · '):active?active+' em andamento':paused?'Pausado':failed?'Erro':'Pronto';badge.dataset.state=phase;badge.className='ext-hud-badge '+phase;}
+        const button=this.container?.querySelector('#ext-btn-toggle');
+        if(button){button.title=this.globalMinimized?'Restaurar HUD':'Minimizar HUD';button.setAttribute('aria-expanded',String(!this.globalMinimized));button.setAttribute('aria-label',button.title);}
+        this.globalView?.update(state);
+    }
     toggle() {
         if (this.container?.classList.contains('hidden')) {
             this.show({manual:true});
@@ -1542,7 +1798,7 @@ class SttController {
             capture.reservation=null;
             if(reservation?.code==='STT_CAPTURE_BUSY'){
                 this.cancelRecording(false,'startup-error');
-                hudController_1.hud.setCaptureNotice(reservation.otherTab?'Já existe um ditado em andamento em outra aba.':reservation.error);
+                hudController_1.hud.showMicrophoneBusyNotice(reservation.error);
                 return;
             }
             if(!reservation?.success)throw new Error(reservation?.error||'Não foi possível reservar o microfone.');
@@ -1618,7 +1874,7 @@ class SttController {
             preserve:packets=>send('preserve',{packets:packets.map(item=>({pcm:btoa(String.fromCharCode(...item.pcm)),captureStartMs:item.captureStartMs,captureEndMs:item.captureEndMs}))}).then(result=>{if(!result?.ok)throw Error('PCM não preservado.');}),
             onDecision:(decision,metrics)=>{
                 const e=decision.evidence||{};
-                hudController_1.hud.setCaptureNotice('Silero '+((e.sileroProbability||0)*100).toFixed(1)+'% · TEN '+((e.tenProbability||0)*100).toFixed(1)+'% · '+(decision.base?'confirmado':'sem dupla confirmação')+' · recuperações '+metrics.recoveries);
+                hudController_1.hud.setCaptureNotice({jobId:capture.jobId,sileroProbability:e.sileroProbability,tenProbability:e.tenProbability,confirmed:!!decision.base,recoveries:metrics.recoveries});
                 globalThis.LiveSttDiagnostics?.capture(capture,'vad-decision',{detector:'dual',...e,deadlines:metrics.deadlines,recoveries:metrics.recoveries});
             },
             onFallback:reason=>{
@@ -3618,7 +3874,7 @@ function recordShortcutFromEvent(e) {
 
 },
 "extension/src/content/styles/hud.css?raw":function(module,exports,__require){
-module.exports="/**\n * @license\n * SPDX-License-Identifier: Apache-2.0\n * \n * Estilos encapsulados do HUD flutuante (injetado via Shadow DOM).\n */\n\n:host {\n  all: initial;\n  position: fixed;\n  z-index: 2147483647;\n  font-family: -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Helvetica, Arial, sans-serif;\n  font-size: 13px;\n  line-height: 1.4;\n  color: #f1f5f9;\n  user-select: none;\n}\n\n.ext-hud-card {\n  box-sizing: border-box;\n  position: fixed;\n  width: 320px;\n  max-height: calc(100vh - 48px);\n  display: flex;\n  flex-direction: column;\n  background: rgba(15, 23, 42, 0.94);\n  backdrop-filter: blur(12px);\n  -webkit-backdrop-filter: blur(12px);\n  border: 1px solid rgba(255, 255, 255, 0.12);\n  border-radius: 12px;\n  box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.5), 0 8px 10px -6px rgba(0, 0, 0, 0.5);\n  overflow: hidden;\n  transition: opacity 0.2s ease, transform 0.2s ease;\n}\n\n.ext-hud-card.hidden {\n  opacity: 0;\n  pointer-events: none;\n  transform: translateY(8px) scale(0.96);\n}\n\n.ext-hud-card[data-minimized=\"true\"]{height:auto!important;min-height:0!important}\n.ext-hud-card[data-minimized=\"true\"]>.ext-hud-body{display:none!important}\n.ext-hud-card,.ext-hud-card *{scrollbar-width:none!important;scrollbar-gutter:auto!important}\n.ext-hud-card::-webkit-scrollbar,.ext-hud-card ::-webkit-scrollbar{display:none!important;width:0!important;height:0!important}\n\n.ext-hud-header {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  padding: 8px 12px;\n  background: rgba(255, 255, 255, 0.04);\n  border-bottom: 1px solid rgba(255, 255, 255, 0.08);\n  cursor: grab;\n  flex-shrink: 0;\n  gap: 6px;\n}\n\n.ext-hud-header:active {\n  cursor: grabbing;\n}\n\n.ext-hud-title {\n  display: flex;\n  align-items: center;\n  gap: 6px;\n  font-weight: 600;\n  font-size: 12px;\n  color: #94a3b8;\n  min-width: 0;\n  white-space: nowrap;\n  overflow: hidden;\n}\n.ext-hud-title>span:first-child{flex:none}\n\n.ext-hud-badge {\n  font-size: 10px;\n  padding: 2px 6px;\n  border-radius: 9999px;\n  font-weight: 500;\n  text-transform: uppercase;\n  min-width: 0;\n  overflow: hidden;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n}\n\n.ext-hud-badge.idle { background: rgba(148, 163, 184, 0.2); color: #94a3b8; }\n.ext-hud-badge.playing { background: rgba(59, 130, 246, 0.25); color: #60a5fa; }\n.ext-hud-badge.recording { background: rgba(239, 68, 68, 0.25); color: #f87171; animation: ext-pulse 1.5s infinite; }\n.ext-hud-badge.loading { background: rgba(245, 158, 11, 0.25); color: #fbbf24; }\n\n.ext-hud-controls {\n  display: flex;\n  gap: 4px;\n  flex: none;\n}\n\n.ext-btn-icon {\n  background: transparent;\n  border: none;\n  color: #94a3b8;\n  cursor: pointer;\n  padding: 4px;\n  border-radius: 6px;\n  display: flex;\n  align-items: center;\n  justify-content: center;\n  transition: all 0.15s;\n}\n\n.ext-btn-icon:hover {\n  background: rgba(255, 255, 255, 0.1);\n  color: #f1f5f9;\n}\n\n.ext-hud-body[hidden]{display:none!important}\n.ext-hud-body {\n  padding: 12px;\n  display: flex;\n  flex-direction: column;\n  min-height: 0;\n  overflow: hidden;\n}\n#ext-global-jobs{display:flex;flex:1;min-height:0}\n#ext-global-jobs>.fm-global-hud{display:flex;flex-direction:column;flex:1;min-height:0}\n#ext-global-jobs>.fm-global-hud>:not(.fm-global-jobs){flex-shrink:0}\n#ext-global-jobs .fm-global-jobs{flex:1;min-height:0}\n\n.ext-hud-text-preview {\n  max-height: 80px;\n  overflow-y: auto;\n  font-size: 12px;\n  color: #cbd5e1;\n  background: rgba(0, 0, 0, 0.25);\n  border-radius: 6px;\n  padding: 8px;\n  margin-bottom: 10px;\n  border: 1px solid rgba(255, 255, 255, 0.05);\n  word-break: break-word;\n}\n\n.ext-hud-actions {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  gap: 8px;\n}\n\n.ext-btn-primary {\n  background: #3b82f6;\n  color: white;\n  border: none;\n  border-radius: 6px;\n  padding: 6px 12px;\n  font-size: 12px;\n  font-weight: 500;\n  cursor: pointer;\n  display: flex;\n  align-items: center;\n  gap: 6px;\n  transition: background 0.15s;\n}\n\n.ext-btn-primary:hover {\n  background: #2563eb;\n}\n\n.ext-btn-secondary {\n  background: rgba(255, 255, 255, 0.08);\n  color: #cbd5e1;\n  border: 1px solid rgba(255, 255, 255, 0.1);\n  border-radius: 6px;\n  padding: 6px 10px;\n  font-size: 12px;\n  cursor: pointer;\n  transition: background 0.15s;\n}\n\n.ext-btn-secondary:hover {\n  background: rgba(255, 255, 255, 0.15);\n}\n\n.ext-hud-sliders {\n  display: flex;\n  align-items: center;\n  gap: 8px;\n  margin-top: 10px;\n  font-size: 11px;\n  color: #94a3b8;\n}\n\n.ext-hud-sliders input[type=\"range\"] {\n  flex: 1;\n  accent-color: #3b82f6;\n  height: 4px;\n}\n\n@keyframes ext-pulse {\n  0%, 100% { opacity: 1; }\n  50% { opacity: 0.5; }\n}\n\n/* Overlay do Lens */\n.ext-lens-overlay {\n  position: fixed;\n  inset: 0;\n  background: rgba(0, 0, 0, 0.35);\n  z-index: 2147483646;\n  cursor: crosshair;\n}\n\n.ext-lens-box {\n  position: absolute;\n  border: 2px dashed #3b82f6;\n  background: rgba(59, 130, 246, 0.15);\n  pointer-events: none;\n}\n"; module.exports.default=module.exports;
+module.exports="/**\n * @license\n * SPDX-License-Identifier: Apache-2.0\n * \n * Estilos encapsulados do HUD flutuante (injetado via Shadow DOM).\n */\n\n:host {\n  all: initial;\n  position: fixed;\n  z-index: 2147483647;\n  font-family: -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Helvetica, Arial, sans-serif;\n  font-size: 13px;\n  line-height: 1.4;\n  color: #f1f5f9;\n  user-select: none;\n}\n\n.ext-hud-card {\n  box-sizing: border-box;\n  position: fixed;\n  width: var(--hud-width,min(448px, calc(100% - 24px)));\n  height: var(--hud-height,auto);\n  max-height: calc(100vh - 48px);\n  display: grid;\n  grid-template-columns: minmax(0, 1fr) 46px;\n  align-items: end;\n  gap: 10px;\n  pointer-events: none;\n  transition: opacity 180ms ease;\n  color: #e2e8f0;\n}\n.ext-hud-card.hidden { opacity: 0; visibility: hidden; pointer-events: none; }\n.ext-hud-card.hidden * { pointer-events: none !important; }\n.ext-hud-card.hidden .fm-hud-task-wave svg,.ext-hud-card.hidden .ext-hud-header::after { animation-play-state: paused !important; }\n.ext-hud-card[data-minimized=\"true\"] { width: 46px; height: auto; grid-template-columns: 46px; gap: 0; }\n.ext-hud-card[data-minimized=\"true\"] .ext-hud-panel{display:none!important}\n.ext-hud-card,.ext-hud-card *{scrollbar-width:none!important;scrollbar-gutter:auto!important}\n.ext-hud-card::-webkit-scrollbar,.ext-hud-card ::-webkit-scrollbar{display:none!important;width:0!important;height:0!important}\n.ext-hud-card [hidden]{display:none!important}\n.ext-hud-panel, .ext-hud-header {\n  box-sizing: border-box;\n  position: relative; isolation: isolate;\n  pointer-events: auto;\n  text-shadow: 0 1px 1px rgba(2,6,23,.8);\n  border: 1px solid rgba(228,239,255,.16);\n  box-shadow: inset 0 1px rgba(255,255,255,.16), 0 12px 24px -16px rgba(0,0,0,.28), 0 2px 6px -3px rgba(0,0,0,.18);\n}\n/* A sibling material layer avoids filtering the functional layer's backdrop. */\n.ext-hud-glass {\n  position: absolute; inset: 0; z-index: -1;\n  pointer-events: none; border-radius: inherit;\n  background: rgba(12,17,28,var(--hud-panel-alpha,.49));\n  backdrop-filter: none;\n  -webkit-backdrop-filter: none;\n}\n.ext-hud-header>.ext-hud-glass { background: rgba(12,17,28,var(--hud-rail-alpha,.44)); }\n.ext-hud-panel {\n  grid-column: 1; grid-row: 1;\n  min-width: 0; min-height: 0;\n  max-height: min(var(--hud-height,calc(100vh - 48px)),calc(100vh - 48px));\n  display: flex; flex-direction: column;\n  border-radius: 22px;\n  transform-origin: right bottom;\n  overflow: hidden;\n}\n.ext-hud-card[data-moving=\"true\"] .ext-hud-panel { will-change: transform; }\n.ext-hud-header {\n  grid-column: 2; grid-row: 1;\n  position: relative; isolation: isolate;\n  display: flex; flex-direction: column; align-items: center;\n  gap: 10px; padding: 11px 5px 6px;\n  border-radius: 15px; max-height: calc(100vh - 48px);\n  cursor: grab; touch-action: none;\n}\n.ext-hud-card[data-minimized=\"true\"] .ext-hud-header { grid-column: 1; }\n.ext-hud-header::before {\n  content: ''; pointer-events: none; position: absolute;\n  right: calc(100% + 1px); bottom: 26px; width: 9px; height: 1px;\n  background: linear-gradient(90deg, rgba(125,211,252,.12), rgba(196,181,253,.35));\n}\n.ext-hud-card[data-minimized=\"true\"] .ext-hud-header::before { display: none; }\n.ext-hud-header::after {\n  content: ''; pointer-events: none; position: absolute;\n  left: 0; top: 12%; bottom: 12%; width: 1px;\n  background: linear-gradient(180deg,transparent,rgba(125,211,252,.3),rgba(196,181,253,.8),transparent);\n  background-size: 100% 190%; border-radius: inherit; opacity: .7;\n}\n.ext-hud-header[data-state=\"recording\"]::after { background-image: linear-gradient(180deg,transparent,rgba(251,113,133,.3),rgba(254,202,202,.8),transparent); }\n.ext-hud-header:is([data-state=\"recording\"],[data-state=\"playing\"],[data-state=\"loading\"])::after { animation: ext-rail-flow 5s linear infinite; }\n.ext-hud-header[data-state=\"error\"]::after { background: linear-gradient(transparent,#fbbf24,transparent); }\n.ext-hud-header[data-state=\"paused\"]::after { opacity: .35; }\n.ext-hud-card[data-dragging=\"true\"] .ext-hud-header { cursor: grabbing; border-color: rgba(125,211,252,.42); }\n.ext-hud-mark { width: 19px; height: 19px; flex: none; color: #7dd3fc; }\n.ext-hud-title {\n  display: flex; align-items: center; gap: 9px;\n  writing-mode: vertical-rl; white-space: nowrap;\n  font-size: 12px; font-weight: 650; letter-spacing: .025em;\n  min-height: 0; overflow: hidden; padding: 2px 0;\n  background: rgba(15,23,42,var(--hud-title-alpha,.8)); border-radius: 6px;\n}\n.ext-hud-badge { font-size: 10px; font-weight: 500; color: #c5d0e2; }\n.ext-hud-badge.recording { color: #fda4af; }\n.ext-hud-badge.playing { color: #7dd3fc; }\n.ext-hud-badge:is(.error,.loading) { color: #fcd68d; }\n.ext-hud-controls { display: flex; flex-direction: column; gap: 4px; flex: none; }\n.ext-btn-icon, .ext-hud-header .fm-global-panic, .ext-hud-header .fm-global-mini-controls button {\n  display: flex; align-items: center; justify-content: center;\n  width: 32px; height: 30px; box-sizing: border-box;\n  border: 1px solid rgba(224,240,255,.1); border-radius: 9px;\n  background: rgba(15,23,42,var(--hud-control-alpha,.78)); color: #b9c7da;\n  cursor: pointer; font: 15px/1 system-ui;\n  transition: background-color 150ms ease, border-color 150ms ease;\n}\n.ext-hud-header .fm-global-panic { order: -1; }\n.ext-hud-header .fm-global-mini-controls { flex-direction: column; gap: 4px; }\n.ext-btn-icon:hover, .ext-hud-header button:hover, .ext-hud-header .fm-global-panic:hover { background: rgba(30,41,59,.96); color: #f8fafc; }\n.ext-hud-card :is(button,input,select,summary,[tabindex]):focus-visible { outline: 2px solid #7dd3fc; outline-offset: 2px; }\n.ext-hud-notices { position: fixed; width: min(360px, calc(100% - 24px)); left: 12px; top: 12px; max-height: calc(100vh - 24px); overflow-y: auto; pointer-events: none; z-index: 2; }\n.ext-hud-notices :is(.fm-global-message,.fm-hud-capture-notice):not(:empty) {\n  pointer-events: auto; margin: 0 0 6px; padding: 10px 12px;\n  border: 1px solid rgba(253,186,116,.32); border-radius: 12px;\n  background: rgba(34,26,28,.92); backdrop-filter: blur(18px);\n  color: #fde2bd; font: 12px/1.5 system-ui; overflow-wrap: anywhere;\n}\n.ext-hud-notices :empty { display: none; }\n.ext-hud-notices .fm-hud-microphone-notice { display: flex; align-items: flex-start; gap: 8px; }\n.fm-hud-microphone-notice>span { flex: 1; min-width: 0; }\n.fm-hud-microphone-notice>button { flex: 0 0 28px; width: 28px; height: 26px; }\n.ext-hud-body[hidden]{display:none!important}\n.ext-hud-body { padding: 12px 12px 12px; display: flex; flex-direction: column; min-height: 0; overflow: auto; overscroll-behavior: contain; }\n/* Functional translucency is alpha only; no local backdrop filters. */\n.ext-hud-title,.ext-hud-header button,.fm-global-hud[data-surface=\"hud\"] :is(select,button,.fm-global-card,.fm-global-player,.fm-global-empty) { backdrop-filter: none; -webkit-backdrop-filter: none; }\n#ext-global-jobs{display:flex;flex:1;min-height:0}\n#ext-global-jobs>.fm-global-hud{display:flex;flex-direction:column;flex:1;min-height:0}\n#ext-global-jobs>.fm-global-hud>:not(.fm-global-jobs){flex-shrink:0}\n#ext-global-jobs .fm-global-jobs{flex:0 1 auto;min-height:0}\n/* All redesigned shared-renderer selectors are restricted to the HUD surface. */\n.fm-global-hud[data-surface=\"hud\"] { color: #e7edf9; font-size: 11px; }\n.fm-global-hud[data-surface=\"hud\"] .fm-global-head { padding: 9px 0; }\n.fm-global-hud[data-surface=\"hud\"] .fm-global-heading { font-size: 12px; letter-spacing: -.015em; color: #edf5ff; background: rgba(12,20,36,var(--hud-surface-alpha,.76)); border-radius: 4px; box-shadow: 0 0 0 2px rgba(12,20,36,var(--hud-surface-alpha,.76)); }\n.fm-global-hud[data-surface=\"hud\"] :is(button,select,textarea) { border: 1px solid rgba(224,240,255,.12); border-radius: 9px; background: rgba(12,17,28,var(--hud-button-alpha,.04)); color: #e2e8f0; box-shadow: inset 0 1px rgba(255,255,255,var(--hud-button-alpha,.04)); }\n.fm-global-hud[data-surface=\"hud\"] button { transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease; }\n.fm-global-hud[data-surface=\"hud\"] button:hover { background: rgba(255,255,255,.1); border-color: rgba(174,207,255,.25); }\n.fm-global-hud[data-surface=\"hud\"] .fm-global-agent-row { margin-bottom: 10px; gap: 7px; }\n.fm-global-hud[data-surface=\"hud\"] select { padding: 8px 9px; }\n.fm-global-hud[data-surface=\"hud\"] .fm-global-agent-row :is(select,button) { background: rgba(15,23,42,var(--hud-control-alpha,.78)); }\n.fm-global-hud[data-surface=\"hud\"] option { background: #0c1220; color: #f1f5f9; }\n.fm-global-hud[data-surface=\"hud\"] .fm-global-jobs { gap: 8px; max-height: min(46vh, 480px); }\n/* Functional surfaces keep their own opacity, independently of structural glass. */\n.fm-global-hud[data-surface=\"hud\"] .fm-global-card { padding: 10px; border-radius: 15px; border-color: rgba(211,228,255,.1); background: rgba(18,27,48,var(--hud-card-alpha,.76)); box-shadow: inset 0 1px rgba(255,255,255,.06); }\n.fm-global-hud[data-surface=\"hud\"] .fm-global-card[data-active=\"true\"] { border-color: rgba(125,185,255,.35); background: rgba(18,27,48,var(--hud-active-alpha,.8)); }\n.fm-global-hud[data-surface=\"hud\"] .fm-global-empty { background: rgba(12,20,36,var(--hud-surface-alpha,.76)); border-radius: 9px; }\n.fm-global-hud[data-surface=\"hud\"] .fm-global-card[data-collapsed=\"true\"] { padding: 8px 10px; }\n.fm-global-hud[data-surface=\"hud\"] .fm-global-card-header { gap: 5px; flex-wrap: wrap; }\n.fm-global-hud[data-surface=\"hud\"] .fm-global-kind { font-size: 11px; }\n.fm-global-hud[data-surface=\"hud\"] .fm-global-description { color: #c4cfe0; max-width: none; flex-basis: 40px; }\n.fm-global-hud[data-surface=\"hud\"] .fm-global-status { max-width: 13ch; font-size: 10px; color: #a5d8ff; }\n.fm-global-hud[data-surface=\"hud\"] .fm-global-card-tools { gap: 3px; margin-left: auto; }\n.fm-global-hud[data-surface=\"hud\"] .fm-global-card-tools button { width: 24px; min-width: 24px; height: 25px; padding: 0; }\n.fm-global-hud[data-surface=\"hud\"] .fm-global-origin { color: #c7d3e5; width: fit-content; max-width: 100%; border: 1px solid rgba(255,255,255,.07); background: rgba(255,255,255,var(--hud-muted-alpha,.025)); padding: 3px 6px; border-radius: 7px; font-size: 10px; margin: 8px 0 5px; }\n.fm-global-hud[data-surface=\"hud\"] .fm-hud-chips { display: flex; flex-wrap: nowrap; overflow-x: auto; gap: 4px; margin: 5px 0; }\n.fm-global-hud[data-surface=\"hud\"] .fm-hud-chip { flex: none; white-space: nowrap; font-size: 10px; line-height: 1.5; padding: 2px 6px; border-radius: 6px; background: rgba(125,211,252,var(--hud-indicator-alpha,.055)); border: 1px solid rgba(125,211,252,.1); color: #b8cfe8; font-variant-numeric: tabular-nums; }\n.fm-global-hud[data-surface=\"hud\"] .fm-hud-transcript { max-height: 132px; overflow: auto; padding: 8px 9px; margin: 7px 0; border-radius: 10px; background: none; border: 1px solid rgba(210,228,255,.06); user-select: text; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.65; }\n.fm-global-hud[data-surface=\"hud\"] .fm-hud-transcript .fm-global-text { display: inline; margin: 0; padding: 0; border: 0; max-height: none; overflow: visible; background: none; white-space: inherit; }\n.fm-global-hud[data-surface=\"hud\"] .fm-hud-transcript .fm-global-label { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }\n.fm-global-hud[data-surface=\"hud\"] .fm-global-partial { color: #a6b8d3; font-style: italic; }\n.fm-global-hud[data-surface=\"hud\"] .fm-global-partial::before { content: ' '; }\n.fm-global-hud[data-surface=\"hud\"] .fm-global-note { color: #f4c996; padding: 6px 0; font-size: 10px; }\n.fm-global-hud[data-surface=\"hud\"] button.fm-hud-alert { color: #fcd68d; border-color: rgba(253,186,116,.35); background: rgba(180,83,9,.15); }\n.fm-global-hud[data-surface=\"hud\"] .fm-global-actions { gap: 5px; }\n.fm-global-hud[data-surface=\"hud\"] .fm-global-actions button { flex: 1; min-height: 28px; }\n.fm-global-hud[data-surface=\"hud\"] .fm-global-settings label { font-size: 10px; min-width: 0; color: #c3d2e7; }\n.fm-global-hud[data-surface=\"hud\"] input[type=\"range\"] { accent-color: #7dd3fc; cursor: pointer; }\n.fm-global-hud[data-surface=\"hud\"] .fm-global-player { padding: 10px 0 0; padding-inline: 6px; border-color: rgba(255,255,255,.08); margin-top: 10px; background: rgba(12,20,36,var(--hud-surface-alpha,.76)); border-radius: 10px; }\n.fm-global-hud[data-surface=\"hud\"] .fm-global-player-state { font-size: 10px; color: #c5d3e8; }\n.fm-global-hud[data-surface=\"hud\"] .fm-global-player-buttons { gap: 5px; }\n.fm-global-hud[data-surface=\"hud\"] .fm-global-player-buttons button { min-height: 31px; }\n.fm-global-hud[data-surface=\"hud\"] .fm-global-player-buttons [data-action=\"toggle\"] { background: rgba(14,165,233,.2); border-color: rgba(125,211,252,.3); }\n.fm-global-hud[data-surface=\"hud\"] .fm-global-seek-note { font-size: 9px; line-height: 1.45; color: #c0cee2; }\n.fm-global-hud[data-surface=\"hud\"] .fm-hud-metrics { margin-top: 8px; border-top: 1px solid rgba(255,255,255,.06); color: #a8b8cf; }\n.fm-global-hud[data-surface=\"hud\"] .fm-hud-metrics summary { padding: 7px 0 2px; cursor: pointer; font-size: 10px; }\n.fm-global-hud[data-surface=\"hud\"] .fm-hud-metric-values { display: grid; gap: 5px; max-height: 160px; overflow: auto; padding-top: 6px; }\n.fm-global-hud[data-surface=\"hud\"] .fm-hud-metric { display: block; font-size: 10px; overflow-wrap: anywhere; user-select: text; }\n@media(max-width:360px) { .ext-hud-body { padding: 12px 8px 8px; } .fm-global-hud[data-surface=\"hud\"] .fm-global-status { max-width: 10ch; } }\n@media(max-height:480px) { .ext-hud-title { max-height: 90px; } .ext-hud-card[data-minimized=\"true\"] .ext-hud-title { display: none; } .fm-global-hud[data-surface=\"hud\"] .fm-global-player .fm-global-settings { margin-top: 5px; } }\n@media(max-height:340px) { .ext-hud-header { gap: 4px; padding: 6px 5px; } .ext-hud-title { display: none; } .ext-hud-controls,.ext-hud-header .fm-global-mini-controls { gap: 2px; } .ext-hud-header button,.ext-hud-header .fm-global-mini-controls button { height: 24px; } }\n@media(prefers-reduced-motion:reduce) { .ext-hud-card, .ext-hud-card * { animation: none !important; transition: none !important; } .ext-hud-panel { transform: none !important; } }\n\n.ext-hud-text-preview {\n  max-height: 80px;\n  overflow-y: auto;\n  font-size: 12px;\n  color: #cbd5e1;\n  background: rgba(0, 0, 0, 0.25);\n  border-radius: 6px;\n  padding: 8px;\n  margin-bottom: 10px;\n  border: 1px solid rgba(255, 255, 255, 0.05);\n  word-break: break-word;\n}\n\n.ext-hud-actions {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  gap: 8px;\n}\n\n.ext-btn-primary {\n  background: #3b82f6;\n  color: white;\n  border: none;\n  border-radius: 6px;\n  padding: 6px 12px;\n  font-size: 12px;\n  font-weight: 500;\n  cursor: pointer;\n  display: flex;\n  align-items: center;\n  gap: 6px;\n  transition: background 0.15s;\n}\n\n.ext-btn-primary:hover {\n  background: #2563eb;\n}\n\n.ext-btn-secondary {\n  background: rgba(255, 255, 255, 0.08);\n  color: #cbd5e1;\n  border: 1px solid rgba(255, 255, 255, 0.1);\n  border-radius: 6px;\n  padding: 6px 10px;\n  font-size: 12px;\n  cursor: pointer;\n  transition: background 0.15s;\n}\n\n.ext-btn-secondary:hover {\n  background: rgba(255, 255, 255, 0.15);\n}\n\n.ext-hud-sliders {\n  display: flex;\n  align-items: center;\n  gap: 8px;\n  margin-top: 10px;\n  font-size: 11px;\n  color: #94a3b8;\n}\n\n.ext-hud-sliders input[type=\"range\"] {\n  flex: 1;\n  accent-color: #3b82f6;\n  height: 4px;\n}\n\n@keyframes ext-pulse {\n  0%, 100% { opacity: 1; }\n  50% { opacity: 0.5; }\n}\n\n/* Overlay do Lens */\n.ext-lens-overlay {\n  position: fixed;\n  inset: 0;\n  background: rgba(0, 0, 0, 0.35);\n  z-index: 2147483646;\n  cursor: crosshair;\n}\n\n.ext-lens-box {\n  position: absolute;\n  border: 2px dashed #3b82f6;\n  background: rgba(59, 130, 246, 0.15);\n  pointer-events: none;\n}\n\n/* Identical transport material in cards, global player and minimized rail. */\n.ext-hud-card .fm-global-hud[data-surface=\"hud\"] .fm-hud-transport,\n.ext-hud-card .ext-hud-header .fm-hud-transport {\n  height: 30px; min-height: 30px; box-sizing: border-box;\n  display: inline-flex; align-items: center; justify-content: center;\n  padding: 0; border: 1px solid rgba(125,185,255,.24); border-radius: 9px;\n  background: rgba(20,60,88,var(--hud-transport-alpha,.6)); color: #bae6fd;\n  font: 13px/1 Arial,sans-serif; box-shadow: inset 0 1px rgba(255,255,255,var(--hud-button-alpha,.04));\n  transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease;\n}\n.ext-hud-card .fm-global-hud[data-surface=\"hud\"] .fm-hud-transport:hover,\n.ext-hud-card .ext-hud-header .fm-hud-transport:hover { background: rgba(30,80,110,.76); border-color: rgba(125,211,252,.4); color: #f0f9ff; }\n.ext-hud-card .fm-hud-transport:is([data-action=\"previous\"],[data-action=\"next\"]) { font-size: 10px; letter-spacing: -2px; padding-right: 2px; }\n.fm-global-hud[data-surface=\"hud\"] .fm-global-player-buttons { grid-template-columns: repeat(4,1fr); }\n\n.ext-hud-card[data-resized=\"true\"] .ext-hud-panel { height: auto; }\n.ext-hud-card[data-resized=\"true\"] .ext-hud-body { flex: 1; }\n.ext-hud-card[data-resized=\"true\"] .fm-global-jobs { max-height: none; }\n#ext-resize-handle { position: absolute; z-index: 3; left: 1px; top: 1px; width: 18px; height: 18px; padding: 0; border: 0; background: none; color: rgba(180,210,235,.65); cursor: nwse-resize; touch-action: none; font: 16px/1 system-ui; }\n#ext-resize-handle:hover { color: #bae6fd; }\n\n.fm-hud-chip { display: inline-flex; align-items: center; gap: 4px; }\n.fm-hud-chip::before { content: ''; width: 12px; height: 12px; flex: none; background: currentColor; mask: var(--metric-icon) center/contain no-repeat; -webkit-mask: var(--metric-icon) center/contain no-repeat; }\n.fm-hud-task-wave { margin-bottom: 7px; height: 22px; overflow: hidden; color: #fb7185; }\n.fm-hud-task-wave svg { width: 100%; height: 100%; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; transform: scaleY(.12); }\n.fm-hud-task-wave[data-active=\"true\"] { color: #38bdf8; }\n.fm-hud-task-wave[data-active=\"true\"] svg { animation: ext-player-wave 1.2s ease-in-out infinite alternate; }\n@keyframes ext-player-wave { from { transform: scaleY(.35); } to { transform: scaleY(1); } }\n.fm-hud-chip[data-icon=\"forwardedChunks\"] { --metric-icon: url(\"data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A//www.w3.org/2000/svg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%222%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpath%20d%3D%22M12%2016V3m-4%204%204-4%204%204M4%2014v6h16v-6%22/%3E%3C/svg%3E\"); }\n.fm-hud-chip[data-icon=\"pendingChunks\"] { --metric-icon: url(\"data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A//www.w3.org/2000/svg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%222%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpath%20d%3D%22M9%205h12M9%2012h12M9%2019h12M3%205h1M3%2012h1M3%2019h1%22/%3E%3C/svg%3E\"); }\n.fm-hud-chip[data-icon=\"completedBlocks\"] { --metric-icon: url(\"data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A//www.w3.org/2000/svg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%222%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpath%20d%3D%22m4%2012%205%205L20%206%22/%3E%3C/svg%3E\"); }\n.fm-hud-chip[data-icon=\"totalBlocks\"] { --metric-icon: url(\"data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A//www.w3.org/2000/svg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%222%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpath%20d%3D%22M3%203h7v7H3zm11%200h7v7h-7zM3%2014h7v7H3zm11%200h7v7h-7z%22/%3E%3C/svg%3E\"); }\n.fm-hud-chip[data-icon=\"currentTime\"] { --metric-icon: url(\"data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A//www.w3.org/2000/svg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%222%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Ccircle%20cx%3D%2212%22%20cy%3D%2212%22%20r%3D%2210%22/%3E%3Cpath%20d%3D%22M12%205v7l4%202%22/%3E%3C/svg%3E\"); }\n.fm-hud-chip[data-icon=\"duration\"] { --metric-icon: url(\"data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A//www.w3.org/2000/svg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%222%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpath%20d%3D%22M5%203h14M5%2021h14M7%203c0%205%2010%2013%2010%2018M17%203C17%208%207%2016%207%2021%22/%3E%3C/svg%3E\"); }\n\n.fm-hud-task-wave[data-active=\"false\"] svg { stroke-width: 10; }\n\n.fm-hud-task-wave[data-active=\"true\"][data-mode=\"stt\"] { color: #fb7185; }\n.fm-hud-chip[data-icon=\"capturedChunks\"] { --metric-icon: url(\"data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A//www.w3.org/2000/svg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%222%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpath%20d%3D%22M12%203v13m-4-4%204%204%204-4M4%2014v6h16v-6%22/%3E%3C/svg%3E\"); }\n.fm-hud-chip[data-icon=\"blocks\"] { --metric-icon: url(\"data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A//www.w3.org/2000/svg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%222%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpath%20d%3D%22M3%203h7v7H3zm11%200h7v7h-7zM3%2014h7v7H3zm11%200h7v7h-7z%22/%3E%3C/svg%3E\"); }\n\n@keyframes ext-rail-flow { from { background-position: 0 190%; } to { background-position: 0 -190%; } }\n\n/* Only the contour is colored. Functional backgrounds remain independent. */\n@property --fm-border-angle { syntax: '<angle>'; inherits: false; initial-value: 0deg; }\n.ext-hud-card[data-minimized=\"true\"] .ext-hud-header::before,\n.ext-hud-card[data-minimized=\"true\"] .ext-hud-header::after { display: none; animation: none; }\n.fm-global-hud[data-surface=\"hud\"] .fm-global-card { position: relative; isolation: isolate; }\n.fm-global-hud[data-surface=\"hud\"] .fm-global-card[data-task-type=\"narration\"],\n.ext-hud-card[data-minimized=\"true\"] .ext-hud-header[data-task-type=\"narration\"] { --task-main: #2563EB; --task-accent: #38BDF8; --task-glow: rgba(56,189,248,.5); }\n.fm-global-hud[data-surface=\"hud\"] .fm-global-card[data-task-type=\"dictation\"],\n.ext-hud-card[data-minimized=\"true\"] .ext-hud-header[data-task-type=\"dictation\"] { --task-main: #10A37F; --task-accent: #34D399; --task-glow: rgba(16,185,129,.45); }\n.fm-global-hud[data-surface=\"hud\"] .fm-global-card[data-task-type=\"lens\"],\n.ext-hud-card[data-minimized=\"true\"] .ext-hud-header[data-task-type=\"lens\"] { --task-main: #EA580C; --task-accent: #FB923C; --task-glow: rgba(251,146,60,.5); }\n.fm-global-hud[data-surface=\"hud\"] .fm-global-card:is([data-task-type=\"narration\"],[data-task-type=\"dictation\"],[data-task-type=\"lens\"])::before,\n.ext-hud-card[data-minimized=\"true\"] .ext-hud-header:is([data-task-type=\"narration\"],[data-task-type=\"dictation\"],[data-task-type=\"lens\"])::before {\n  content: ''; display: block; position: absolute; inset: -1px; width: auto; height: auto; padding: 2px; border-radius: inherit; pointer-events: none; z-index: 1;\n  background: conic-gradient(from var(--fm-border-angle),var(--task-main) 0deg 110deg,var(--task-accent) 140deg,#fff 146deg 148deg,var(--task-accent) 154deg,var(--task-main) 180deg 290deg,var(--task-accent) 320deg,#fff 326deg 328deg,var(--task-accent) 334deg,var(--task-main) 360deg);\n  -webkit-mask: linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);\n  mask: linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);\n  -webkit-mask-composite: xor; mask-composite: exclude;\n  opacity: var(--hud-border-strength,.6); animation: fm-task-border-turn 4s linear infinite;\n}\n.fm-global-hud[data-surface=\"hud\"] .fm-global-card:is([data-task-type=\"narration\"],[data-task-type=\"dictation\"],[data-task-type=\"lens\"])::after,\n.ext-hud-card[data-minimized=\"true\"] .ext-hud-header:is([data-task-type=\"narration\"],[data-task-type=\"dictation\"],[data-task-type=\"lens\"])::after {\n  content: ''; display: block; position: absolute; inset: 0; width: auto; height: auto; border-radius: inherit; pointer-events: none; background: none;\n  box-shadow: inset 0 0 7px var(--task-glow),0 0 9px var(--task-glow);\n  opacity: var(--hud-border-strength,.6); animation: fm-task-border-glow 3s ease-in-out infinite;\n}\n@keyframes fm-task-border-turn { to { --fm-border-angle: 360deg; } }\n@keyframes fm-task-border-glow { 0%,100% { opacity: calc(var(--hud-border-strength,.6) * .55); } 50% { opacity: var(--hud-border-strength,.6); } }\n.fm-global-hud[data-surface=\"hud\"] .fm-global-card:not([data-task-running=\"true\"])::before,\n.fm-global-hud[data-surface=\"hud\"] .fm-global-card:not([data-task-running=\"true\"])::after,\n.ext-hud-card:is(.hidden,[data-minimized=\"true\"]) .fm-global-card::before,\n.ext-hud-card:is(.hidden,[data-minimized=\"true\"]) .fm-global-card::after { animation-play-state: paused; }\n@media(prefers-reduced-motion:reduce) { .fm-global-hud[data-surface=\"hud\"] .fm-global-card::before,.fm-global-hud[data-surface=\"hud\"] .fm-global-card::after,.ext-hud-card[data-minimized=\"true\"] .ext-hud-header::before,.ext-hud-card[data-minimized=\"true\"] .ext-hud-header::after { animation: none !important; } }\n\n/* Dedicated task content, without a browser window or an additional outer frame. */\n.fm-task-float { position: fixed; pointer-events: auto; box-sizing: border-box; border: 0; padding: 0; border-radius: 14px; background: rgba(12,17,28,var(--hud-panel-alpha,.49)); color: #e2e8f0; }\n.fm-task-content,.fm-task-float .fm-global-hud { height: 100%; min-height: 0; }\n.fm-task-float .fm-global-hud { display: flex; flex-direction: column; padding: 0; }\n.fm-task-float .fm-global-hud[data-surface=\"hud\"] .fm-global-jobs { flex: 1; min-height: 0; max-height: none; overflow: hidden; margin: 0; padding: 0; display: flex; }\n.fm-task-float .fm-global-hud[data-surface=\"hud\"] .fm-global-card { flex: 1; width: 100%; height: 100%; min-height: 0; display: flex; flex-direction: column; align-self: stretch; box-sizing: border-box; overflow: auto; padding: 12px; }\n.fm-task-float .fm-global-hud[data-surface=\"hud\"] .fm-global-card-header { cursor: grab; touch-action: none; padding-right: 28px; flex: none; }\n.fm-task-float .fm-global-hud[data-surface=\"hud\"] .fm-global-detail { flex: 1; min-height: 50px; display: flex; flex-direction: column; overflow: auto; }\n.fm-task-float .fm-global-hud[data-surface=\"hud\"] .fm-global-editor { flex: 1; min-height: 80px; max-height: none; resize: none; box-sizing: border-box; }\n.fm-task-float .fm-global-hud[data-surface=\"hud\"] .fm-hud-transcript { flex: 1; max-height: 45%; min-height: 44px; }\n.fm-task-float .fm-global-hud[data-surface=\"hud\"] .fm-hud-task-wave { flex: none; margin-right: 30px; cursor: grab; touch-action: none; }\n.fm-task-float .fm-global-hud[data-surface=\"hud\"] :is(.fm-global-actions,.fm-global-settings,.fm-hud-metrics) { flex: none; }\n.fm-task-float .fm-global-hud[data-surface=\"hud\"] .fm-global-settings { padding-right: 18px; }\n.fm-task-float .fm-global-hud[data-surface=\"hud\"] .fm-global-note { max-height: 72px; overflow: auto; }\n.fm-task-float .fm-global-empty { cursor: grab; padding-right: 42px; }\n.fm-task-float .fm-task-close { position: absolute; top: 8px; right: 8px; width: 26px; height: 26px; z-index: 3; }\n.fm-task-resize { position: absolute; bottom: 3px; right: 3px; z-index: 3; width: 20px; height: 20px; border: 0; border-radius: 5px; background: none; color: #a5c8dc; cursor: nwse-resize; touch-action: none; font: 17px/1 system-ui; }\n.fm-task-float :is(button,input,summary,textarea,[tabindex]):focus-visible { outline: 2px solid #7dd3fc; outline-offset: 2px; }\n"; module.exports.default=module.exports;
 },
 };
 const __cache={}; function __require(id){if(__cache[id])return __cache[id].exports;const fn=__modules[id];if(!fn)throw new Error("Module not found: "+id);const module={exports:{}};__cache[id]=module;fn(module,module.exports,__require);return module.exports;}

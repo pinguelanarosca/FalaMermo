@@ -18,6 +18,7 @@ function createBundle(file = 'background.js', raw = {}, failures = 0) {
             const snapshot = structuredClone(selected);
             const fail = trace.failRead;
             trace.failRead = false;
+            if (!callback) return fail ? Promise.reject(new Error('Falha simulada de storage')) : Promise.resolve(snapshot);
             queueMicrotask(() => {
                 if (fail) chrome.runtime.lastError = { message: 'Falha simulada de storage' };
                 callback(snapshot);
@@ -26,6 +27,7 @@ function createBundle(file = 'background.js', raw = {}, failures = 0) {
         },
         set(value, callback) {
             trace.writes.push(structuredClone(value));
+            if (!callback) { Object.assign(stored, structuredClone(value)); return Promise.resolve(); }
             queueMicrotask(() => { Object.assign(stored, structuredClone(value)); callback(); });
         },
     } } };
@@ -136,7 +138,7 @@ test('TTS Live encaminha uma vez texto e chaves, sem requisição unary', async 
 });
 
 test('popup monta painel compartilhado sem injetar scripts nem iniciar ações na página', async () => {
-    const elements = Object.fromEntries(['agent', 'notice', 'status', 'read', 'dictate', 'hud', 'settings'].map(id => [id, { value: 'narrator', append() {} }]));
+    const elements = Object.fromEntries(['agent', 'notice', 'status', 'read', 'dictate', 'hud', 'settings', 'hud-transparency', 'hud-transparency-value', 'hud-content-transparency', 'hud-content-transparency-value'].map(id => [id, { value: 'narrator', append() {}, setAttribute() {} }]));
     const trace = { waits: 0, sends: 0, reads: [] };
     elements.status.textContent='Pronto'; // Estado inicial definido pelo popup.html.
     const context = vm.createContext({
@@ -157,7 +159,7 @@ test('popup monta painel compartilhado sem injetar scripts nem iniciar ações n
     assert.equal(trace.sends, 0);
     assert.equal(trace.waits, 0);
     assert.equal(elements.status.textContent, 'Pronto');
-    assert.deepEqual(trace.reads[0], ['api', 'agents']);
+    assert.deepEqual(trace.reads[0], ['api', 'agents', 'hudTransparency', 'hudContentTransparency']);
 });
 
 test('STT unary legado fica desativado por padrão', async () => {

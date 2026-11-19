@@ -15,8 +15,8 @@ function createBundle(file, raw = {}, overrides = {}) {
     const context = vm.createContext({
         AbortController, structuredClone, console,
         chrome: { runtime: {getURL:file=>'chrome-extension://test/'+file,sendMessage:async()=>({success:true})},offscreen:{hasDocument:async()=>false}, storage: {session:{get:async key=>({[key]:session[key]}),set:async values=>Object.assign(session,values)}, local: {
-            get(_keys, callback) { callback(structuredClone(stored)); },
-            set(value, callback) { Object.assign(stored, structuredClone(value)); callback(); },
+            get(_keys, callback) { const result=structuredClone(stored); if(callback) callback(result); else return Promise.resolve(result); },
+            set(value, callback) { Object.assign(stored, structuredClone(value)); if(callback) callback(); else return Promise.resolve(); },
         } } },
     });
     vm.runInContext(source.replace(entrypoint, 'globalThis.modules = __modules;'), context);

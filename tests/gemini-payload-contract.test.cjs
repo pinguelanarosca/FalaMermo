@@ -109,7 +109,7 @@ test('Ctrl+B e Ouvir no HUD preservam seleção e agente personalizado até o ba
  }
 });
 test('popup mantém agente ativo e cria tarefa manual pelo mesmo TTS do background',async()=>{
- const e=background(),elements=Object.fromEntries(['agent','notice','status','settings','globalTasks'].map(id=>[id,{value:'',append(){}}]));let mounted;
+ const e=background(),elements=Object.fromEntries(['agent','notice','status','settings','globalTasks','hud-transparency','hud-transparency-value','hud-content-transparency','hud-content-transparency-value'].map(id=>[id,{value:'',append(){},setAttribute(){}}]));let mounted;
  const sender={url:'chrome-extension://contract/popup.html'};
  const context=vm.createContext({document:{querySelector:selector=>elements[selector.slice(1)],createElement:()=>({append(){}})},Option:function(){},GlobalHud:{mount:(_container,options)=>{mounted=options;return{update(){},destroy(){}};}},window:{addEventListener(){}},chrome:{runtime:{sendMessage:message=>e.run(message.type,message.payload,sender),onMessage:{addListener(){}},openOptionsPage(){}},storage:{local:{get:async()=>e.data},onChanged:{addListener(){}}}}});
  vm.runInContext(fs.readFileSync(require.resolve('../popup.js'),'utf8'),context);await new Promise(resolve=>setImmediate(resolve));assert.equal(elements.agent.value,agent.metadata.id);assert.equal(mounted.panel,true);

@@ -14,3 +14,15 @@ test('verificador rejeita divergência da versão pública antes de publicar',t=
  const manifest=JSON.parse(fs.readFileSync(path.join(root,'manifest.json'),'utf8'));manifest.version='2.0.2';fs.writeFileSync(path.join(directory,'manifest.json'),JSON.stringify(manifest));
  assert.throws(()=>verify(directory,['manifest.json'],{syntax:false}),/versão pública 1\.0\.8/);
 });
+test('publicação inclui dependências locais de todos os cenários Chrome do HUD',()=>{
+ const selected=new Set(publicFiles());
+ for(const file of ['tests/hud-border-states-chrome.cjs','tests/hud-conflict-chrome.cjs','tests/hud-interactions-chrome.cjs'])assert.ok(selected.has(file),file);
+ for(const file of selected){
+  if(!file.startsWith('tests/')||!file.endsWith('.cjs'))continue;
+  const source=fs.readFileSync(path.join(root,file),'utf8');
+  for(const [,relative]of source.matchAll(/require\(['"](\.\/[^'"]+\.cjs)['"]\)/g)){
+   const dependency=path.posix.normalize(path.posix.join(path.posix.dirname(file),relative));
+   assert.ok(selected.has(dependency),`${file}: dependência ausente ${dependency}`);
+  }
+ }
+});

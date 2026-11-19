@@ -35,7 +35,8 @@ function providerFixture(){
 (async()=>{
  fs.mkdirSync(extension);for(const name of fs.readdirSync(root))if(/\.(js|html|css|json)$/.test(name))fs.copyFileSync(path.join(root,name),path.join(extension,name));
  for(const name of ['icons','vad-assets'])fs.cpSync(path.join(root,name),path.join(extension,name),{recursive:true});
- if(process.argv.includes('--isolation')){const file=path.join(extension,'content.js');fs.writeFileSync(file,fs.readFileSync(file,'utf8').replace('exports.stt = new SttController();','globalThis.fixtureStt=exports.stt = new SttController();'));}
+ if(process.argv.includes('--isolation')||process.argv.includes('--hud-controls')){const file=path.join(extension,'content.js');fs.writeFileSync(file,fs.readFileSync(file,'utf8').replace('exports.stt = new SttController();','globalThis.fixtureStt=exports.stt = new SttController();'));}
+ if(process.argv.includes('--hud-notices')){const file=path.join(extension,'content.js');fs.writeFileSync(file,fs.readFileSync(file,'utf8').replace('exports.hud = HudController.getInstance();','globalThis.fixtureHudController=exports.hud = HudController.getInstance();'));}
  const manifest=JSON.parse(fs.readFileSync(path.join(extension,'manifest.json'),'utf8'));manifest.host_permissions.push('<all_urls>');fs.writeFileSync(path.join(extension,'manifest.json'),JSON.stringify(manifest));
  fs.writeFileSync(path.join(extension,'translation-provider.js'),'('+providerFixture.toString()+')();');const offscreenFile=path.join(extension,'offscreen.html');fs.writeFileSync(offscreenFile,fs.readFileSync(offscreenFile,'utf8').replace('<body>','<body><script src="translation-provider.js"></script>'));
  // Registra menus reais e guarda o callback para exercitar a mesma rota sem UI nativa headless.
@@ -55,6 +56,9 @@ function providerFixture(){
  const content=expression=>evaluate(page,expression,isolated),state=()=>evaluate(worker,'chrome.storage.session.get("falamermo.globalJobs.v1").then(s=>s["falamermo.globalJobs.v1"])');
  const hud=expression=>content('(()=>{const hud=document.querySelector("#ext-tts-stt-host").shadowRoot;return '+expression+'})()');
  const visible=()=>hud('!hud.querySelector(".ext-hud-card").classList.contains("hidden")');
+ const minimized=()=>hud('hud.querySelector(".ext-hud-card").dataset.minimized==="true"');
+ const compact=async label=>{await waitFor(label,async()=>await visible()&&await minimized());assert.deepEqual(await content('fixtureUnexpectedExpanded'),[],label+' não pode exibir o painel antes do estado compacto');};
+ const expand=async()=>{await hud('hud.querySelector("#ext-btn-toggle").click()');await waitFor('expansão manual pelo raio',async()=>!await minimized());};
  const close=()=>hud('hud.querySelector("#ext-btn-close").click()');
  // Target ID CDP difere do ID inteiro da aba Chrome.
  const tabId=await evaluate(worker,'chrome.tabs.query({}).then(tabs=>tabs.find(t=>t.url?.startsWith('+JSON.stringify(pageUrl)+')).id)');
@@ -62,15 +66,17 @@ function providerFixture(){
  const menu=async title=>{await content('document.querySelector("textarea").focus();document.querySelector("textarea").select()');await evaluate(worker,'void fixtureMenuClick({menuItemId:'+JSON.stringify('read_selection_menu')+',selectionText:'+JSON.stringify(original)+'},{id:'+tabId+',url:'+JSON.stringify(pageUrl)+'})');};
  const latest=async()=>((await state())?.jobs||[])[0];
  let audioSession,audioTarget;const audio=async()=>{const target=await waitFor('offscreen',()=>locate(base+'offscreen.html'));if(audioTarget!==target.targetId){audioTarget=target.targetId;audioSession=await attach(audioTarget);await waitFor('provider fixture',()=>evaluate(audioSession,'typeof fixtureTurns!=="undefined"'));}return audioSession;};
- const finishAudio=async jobId=>{await waitFor('turno TTS',async()=>evaluate(await audio(),'fixtureTurns.some(socket=>socket.readyState===1)'));await evaluate(await audio(),'fixtureTurns.splice(0).filter(socket=>socket.readyState===1).forEach(socket=>socket.receive({...fixturePcm(),turnComplete:true,interactionStatus:"IDLE"}))');let played=false;await waitFor('TTS concluído',async()=>{const job=(await state()).jobs.find(j=>j.jobId===jobId);if(job?.status==='playing')played=true;if(job?.status==='error')throw Error(job.error);return job?.status==='completed';});assert.equal(played,true,'O PCM deve efetivamente entrar em reprodução antes da conclusão');};
+ const finishAudio=async jobId=>{await waitFor('turno TTS',async()=>evaluate(await audio(),'fixtureTurns.some(socket=>socket.readyState===1)'));await evaluate(await audio(),'fixtureTurns.splice(0).filter(socket=>socket.readyState===1).forEach(socket=>socket.receive({...fixturePcm(),turnComplete:true,interactionStatus:"IDLE"}))');let played=false;await waitFor('TTS concluído',async()=>{const job=(await state()).jobs.find(j=>j.jobId===jobId);if(job?.status==='playing'){played=true;assert.equal(await hud('hud.querySelector(".ext-hud-waveform,.fm-hud-player-wave")'),null);}if(job?.status==='error')throw Error(job.error);return job?.status==='completed';});assert.equal(played,true,'O PCM deve efetivamente entrar em reprodução antes da conclusão');};
  await waitFor('HUD montado',()=>hud('!!hud.querySelector(".fm-global-jobs")'));assert.equal(await visible(),false);
- let isolationCheck=async()=>{},originSwitchCheck=async()=>{};
+ await content('globalThis.fixtureUnexpectedExpanded=[];new MutationObserver(()=>{const h=document.querySelector("#ext-tts-stt-host").shadowRoot.querySelector(".ext-hud-card");if(!h.classList.contains("hidden")&&h.dataset.minimized!=="true")fixtureUnexpectedExpanded.push(h.dataset.minimized);}).observe(document.querySelector("#ext-tts-stt-host").shadowRoot.querySelector(".ext-hud-card"),{attributes:true,attributeFilter:["class","data-minimized"]})');
+ let isolationCheck=async()=>{},originSwitchCheck=async()=>{},conflictCheck=async()=>{};
  if(process.argv.includes('--isolation')){
   const {targetId:aid}=await call('Target.createTarget',{url:pageUrl+'/witness'}),ap=await attach(aid);
   const created=await evaluate(worker,'chrome.windows.create({url:'+JSON.stringify(pageUrl+'/other-window')+'})');
   const cp=await attach((await waitFor('outra janela',()=>locate(pageUrl+'/other-window'))).targetId);
   const isolatedFor=async session=>waitFor('content isolado',async()=>{for(const c of contexts.get(session)||[])if(!c.auxData?.isDefault&&await evaluate(session,'chrome.runtime?.id==='+JSON.stringify(id),c.id))return c.id;});
   const ac=await isolatedFor(ap),cc=await isolatedFor(cp);
+  if(process.argv.includes('--hud-notices'))conflictCheck=()=>require('./hud-conflict-chrome.cjs')({page,isolated,worker,tabId,views:[{session:ap,context:ac,url:pageUrl+'/witness'},{session:cp,context:cc,url:pageUrl+'/other-window'}],call,evaluate,waitFor,state,out:temp});
   const witness=async session=>evaluate(session,`(async()=>{const count=48000*120,b=new ArrayBuffer(44+count*2),v=new DataView(b),str=(at,s)=>[...s].forEach((c,i)=>v.setUint8(at+i,c.charCodeAt(0)));str(0,'RIFF');v.setUint32(4,36+count*2,true);str(8,'WAVEfmt ');v.setUint32(16,16,true);v.setUint16(20,1,true);v.setUint16(22,1,true);v.setUint32(24,48000,true);v.setUint32(28,96000,true);v.setUint16(32,2,true);v.setUint16(34,16,true);str(36,'data');v.setUint32(40,count*2,true);for(let i=0;i<count;i++)v.setInt16(44+i*2,Math.sin(i*440*2*Math.PI/48000)*4,true);globalThis.witnessAudio=new Audio(URL.createObjectURL(new Blob([b],{type:'audio/wav'})));witnessAudio.volume=.23;await witnessAudio.play();await new Promise(r=>setTimeout(r,100));globalThis.witnessChanges=[];for(const e of ['volumechange','pause','playing','emptied'])witnessAudio.addEventListener(e,()=>witnessChanges.push(e));return witnessAudio.paused;})()`);
   assert.equal(await witness(ap),false);assert.equal(await witness(cp),false);
   await evaluate(ap,'chrome.runtime.sendMessage({type:"HUD_GLOBAL_UI_SET",payload:{visible:true}})',ac);
@@ -108,12 +114,13 @@ for key in reversed(keys):t.XTestFakeKeyEvent(d,key,0,0);x.XFlush(d);time.sleep(
 `]);
  }else await evaluate(worker,'void fixtureCommand("translate_selection",{id:'+tabId+',url:'+JSON.stringify(pageUrl)+'})');
  const translation=await waitFor('traduzindo',async()=>{const j=await latest();return j?.status==='translating'&&j;});
- assert.equal(await visible(),true);assert.equal(translation.collapsed,false);await waitFor('requisições de tradução',()=>held.length>0);
+ await compact('tradução abre somente a barra');assert.equal(translation.collapsed,false);await waitFor('requisições de tradução',()=>held.length>0);
  const requests=held.splice(0);httpMode='success';for(const request of requests)await respond(request.event,request.session).catch(()=>{});
  await waitFor('tradução alimenta TTS',async()=>evaluate(await audio(),'fixtureTtsTexts.length>0'));assert.ok(JSON.stringify(await evaluate(await audio(),'fixtureTtsTexts')).includes(translated));assert.equal(await content('document.querySelector("textarea").value'),original);await finishAudio(translation.jobId);assert.equal((await state()).jobs.length,1);
  await isolationCheck();console.log('VERIFICADO: somente Narrar no menu, sem submenu; '+(process.env.FALAMERMO_HEADED?'teclado nativo Alt+Shift+Y':'comando translate_selection (callback)')+' aciona tradução; traduzindo → conectando → reprodução → concluído; uma tarefa e campo preservado.');
- await close();await menu('Narrar');let narration=await waitFor('Narrar com HUD fechado',async()=>{const j=await latest();return j.jobId!==translation.jobId&&j;});assert.equal(await visible(),true);assert.equal(narration.collapsed,false);assert.ok((await state()).jobs.filter(j=>j.jobId!==narration.jobId).every(j=>j.collapsed));await finishAudio(narration.jobId);
- for(let i=0;i<4;i++){const previous=narration.jobId;await menu('Narrar');narration=await waitFor('narração '+i,async()=>{const j=await latest();return j.jobId!==previous&&j;}).catch(async e=>{console.error(JSON.stringify((await state()).jobs.slice(0,2).map(j=>({status:j.status,error:j.error,jobId:j.jobId}))));throw e;});await finishAudio(narration.jobId);}
+ await close();await menu('Narrar');let narration=await waitFor('Narrar com HUD fechado',async()=>{const j=await latest();return j.jobId!==translation.jobId&&j;});await compact('narração abre somente a barra');assert.equal(narration.collapsed,false);assert.ok((await state()).jobs.filter(j=>j.jobId!==narration.jobId).every(j=>j.collapsed));await expand();await finishAudio(narration.jobId);
+ for(let i=0;i<4;i++){const previous=narration.jobId;await menu('Narrar');narration=await waitFor('narração '+i,async()=>{const j=await latest();return j.jobId!==previous&&j;}).catch(async e=>{console.error(JSON.stringify((await state()).jobs.slice(0,2).map(j=>({status:j.status,error:j.error,jobId:j.jobId}))));throw e;});assert.equal(await minimized(),false,'nova narração preserva expansão manual');await finishAudio(narration.jobId);}
+ console.log('VERIFICADO: tradução e narração abrem compactas sem expansão transitória; novas narrações preservam expansão explícita pelo raio.');
  assert.equal((await state()).jobs.length,6);assert.equal(await hud('hud.querySelectorAll(".fm-global-card:not([hidden])").length'),4);
  assert.deepEqual(await hud('[...hud.querySelectorAll(".fm-global-card:not([hidden])")].map(n=>n.dataset.jobId)'),(await state()).jobs.slice(0,4).map(j=>j.jobId));
  await hud('hud.querySelector(".fm-global-card [data-action=collapse]").click()');await waitFor('expansão manual',async()=>!(await latest()).collapsed);await hud('hud.querySelector(".fm-global-card [data-action=collapse]").click()');await waitFor('recolhimento manual',async()=>(await latest()).collapsed);
@@ -124,14 +131,31 @@ for key in reversed(keys):t.XTestFakeKeyEvent(d,key,0,0);x.XFlush(d);time.sleep(
  await isolationCheck();console.log('VERIFICADO: tarefas simultâneas, destaque da mais nova, fechamento manual e evento atrasado sem reabertura.');
 
  const previous=narration.jobId;await menu('Narrar');narration=await waitFor('nova atividade cancela timer',async()=>{const j=await latest();return j.jobId!==previous&&j;});await sleep(5200);assert.equal(await visible(),true);await finishAudio(narration.jobId);const deadline=(await state()).hudAutomation.closeAt;assert.ok(deadline>Date.now());await sleep(Math.max(0,deadline-Date.now()-300));assert.equal(await visible(),true);await waitFor('fechamento após 5s',async()=>!await visible());
- assert.ok(Date.now()>=deadline);await toggle();assert.equal(await visible(),true);await sleep(5200);assert.equal(await visible(),true);
+ assert.ok(Date.now()>=deadline);await toggle();await waitFor('consulta manual confirmada pelo serviço',visible);await sleep(5200);assert.equal(await visible(),true);
  await isolationCheck();console.log('VERIFICADO: timer cancelado por nova tarefa, HUD permanece durante geração, fecha após 5s e consulta manual permanece aberta.');
- await call('Page.bringToFront',{},page);await close();await content('document.querySelector("textarea").value="";document.querySelector("textarea").focus()');
+ await call('Page.bringToFront',{},page);await close();await waitFor('ocultação confirmada antes do ditado',async()=>!await visible());await content('fixtureUnexpectedExpanded=[];document.querySelector("textarea").value="";document.querySelector("textarea").focus()');
  await evaluate(worker,'chrome.tabs.sendMessage('+tabId+',{type:"CMD_START_DICTATION"})');const stt=await waitFor('gravação STT',async()=>{const j=await latest();return j?.type==='STT'&&j.status==='recording'&&j;},30000);
- assert.equal(await visible(),true);assert.equal(stt.collapsed,false);await sleep(5200);assert.equal(await visible(),true);
+ await compact('ditado abre somente a barra');assert.equal(stt.collapsed,false);await expand();await waitFor('waveform reage à captura real',()=>hud('hud.querySelector('+JSON.stringify('[data-job-id="'+stt.jobId+'"] .fm-hud-task-wave')+').dataset.active==="true"'));
+ if(process.argv.includes('--task-floats'))await require('./task-float-stt-chrome.cjs')({stage:'recording',stt,call,evaluate,page,content,hud,state,worker,tabId,audio,waitFor});
+ await conflictCheck();
+ if(process.argv.includes('--hud-controls')){
+  await waitFor('microfone e AudioWorklet em captura',()=>content('fixtureStt.isRecording&&fixtureStt.liveCapture?.context?.state==="running"&&fixtureStt.liveCapture.stream.getTracks().every(t=>t.readyState==="live")'),30000);
+  assert.equal(await hud('hud.querySelector("[data-job-id=\\"'+stt.jobId+'\\"] .fm-hud-metrics").open'),false);
+  await waitFor('telemetria do VAD real',()=>hud('!!hud.querySelector("[data-job-id=\\"'+stt.jobId+'\\"] [data-field=\\"vad.sileroProbability\\"]")'),30000);
+  await hud('hud.querySelector("[data-job-id=\\"'+stt.jobId+'\\"] .fm-hud-metrics summary").click()');
+  const position=await hud('({right:hud.querySelector(".ext-hud-card").style.right,bottom:hud.querySelector(".ext-hud-card").style.bottom})'),cards=(await state()).jobs.map(j=>[j.jobId,j.collapsed]);
+  for(const minimized of [true,false]){await hud('hud.querySelector("#ext-btn-toggle").click()');await waitFor('raio durante microfone ativo',()=>hud('hud.querySelector(".ext-hud-card").dataset.minimized==='+JSON.stringify(String(minimized))));assert.equal(await content('fixtureStt.isRecording&&fixtureStt.liveCapture.stream.getTracks().every(t=>t.readyState==="live")'),true);assert.equal((await state()).jobs.find(j=>j.jobId===stt.jobId).status,'recording');}
+  assert.deepEqual(await hud('({right:hud.querySelector(".ext-hud-card").style.right,bottom:hud.querySelector(".ext-hud-card").style.bottom})'),position);assert.deepEqual((await state()).jobs.map(j=>[j.jobId,j.collapsed]),cards);
+  console.log('VERIFICADO: raio minimiza/restaura durante captura real com microfone virtual, sem encerrar trilhas, mudar cartões ou alterar posição.');
+ }
+ await sleep(5200);assert.equal(await visible(),true);
+ await waitFor('pacotes reais visíveis no card',()=>hud('Number(hud.querySelector('+JSON.stringify('[data-job-id="'+stt.jobId+'"] .fm-hud-chip[data-field="capturedChunks"]')+')?.textContent)>0'));
+ assert.equal(await hud('hud.querySelector(".fm-global-partial").parentNode.className'),'fm-hud-transcript');
  await evaluate(worker,'chrome.tabs.sendMessage('+tabId+',{type:"CMD_START_DICTATION"})');await waitFor('STT finalizado e inserido',async()=>{const j=(await state()).jobs.find(j=>j.jobId===stt.jobId);return j.status==='completed'&&j.insertion?.inserted;},30000);assert.match(await content('document.querySelector("textarea").value'),/Ditado de teste/);
- await waitFor('fechamento após STT',async()=>!await visible());assert.equal((await state()).jobs.length,10);
- await isolationCheck();console.log('VERIFICADO: STT com HUD fechado, microfone/VAD reais de teste, gravação além de 5s, finalização, inserção e histórico preservados.');
+ if(process.argv.includes('--task-floats'))await require('./task-float-stt-chrome.cjs')({stage:'completed',stt,call,evaluate,page,content,hud,state,worker,tabId,audio,waitFor});
+ await waitFor('waveform encerra com captura',()=>hud('hud.querySelector('+JSON.stringify('[data-job-id="'+stt.jobId+'"] .fm-hud-task-wave')+').dataset.active==="false"'));await sleep(5200);assert.equal(await visible(),true);await close();await waitFor('somente ocultação explícita fecha HUD',async()=>!await visible());assert.equal((await state()).jobs.length,10);
+ if(process.argv.includes('--hud-controls'))assert.equal(await hud('hud.querySelector("[data-job-id=\\"'+stt.jobId+'\\"] .fm-hud-metrics").open'),true,'fim do ditado preserva expansão explícita');
+ await isolationCheck();console.log('VERIFICADO: STT com HUD fechado, microfone/VAD reais de teste, gravação além de 5s, waveform encerrada, HUD manual persistente, inserção e histórico preservados.');
  }
  if(process.argv.includes('--isolation')){
   for(const mode of ['normal','cancel','context-close']){

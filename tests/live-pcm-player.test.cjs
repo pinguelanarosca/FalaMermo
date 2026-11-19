@@ -141,3 +141,9 @@ test('BackgroundAudio Live retoma sem src unary e conserva requestId',async()=>{
  const start=source.indexOf('    togglePlayPause() {'),end=source.indexOf('    playBase64Audio(',start),method=source.slice(start,end).replace('togglePlayPause()','function togglePlayPause()');
  const testContext={console,audio,called:0};vm.runInNewContext(method+';audio.play=async()=>{called++;};togglePlayPause.call({audio,isFetchingChunk:false});',testContext);assert.equal(testContext.called,1);
 });
+
+test('observação de sinal diferencia PCM silencioso de áudio sem alterar amostras',()=>{
+ let Processor;const messages=[];vm.runInNewContext(fs.readFileSync(require.resolve('../pcm-player-worklet.js'),'utf8'),{Float32Array,AudioWorkletProcessor:class{constructor(){this.port={postMessage:p=>messages.push(p)}}},registerProcessor:(_name,type)=>Processor=type});const p=new Processor(),output=new Float32Array(4);
+ for(const samples of [[0,0,0,0],[.25,-.5,.75,0],[0,0,0,0]]){p.port.onmessage({data:{type:'enqueue',buffer:new Float32Array(samples).buffer}});p.process([],[[output]]);assert.deepEqual(Array.from(output),samples);}
+ assert.deepEqual(messages.filter(m=>m.type==='signal-state').map(m=>m.active),[false,true,false]);
+});

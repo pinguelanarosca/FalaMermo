@@ -10,16 +10,29 @@ function environment(options={}){
 }
 const origin={tabId:1,frameId:2,documentId:'document-original'};
 const job=(jobId,type='STT',extra={})=>({jobId,type,origin,playerId:'same-player',requestId:jobId,...extra});
-test('registro de ditado abre e restaura o HUD automaticamente',async()=>{
+test('registro de ditado abre HUD automaticamente somente como barra compacta',async()=>{
  const {registry}=environment();
  await registry.ui({visible:false,minimized:true});
  await registry.start(job('dictation'),'reserve-stt');
  await registry.start(job('dictation'),'start-stt');
  const state=await registry.get();
  assert.equal(GlobalJobs.forHud(state,1).visible,true);
- assert.equal(GlobalJobs.forHud(state,1).minimized,false);
+ assert.equal(GlobalJobs.forHud(state,1).minimized,true);
  assert.equal(state.jobs[0].collapsed,false);
  assert.equal(state.jobs[0].jobId,'dictation');
+});
+test('conflito de microfone usa título real da origem e mantém fallback sem persistir título',async()=>{
+ const e=backgroundEnvironment(),other={tab:{id:2},frameId:0,documentId:'second',url:'https://viewer.invalid/'};let title='ChatGPT',failed=false;const queried=[];
+ e.context.chrome.tabs.get=async tabId=>{queried.push(tabId);if(failed)throw Error('Sem acesso');return{id:tabId,title};};
+ assert.equal((await e.run('STT_CAPTURE_RESERVE',{jobId:'owner'})).success,true);
+ const result=await e.run('STT_CAPTURE_RESERVE',{jobId:'blocked'},other);assert.equal(result.success,false);assert.equal(result.code,'STT_CAPTURE_BUSY');assert.equal(result.otherTab,true);assert.equal(result.error,'O microfone já está em uso na aba “ChatGPT”.');assert.ok(queried.every(id=>id===1));assert.ok(!JSON.stringify(e.sessionData).includes('ChatGPT'));
+ for(const missing of [undefined,'', '  ']){title=missing;assert.equal((await e.run('STT_CAPTURE_RESERVE',{jobId:'fallback'},other)).error,'O microfone já está sendo usado por outro ditado.');}
+ failed=true;assert.equal((await e.run('STT_CAPTURE_RESERVE',{jobId:'inaccessible'},other)).error,'O microfone já está sendo usado por outro ditado.');
+ const state=(await e.run('HUD_GLOBAL_GET')).state;assert.equal(state.jobs.length,1);assert.equal(state.jobs[0].jobId,'owner');
+});
+test('roteador registra clique local sem alterar a apresentação ou comandos de tarefas',async()=>{
+ const e=backgroundEnvironment(),other={tab:{id:2},frameId:0,documentId:'peer',url:'https://peer.invalid/'};await e.run('HUD_GLOBAL_GET',{},other);await e.run('STT_CAPTURE_RESERVE',{jobId:'click-owner'});const before=(await e.run('HUD_GLOBAL_GET')).state,peer=(await e.run('HUD_GLOBAL_GET',{},other)).state;
+ const routes=e.routes.length;await e.run('HUD_GLOBAL_UI_SET',{scope:'tab',interaction:true,tabId:2});assert.ok(e.sessionData[GlobalJobs.STORAGE_KEY].hudAutomation.manualTabs.includes(1));const after=(await e.run('HUD_GLOBAL_GET')).state;assert.equal(after.visible,before.visible);assert.equal(after.minimized,before.minimized);assert.deepEqual(after.jobs,before.jobs);assert.equal(e.routes.length,routes);assert.equal((await e.run('HUD_GLOBAL_GET',{},other)).state.visible,peer.visible);
 });
 test('apresentação por aba usa o remetente, sobrevive ao worker e respeita controles manuais globais',async()=>{
  const e=backgroundEnvironment(),other={tab:{id:2},frameId:0,documentId:'viewer',url:'https://viewer.invalid/'};
@@ -43,6 +56,15 @@ test('apresentação por aba usa o remetente, sobrevive ao worker e respeita con
  assert.equal(originState.minimized,false);
  await restarted.router.originLost({tabId:e.original.tab.id,tabClosed:true,captureGone:true});
  assert.equal((await restarted.run('HUD_GLOBAL_GET',{},e.original)).state.visible,false);
+});
+test('intenção do raio exige remetente de aba e ignora identidade de outra janela no payload',async()=>{
+ const e=backgroundEnvironment(),other={tab:{id:2,windowId:22},frameId:0,documentId:'second-window',url:'https://viewer.invalid/'};
+ await e.run('HUD_GLOBAL_GET',{},e.original);await e.run('HUD_GLOBAL_GET',{},other);
+ await e.run('HUD_GLOBAL_UI_SET',{visible:true,minimized:false},e.original);await e.run('HUD_GLOBAL_UI_SET',{visible:true,minimized:false},other);
+ const result=await e.run('HUD_GLOBAL_UI_SET',{scope:'tab',toggleMinimized:true,tabId:1,windowId:11,documentId:e.original.documentId},other);
+ assert.equal(result.success,true);assert.equal(result.state.minimized,true);assert.equal((await e.run('HUD_GLOBAL_GET',{},e.original)).state.minimized,false);
+ const rejected=await e.run('HUD_GLOBAL_UI_SET',{scope:'tab',toggleMinimized:true,tabId:2},{url:'chrome-extension://test/popup.html'});assert.equal(rejected.success,false);assert.equal((await e.run('HUD_GLOBAL_GET',{},e.original)).state.minimized,false);
+ await e.run('HUD_GLOBAL_UI_SET',{scope:'tab',toggleMinimized:true},other);assert.equal((await e.run('HUD_GLOBAL_GET',{},other)).state.minimized,false);
 });
 test('rascunhos, tarefa ativa e expansão recuperam no worker; edição concorrente não sobrescreve',async()=>{
  const e=environment(),r=e.registry;await r.draft({jobId:'manual-a',agentId:'custom',origin:{}});await r.edit({jobId:'manual-a',text:'Texto escrito e colado.',expectedText:''});await r.draft({jobId:'manual-b',agentId:'narrator',origin:{}});await r.ui({activeTaskId:'manual-a'});await r.collapse({jobId:'manual-a',collapsed:true});await r.historyChanged(e.history());
@@ -95,7 +117,7 @@ test('reinício recupera snapshots/versionamento e reconcilia eventos perdidos c
  const restarted=GlobalJobs.create(e.services);assert.deepEqual(await restarted.get(),first);
  await restarted.reconcile([{jobId:'s1',status:'completed',text:'resultado do servidor',eventSeq:5},{jobId:'t1',status:'playing',eventSeq:2,progress:{currentTime:2}}]);assert.equal((await restarted.get()).jobs.find(j=>j.jobId==='s1').status,'inserting');await restarted.insertion({jobId:'s1',inserted:true},origin);await restarted.event({jobId:'t1',event:'ended',eventSeq:3});
  for(const name of ['t2','t3']){e.tick(1);await restarted.start(job(name,'TTS',{text:name}));await restarted.event({jobId:name,event:'ended',eventSeq:1});}
- assert.equal(e.history().recentItems.length,2);assert.equal((await restarted.get()).jobs.length,2);assert.equal(GlobalJobs.forHud(await restarted.get(),1).minimized,false);
+ assert.equal(e.history().recentItems.length,2);assert.equal((await restarted.get()).jobs.length,2);assert.equal(GlobalJobs.forHud(await restarted.get(),1).minimized,true);
  await restarted.historyChanged({...e.history(),recentItems:[]});assert.equal((await restarted.get()).jobs.length,2);await restarted.clearHistory();assert.equal((await restarted.get()).jobs.length,0);
 });
 test('histórico desabilitado não persiste transcrições; erro preserva apenas texto recebido/incompleto',async()=>{
@@ -288,12 +310,12 @@ test('cliques Pause concorrentes de painéis diferentes não viram Resume implí
 test('controles em voo de request anterior não atuam no replay atual',async()=>{
  const e=backgroundEnvironment();await e.run('TTS_REQUEST',{text:'Teste público.'});const jobId=(await e.run('HUD_GLOBAL_GET')).state.activeTaskId;const before=e.routes.length;for(const action of ['pause','resume','stop','seek','set'])assert.equal((await e.run('HUD_GLOBAL_COMMAND',{jobId,requestId:'old',action,deltaSeconds:5,volume:.2})).success,false);assert.equal(e.routes.length,before);assert.equal((await e.run('HUD_GLOBAL_GET')).state.jobs[0].status,'connecting');
 });
-test('maximizar reutiliza janela; fechar não comanda offscreen; task.html usa snapshot global',async()=>{
- const e=backgroundEnvironment(),opened=[],focused=[];e.context.chrome.windows={create:async value=>{opened.push(value);return{id:77};},update:async(id,value)=>{focused.push([id,value]);return{id};}};
+test('maximizar pede apresentação local e Popup encaminha à sua aba, sem criar janela ou mudar HUD',async()=>{
+ const e=backgroundEnvironment(),opened=[];e.context.chrome.windows={create:async value=>{opened.push(value);return{id:77};},update:async()=>{throw Error('Não deve focar janela nativa');}};
  await e.run('TTS_REQUEST',{text:'Público.'});const jobId=(await e.run('HUD_GLOBAL_GET')).state.jobs[0].jobId;const before=e.routes.length;
- await e.run('HUD_GLOBAL_COMMAND',{jobId,action:'maximize'});await e.run('HUD_GLOBAL_COMMAND',{jobId,action:'maximize'});assert.equal(opened.length,1);assert.ok(opened[0].url.endsWith('task.html?jobId='+jobId));assert.equal(opened[0].type,'popup');assert.equal(focused.length,1);assert.equal(e.routes.length,before);
- assert.equal((await e.run('HUD_GLOBAL_GET',{}, {url:opened[0].url})).state.jobs[0].jobId,jobId);
- const restarted=backgroundEnvironment(e);restarted.context.chrome.windows=e.context.chrome.windows;await restarted.run('HUD_GLOBAL_COMMAND',{jobId,action:'maximize'});assert.equal(opened.length,1);assert.equal(focused.length,2);
+ const prior=(await e.run('HUD_GLOBAL_GET')).state;for(let i=0;i<2;i++){const r=await e.run('HUD_GLOBAL_COMMAND',{jobId,action:'maximize'});assert.equal(r.openTaskId,jobId);assert.equal(r.success,true);}assert.equal(opened.length,0);assert.equal(e.routes.length,before);assert.equal((await e.run('HUD_GLOBAL_GET')).state.minimized,prior.minimized);assert.equal((await e.run('HUD_GLOBAL_GET')).state.visible,prior.visible);
+ e.context.chrome.tabs.query=async()=>[{id:2}];const popup={url:'chrome-extension://test/popup.html',documentId:'popup-local'};const r=await e.run('HUD_GLOBAL_COMMAND',{jobId,action:'maximize'},popup);assert.equal(r.success,true);const delivered=e.sent.findLast(s=>s.message?.type==='HUD_TASK_OPEN');assert.equal(delivered.tabId,2);assert.equal(delivered.message.payload.jobId,jobId);assert.equal(delivered.options.frameId,0);assert.equal(opened.length,0);
+ assert.equal((await e.run('HUD_GLOBAL_GET',{}, {url:'chrome-extension://test/task.html?jobId='+jobId})).state.jobs[0].jobId,jobId);
 });
 test('Play recusado se outra view mudou texto após o último ACK; não cria sessão divergente',async()=>{
  const e=backgroundEnvironment(),sender={url:'chrome-extension://test/popup.html'};const created=await e.run('HUD_GLOBAL_CREATE',{},sender),jobId=created.state.activeTaskId;await e.run('HUD_GLOBAL_COMMAND',{jobId,action:'edit',text:'Primeira edição.'},sender);await e.run('HUD_GLOBAL_COMMAND',{jobId,action:'edit',text:'Alterado em outra view.'},sender);const result=await e.run('HUD_GLOBAL_COMMAND',{jobId,action:'play',expectedText:'Primeira edição.'},sender);assert.equal(result.success,false);assert.match(result.error,/outro painel/);assert.equal(e.routes.length,0);
@@ -492,4 +514,34 @@ test('Lens mantém modo e persona de leitura no histórico e na reabertura',asyn
  const entry=e.history().recentItems[0];assert.equal(entry.source,'lens');assert.equal(entry.lensMode,'interpret');assert.equal(entry.lensReadingInstruction,'Voz guardada.');
  const reopened=GlobalJobs.create({...e.services,storage:{get:async()=>({}),set:async()=>{}}});
  const state=await reopened.reopen('lens-history'),restored=state.jobs[0];assert.equal(restored.source,'lens');assert.equal(restored.lensMode,'interpret');assert.equal(restored.lensReadingInstruction,'Voz guardada.');assert.equal(restored.text,'Análise completa.');
+});
+
+test('Popup mantém a aba de origem após mudança de foco; mostrar e ocultar não são globais',async()=>{
+ const e=backgroundEnvironment(),other={tab:{id:2},frameId:0,documentId:'two',url:'https://two.test'};let active=2,queries=0;
+ e.context.chrome.tabs.query=async()=>{queries++;return[{id:active}]};e.context.chrome.runtime.getContexts=async()=>[{windowId:20}];
+ for(const sender of [e.original,other])await e.run('HUD_GLOBAL_GET',{},sender);
+ const popup={url:'chrome-extension://test/popup.html',documentId:'popup-two'};
+ await e.run('HUD_GLOBAL_GET',{},popup);active=1;
+ await e.run('HUD_GLOBAL_UI_SET',{toggleVisible:true},popup);assert.equal((await e.run('HUD_GLOBAL_GET',{},other)).state.visible,true);assert.equal((await e.run('HUD_GLOBAL_GET',{},e.original)).state.visible,false);
+ await e.run('HUD_GLOBAL_UI_SET',{toggleVisible:true},popup);assert.equal((await e.run('HUD_GLOBAL_GET',{},other)).state.visible,false);assert.equal(queries,1);
+});
+
+test('migração de tamanho usa local, remove apenas size legado e mantém apresentação por aba',async()=>{
+ const key=GlobalJobs.STORAGE_KEY,sessionData={[key]:{revision:1,visible:false,minimized:false,jobs:[],tabHud:{1:{visible:true,minimized:false,documentId:'one',size:{width:510,height:610}},2:{visible:false,minimized:true,documentId:'two',size:{width:620,height:720}}}}};
+ const e=backgroundEnvironment({sessionData}),local={};e.context.chrome.storage.local={get:async()=>({...local}),set:async values=>Object.assign(local,structuredClone(values))};e.context.chrome.tabs.query=async()=>[{id:1}];
+ await e.run('HUD_GLOBAL_GET',{}, {tab:{id:1},frameId:0,documentId:'one',url:'https://one.test'});
+ assert.deepEqual(local.hudSize,{width:510,height:610});assert.equal('size'in sessionData[key].tabHud[1],false);assert.equal('size'in sessionData[key].tabHud[2],false);
+ assert.equal(sessionData[key].tabHud[1].visible,true);assert.equal(sessionData[key].tabHud[2].minimized,true);assert.equal(sessionData[key].tabHud[2].documentId,'two');
+});
+test('preferência global existente vence legado e resize publica em local sem guardar size por aba',async()=>{
+ const key=GlobalJobs.STORAGE_KEY,e=backgroundEnvironment({sessionData:{[key]:{revision:1,visible:false,minimized:false,jobs:[],tabHud:{1:{visible:true,minimized:false,documentId:'one',size:{width:510,height:610}}}}}}),local={hudSize:{width:700,height:800}};
+ e.context.chrome.storage.local={get:async()=>structuredClone(local),set:async v=>Object.assign(local,structuredClone(v))};const sender={tab:{id:1},frameId:0,documentId:'one',url:'https://one.test'};
+ await e.run('HUD_GLOBAL_GET',{},sender);assert.deepEqual(local.hudSize,{width:700,height:800});
+ const changed=await e.run('HUD_GLOBAL_UI_SET',{scope:'tab',size:{width:600,height:650}},sender);assert.equal(changed.success,true);assert.deepEqual(local.hudSize,{width:600,height:650});assert.equal(changed.state.size,undefined);assert.equal(changed.state.visible,true);
+ const invalid=await e.run('HUD_GLOBAL_UI_SET',{scope:'tab',size:{width:-1,height:650}},sender);assert.equal(invalid.success,false);assert.deepEqual(local.hudSize,{width:600,height:650});
+});
+test('falha ao salvar migração preserva as dimensões legadas na sessão',async()=>{
+ const key=GlobalJobs.STORAGE_KEY,sessionData={[key]:{revision:1,visible:false,minimized:false,jobs:[],tabHud:{1:{visible:true,minimized:false,documentId:'one',size:{width:510,height:610}}}}},e=backgroundEnvironment({sessionData});
+ e.context.chrome.storage.local={get:async()=>({}),set:async()=>{throw Error('fixture storage failure')}};
+ await e.run('HUD_GLOBAL_GET',{}, {tab:{id:1},frameId:0,documentId:'one',url:'https://one.test'});assert.deepEqual(sessionData[key].tabHud[1].size,{width:510,height:610});
 });

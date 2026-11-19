@@ -21,9 +21,9 @@ function state(revision=1){return{revision,visible:true,minimized:false,activeTa
   {jobId:'stt-two',type:'STT',origin:{tabId:9,frameId:2},status:'recording',text:'Segmento confirmado.',partialText:'Palavra provisória',controls:{stop:true,copy:true}},
   {jobId:'tts-three',type:'TTS',origin:{tabId:12,frameId:0},status:'paused',text:'Outra narração.',controls:{stop:true,resume:true,copy:true}},
 ]};}
-function fixture({initial=state(),clipboard={writeText:async()=>{}},send,jobId}={}){
+function fixture({initial=state(),clipboard={writeText:async()=>{}},send,jobId,embedded=false,taskOverlay=false}={}){
   const d=dom(),requests=[];const transport=async message=>{requests.push(message);return send?send(message):{success:true,state:initial};};
-  const view=GlobalHud.mount(d.container,{send:transport,clipboard,jobId});return{...d,view,requests};
+  const view=GlobalHud.mount(d.container,{send:transport,clipboard,jobId,embedded,taskOverlay,panel:taskOverlay});return{...d,view,requests};
 }
 
 test('HUD limita a quatro cards, prioriza tarefa ativa antiga e mantém lista completa nas Opções',async()=>{
@@ -60,7 +60,7 @@ test('duas representações recebem o mesmo estado sem inserir texto na aba visu
   a.view.update(current);b.view.update(current);
   assert.equal(a.card('stt-two').children[3].children[1].textContent,'Transcrição final.');assert.equal(b.card('stt-two').children[3].children[1].textContent,'Transcrição final.');
   assert.equal(a.requests.length,1);assert.equal(b.requests.length,1);
-  const commands=fs.readFileSync(require.resolve('../global-hud.js'),'utf8');assert.doesNotMatch(commands,/injectTranscribedText|STT_LIVE_START|TTS_LIVE_START|execCommand\(/);
+  const commands=fs.readFileSync(require.resolve('../global-hud.js'),'utf8');assert.doesNotMatch(commands,/injectTranscribedText|STT_LIVE_START|TTS_LIVE_START/);assert.deepEqual([...commands.matchAll(/execCommand\(([^)]*)\)/g)].map(m=>m[1]),["'copy'"],'renderização não injeta texto: o único comando de compatibilidade é cópia explícita');
 });
 
 test('revisões antigas e duplicadas não apagam progresso nem texto; GET tardio não vence broadcast',async()=>{
@@ -87,10 +87,10 @@ test('falha de clipboard preserva texto e orienta seleção; parcial sozinho con
 });
 
 test('minimização esconde o corpo; painel continua acessível e cópia fica só na janela',async()=>{
-  let current=state();const e=fixture({send:async message=>{if(message.type==='HUD_GLOBAL_UI_SET')current={...current,...message.payload,revision:current.revision+1};return{success:true,state:current};}});await e.view.ready;
+  let current=state();const e=fixture({send:async message=>{if(message.type==='HUD_GLOBAL_UI_SET')current={...current,...message.payload,...(message.payload.toggleVisible?{visible:!current.visible}:{}),revision:current.revision+1};return{success:true,state:current};}});await e.view.ready;
   await e.find(node=>node.textContent==='Minimizar').onclick();const root=e.find(node=>node.className==='fm-global-hud');
   assert.equal(root.dataset.minimized,'true');assert.equal(e.button('stt-two','stop').hidden,false);assert.equal(e.button('tts-one','copy'),undefined);assert.equal(root.hidden,false);
-  await e.find(node=>node.textContent==='Ocultar HUD').onclick();assert.equal(root.hidden,true);assert.deepEqual(e.requests.at(-1).payload,{visible:false});
+  await e.find(node=>node.textContent==='Ocultar HUD').onclick();assert.equal(root.hidden,true);assert.deepEqual(e.requests.at(-1).payload,{toggleVisible:true});
   const d=dom(),panel=GlobalHud.mount(d.container,{panel:true,send:async()=>({success:true,state:current})});await panel.ready;assert.equal(d.find(node=>node.className==='fm-global-hud').hidden,false);assert.equal(d.button('stt-two','stop').hidden,false);
 });
 
@@ -181,7 +181,7 @@ test('toggle individual espera ACK, não altera ícone otimista nem duplica coma
 });
 test('HUD minimizado mantém os mesmos três botões globais acessíveis, sem duplicar handlers',async()=>{
  const d=dom(),mini=d.doc.createElement('div'),requests=[];d.container.append(mini);const view=GlobalHud.mount(d.container,{embedded:true,compactControls:mini,send:async message=>{requests.push(message);return{success:true,state:state()};}});await view.ready;
- const toggle=d.find(n=>n.dataset.action==='toggle');view.update({...state(2),minimized:true});assert.equal(mini.hidden,false);assert.deepEqual(mini.children.map(n=>n.textContent),['⏪','⏸','⏩']);assert.equal(mini.children[1],toggle);await toggle.onclick();assert.equal(requests.at(-1).type,'HUD_GLOBAL_TOGGLE');assert.deepEqual(requests.at(-1).payload,{action:'pause',jobId:'tts-one'});
+ const toggle=d.find(n=>n.dataset.action==='toggle');view.update({...state(2),minimized:true});assert.equal(mini.hidden,false);assert.deepEqual(mini.children.map(n=>n.textContent),['◀◀','⏸','▶▶']);assert.equal(mini.children[1],toggle);await toggle.onclick();assert.equal(requests.at(-1).type,'HUD_GLOBAL_TOGGLE');assert.deepEqual(requests.at(-1).payload,{action:'pause',jobId:'tts-one'});
  view.update({...state(3),minimized:false});assert.equal(mini.hidden,true);assert.equal(mini.children.length,0);assert.equal(toggle.parentNode.className,'fm-global-player-buttons');assert.equal(d.all().filter(n=>n.dataset.action==='toggle').length,1);view.destroy();
 });
 test('perda de origem após inserção não cria alerta contraditório; prévia Options não é destino perdido',async()=>{
@@ -205,7 +205,7 @@ test('minimização pertence só ao HUD: popup, opções e janela ignoram esse m
  const initial={...state(),minimized:true,jobs:state().jobs.map(j=>({...j,collapsed:false}))};for(const surface of ['popup','options','task']){const d=dom(),view=GlobalHud.mount(d.container,{panel:true,surface,...(surface==='task'?{jobId:'tts-one'}:{}),send:async()=>({success:true,state:initial})});await view.ready;const root=d.find(n=>n.className==='fm-global-hud');assert.equal(root.dataset.minimized,'false');assert.equal(d.card('tts-one').children[3].hidden,false);assert.ok(d.find(n=>n.textContent==='Expandir').hidden);view.destroy();}
 });
 test('erro local anterior ao registro do job não desaparece no renderer global',()=>{
- const vm=require('node:vm'),source=fs.readFileSync(require.resolve('../content.js'),'utf8'),context=vm.createContext({console,GlobalHud:{}});vm.runInContext(source.replace('__require("extension/src/content/entrypoint.ts");','globalThis.modules=__modules;'),context);const m={exports:{}};context.modules['extension/src/content/ui/hudController.ts'](m,m.exports,()=>({}));const hud=m.exports.hud,notices=[];hud.globalRevision=1;hud.globalView={notice:text=>notices.push(text)};hud.setStatus('idle','Falha no STT Live');hud.setTextPreview('Permissão do microfone negada.');assert.equal(notices.at(-1),'Permissão do microfone negada.');hud.setStatus('loading','Conectando ditado');assert.equal(notices.at(-1),'');
+ const vm=require('node:vm'),source=fs.readFileSync(require.resolve('../content.js'),'utf8'),context=vm.createContext({console,GlobalHud:{}});vm.runInContext(source.replace('__require("extension/src/content/entrypoint.ts");','globalThis.modules=__modules;'),context);const m={exports:{}};context.modules['extension/src/content/ui/hudController.ts'](m,m.exports,()=>({}));const hud=m.exports.hud,notices=[];let revealed=false;hud.container={inert:true,classList:{remove:name=>{revealed=name==='hidden';}}};hud.globalRevision=1;hud.globalView={notice:text=>notices.push(text)};hud.show();assert.equal(revealed,true);assert.equal(hud.container.inert,false);hud.setStatus('idle','Falha no STT Live');hud.setTextPreview('Permissão do microfone negada.');assert.equal(notices.at(-1),'Permissão do microfone negada.');hud.setStatus('loading','Conectando ditado');assert.equal(notices.at(-1),'');
 });
 
 test('cards TTS/STT têm volume individual; transporte local não envia toggle global',async()=>{
@@ -215,4 +215,86 @@ test('cards TTS/STT têm volume individual; transporte local não envia toggle g
 test('HUD e popup espelham Play/Pause; fechar as views não manda Pause nem Stop',async()=>{
  let current=state(),views=[];const send=async message=>{if(message.type==='HUD_GLOBAL_TOGGLE'){current={...current,revision:current.revision+1,jobs:current.jobs.map(j=>j.jobId==='tts-one'?{...j,status:message.payload.action==='pause'?'paused':'playing'}:{...j,status:j.type==='TTS'?'completed':j.status})};views.forEach(v=>v.view.update(current));}return{success:true,state:current};};const hud=fixture({send}),popup=fixture({send});views=[hud,popup];await Promise.all(views.map(e=>e.view.ready));
  await hud.find(n=>n.dataset.action==='toggle').onclick();assert.equal(popup.find(n=>n.dataset.action==='toggle').textContent,'▶');await popup.find(n=>n.dataset.action==='toggle').onclick();assert.equal(hud.find(n=>n.dataset.action==='toggle').textContent,'⏸');const counts=views.map(e=>e.requests.length);views.forEach(e=>e.view.destroy());assert.deepEqual(views.map(e=>e.requests.length),counts);assert.ok(!views.some(e=>e.requests.some(m=>m.payload?.action==='stop')));
+});
+
+test('HUD reúne parcial/final sem perder estados, mantém chips zero e detalhes de captura e narração',async()=>{
+ const initial={...state(),jobs:[{...state().jobs[1],progress:{forwardedChunks:3,pendingChunks:0,completedBlocks:2,totalBlocks:4,capturedChunks:5,capturedBytes:16000,forwardedBytes:12000},narration:{status:'paused',progress:{currentTime:2.1234567,duration:8,availableStart:0,availableEnd:8,volume:.4,playbackRate:1.2,contextState:'suspended',workletPaused:true,outputMuted:false,outputActive:false,controlSeq:6,positionFrame:48000}}}]};
+ const e=fixture({initial,embedded:true});await e.view.ready;
+ const transcript=e.find(n=>n.className==='fm-hud-transcript'),partial=e.find(n=>n.className==='fm-global-text fm-global-partial'),body=e.find(n=>n.className==='fm-global-text');
+ assert.equal(body.parentNode,transcript);assert.equal(partial.parentNode,transcript);assert.equal(body.textContent,'Segmento confirmado.');assert.equal(partial.textContent,'Palavra provisória');
+ assert.equal(e.find(n=>n.dataset.field==='pendingChunks').textContent,'0');assert.equal(e.find(n=>n.dataset.field==='forwardedChunks').textContent,'3');
+ for(const field of ['completedBlocks','totalBlocks','capturedChunks','capturedBytes','forwardedBytes','narration.currentTime','narration.duration','narration.availableStart','narration.availableEnd','narration.volume','narration.playbackRate','narration.contextState','narration.workletPaused','narration.outputMuted','narration.outputActive','narration.controlSeq','narration.positionFrame'])assert.ok(e.find(n=>n.dataset.field===field),field);
+ assert.equal(e.find(n=>n.dataset.field==='narration.currentTime').textContent,'2,1');assert.equal(e.find(n=>n.dataset.field==='narration.currentTime').title,'Narração · Posição (s): 2.1234567');
+ const details=e.find(n=>n.className==='fm-hud-metrics');details.open=true;
+ e.view.update({...initial,revision:2,jobs:[{...initial.jobs[0],text:'Final confirmado.',partialText:'',progress:{forwardedChunks:4,pendingChunks:0}}]});
+ assert.equal(e.find(n=>n.className==='fm-hud-transcript'),transcript);assert.equal(body.textContent,'Final confirmado.');assert.equal(partial.hidden,true);assert.equal(details.open,true);assert.equal(e.find(n=>n.dataset.field==='forwardedChunks').textContent,'4');assert.equal(e.find(n=>n.dataset.field==='capturedBytes').hidden,true);e.view.destroy();
+});
+
+test('HUD recolhido expõe aviso que revela a tarefa por comando real e preserva falhas raras',async()=>{
+ const job={jobId:'warning',type:'STT',status:'error',collapsed:true,originAvailable:false,text:'Recuperável.',warning:'Aviso de captura.',error:'Falha de inserção.',historyStatus:'failed',capacityWarning:true,incomplete:true,insertion:{inserted:false,reason:'MANUAL_EDIT_PRESERVED'},controls:{copy:true,remove:true}};
+ let initial={revision:1,visible:true,jobs:[job]};const e=fixture({initial,embedded:true,send:async m=>{if(m.payload?.action==='collapse')initial={...initial,revision:2,jobs:[{...job,collapsed:false}]};return{success:true,state:initial};}});await e.view.ready;
+ const alert=e.button('warning','alert');assert.equal(alert.hidden,false);for(const text of ['Aviso de captura','Resultado incompleto','histórico','orçamento','Destino original','Edição manual preservada'])assert.ok(alert.title.includes(text),text);
+ await alert.onclick();assert.deepEqual(e.requests.at(-1).payload,{jobId:'warning',action:'collapse',collapsed:false});assert.equal(e.card('warning').dataset.collapsed,'false');e.view.destroy();
+});
+
+test('nova composição e skin do HUD não alteram markup ou CSS das outras superfícies',async()=>{
+ const d=dom(),popup=GlobalHud.mount(d.container,{surface:'popup',panel:true,send:async()=>({success:true,state:state()})});await popup.ready;
+ assert.equal(d.find(n=>n.className==='fm-hud-transcript'),undefined);assert.equal(d.find(n=>n.className==='fm-hud-metrics'),undefined);assert.ok(d.find(n=>n.tagName==='STYLE').textContent.includes('fm-glass-sweep'));
+ const e=fixture({embedded:true});await e.view.ready;assert.ok(!e.find(n=>n.tagName==='STYLE').textContent.includes('fm-glass-sweep'));assert.equal(e.find(n=>n.className==='fm-global-hud').dataset.surface,'hud');const t=fixture({embedded:true,initial:{revision:1,visible:true,jobs:[{...state().jobs[0],microphoneReleased:false}]}});await t.view.ready;assert.equal(t.find(n=>n.dataset.field==='microphoneReleased'),undefined);t.view.destroy();popup.destroy();e.view.destroy();
+});
+test('onda inferior só anima com sinal TTS efetivo; origem fica nos detalhes',async()=>{
+ const initial={...state(),jobs:[{...state().jobs[0],progress:{outputActive:true,signalActive:true,contextState:'running',workletPaused:false,outputMuted:false}}]},e=fixture({initial,embedded:true});await e.view.ready;
+ const wave=e.find(n=>n.className==='fm-hud-task-wave');assert.equal(wave.dataset.active,'true');assert.equal(e.find(n=>n.className==='fm-global-origin').hidden,true);assert.equal(e.find(n=>n.dataset.field==='origin').textContent,'Origem: aba 4');
+ for(const patch of [{signalActive:false},{outputMuted:true},{workletPaused:true},{contextState:'suspended'},{outputActive:false}]){e.view.update({...initial,revision:++initial.revision,jobs:[{...initial.jobs[0],progress:{...initial.jobs[0].progress,...patch}}]});assert.equal(wave.dataset.active,'false');}
+});
+
+test('waveforms e pacotes pertencem ao card e respeitam recolhimento e estado individual',async()=>{
+ const initial={...state(),jobs:[{...state().jobs[1],collapsed:false,captureTelemetry:{confirmed:true},progress:{capturedChunks:24,forwardedChunks:12,pendingChunks:0,blocks:2,totalBlocks:3,completedBlocks:1}},{...state().jobs[0],collapsed:false,progress:{outputActive:false,signalActive:false}}]},e=fixture({initial,embedded:true});await e.view.ready;
+ const wave=id=>e.card(id).children.find(n=>n.className==='fm-hud-task-wave');
+ const a=wave('stt-two'),b=wave('tts-one');assert.equal(e.card('stt-two').children[0],a);assert.equal(a.hidden,false);assert.equal(a.dataset.active,'true');assert.equal(b.dataset.active,'false');
+ const packet=e.find(n=>n.dataset.field==='capturedChunks');assert.equal(packet.textContent,'24');assert.equal(packet.parentNode.className,'fm-global-progress fm-hud-chips');assert.equal(packet.attributes['aria-label'],'Pacotes capturados: 24');assert.equal(e.find(n=>n.dataset.field==='blocks').textContent,'2');
+ e.view.update({...initial,revision:2,jobs:initial.jobs.map(j=>({...j,collapsed:j.jobId==='stt-two'}))});assert.equal(a.hidden,true);assert.equal(a.dataset.active,'false');
+ e.view.update({...initial,revision:3,minimized:true});assert.equal(a.hidden,true);assert.equal(b.hidden,true);
+ e.view.update({...initial,revision:4,jobs:[{...initial.jobs[0],captureTelemetry:{confirmed:false}},initial.jobs[1]]});assert.equal(a.hidden,false);assert.equal(a.dataset.active,'false');
+ e.view.update({...initial,revision:5,jobs:[{...initial.jobs[0],status:'completed',microphoneReleased:true},initial.jobs[1]]});assert.equal(a.dataset.active,'false');
+});
+test('tipo da borda é exclusivo do HUD e outros tipos continuam neutros',async()=>{
+ for(const [raw,kind]of [[{type:'TTS'},'narration'],[{type:'STT'},'dictation'],[{type:'TTS',source:'lens'},'lens'],[{type:'TTS',manual:true},'neutral'],[{type:'TTS',source:'translation'},'neutral']]){
+  const initial={...state(),jobs:[{...state().jobs[0],...raw}]},hud=fixture({initial,embedded:true});await hud.view.ready;assert.equal(hud.card('tts-one').dataset.taskType,kind);hud.view.destroy();
+  const panel=fixture({initial});await panel.view.ready;assert.equal(panel.card('tts-one').dataset.taskType,undefined);panel.view.destroy();
+ }
+});
+test('tarefa flutuante usa Glass e ignora visibilidade, minimização e recolhimento do HUD',async()=>{
+ const initial={...state(),visible:false,minimized:true,jobs:state().jobs.map(j=>({...j,collapsed:true}))};const e=fixture({initial,embedded:true,taskOverlay:true,jobId:'tts-one'});await e.view.ready;
+ const root=e.find(n=>n.className==='fm-global-hud'),card=e.card('tts-one');assert.equal(root.dataset.surface,'hud');assert.equal(root.hidden,false);assert.equal(card.dataset.collapsed,'false');assert.equal(card.children[0].hidden,false);assert.equal(e.button('tts-one','remove').hidden,true);assert.equal(e.all().filter(n=>n.dataset.jobId).length,1);assert.ok(!e.requests.some(m=>m.type==='HUD_GLOBAL_UI_SET'));
+ assert.equal(await e.view.flush(),true);e.view.destroy();assert.ok(!e.requests.some(m=>m.payload?.action==='stop'||m.payload?.action==='remove'));
+});
+test('tarefa flutuante mantém cópia quando a página não oferece Clipboard API',async()=>{
+ const initial={...state(),jobs:[{...state().jobs[0],status:'completed',controls:{copy:true,edit:true}}]},e=fixture({initial,embedded:true,taskOverlay:true,jobId:'tts-one',clipboard:{}});await e.view.ready;const create=e.doc.createElement;e.doc.createElement=tag=>{const n=create(tag);n.select=()=>{};return n;};let copied;
+ e.doc.execCommand=command=>{assert.equal(command,'copy');copied=e.doc.activeElement.value;return true;};await e.button('tts-one','copy').onclick();assert.equal(copied,initial.jobs[0].text);assert.ok(e.all().some(n=>n.textContent==='Texto copiado.'));assert.equal(e.all().filter(n=>n.tagName==='TEXTAREA').length,1);e.view.destroy();
+});
+test('animação da borda segue execução real e considera narração no mesmo card STT',async()=>{
+ const base={...state(),jobs:[{...state().jobs[0],collapsed:false}]},e=fixture({initial:base,embedded:true});await e.view.ready;let revision=1;
+ const check=(raw,expected)=>{e.view.update({...base,revision:++revision,jobs:[{...base.jobs[0],...raw}]});assert.equal(e.card('tts-one').dataset.taskRunning,String(expected),JSON.stringify(raw));};
+ for(const status of ['connecting','translating','analyzing','flushing','waiting','transforming','inserting','playing'])check({status},true);
+ for(const status of ['paused','completed','cancelled','error','ready','stopped','cancelling','unknown'])check({status},false);
+ check({type:'STT',status:'recording',microphoneReleased:false},true);check({type:'STT',status:'recording',microphoneReleased:true},false);check({type:'STT',status:'recording',microphoneReleased:true,progress:{pendingChunks:2}},true);
+ check({status:'playing',progress:{workletPaused:true,contextState:'suspended'}},false);check({status:'playing',progress:{workletPaused:false,contextState:'running'}},true);
+ check({type:'STT',status:'completed',microphoneReleased:true,narration:{status:'playing',progress:{contextState:'running'}}},true);check({type:'STT',status:'completed',narration:{status:'paused'}},false);e.view.destroy();
+});
+test('moldura compacta escolhe a execução mais recente, sem usar seleção, pausa ou atualização de telemetria',()=>{
+ const jobs=[{jobId:'old',type:'STT',status:'recording',createdAt:1,hudStartedAt:1,updatedAt:1000},{jobId:'new',type:'TTS',status:'playing',createdAt:2,hudStartedAt:2},{jobId:'lens',type:'TTS',source:'lens',status:'analyzing',createdAt:3,hudStartedAt:3}];const before=structuredClone(jobs);
+ assert.deepEqual(GlobalHud.activeBorder(jobs),{jobId:'lens',type:'lens',running:true});assert.deepEqual(jobs,before);
+ jobs[2].status='paused';assert.equal(GlobalHud.activeBorder(jobs).jobId,'new');jobs[1].progress={workletPaused:true,contextState:'suspended'};assert.deepEqual(GlobalHud.activeBorder(jobs),{jobId:'old',type:'dictation',running:true});
+ jobs[0].microphoneReleased=true;assert.deepEqual(GlobalHud.activeBorder(jobs),{jobId:'',type:'neutral',running:false});
+ jobs[0].status='completed';jobs[0].narration={status:'playing',progress:{contextState:'running'}};jobs[0].hudStartedAt=4;jobs[2].status='analyzing';assert.equal(GlobalHud.activeBorder(jobs).jobId,'old','atividade reiniciada vence createdAt mais novo');
+ assert.equal(GlobalHud.activeBorder([{jobId:'manual',type:'TTS',manual:true,status:'connecting'}]).type,'neutral');assert.equal(GlobalHud.activeBorder([{jobId:'translation',type:'TTS',source:'translation',status:'translating'}]).type,'neutral');
+ for(const status of ['ready','completed','cancelled','error','paused','cancelling'])assert.equal(GlobalHud.activeBorder([{jobId:'inactive',type:'TTS',status}]).running,false,status);
+});
+test('parada global no HUD usa quadrado e mantém confirmação, acessibilidade e feedback',async()=>{
+ const d=dom(),emergency=d.doc.createElement('div'),notice=d.doc.createElement('div');d.container.append(emergency,notice);let release;const response=new Promise(resolve=>release=resolve),requests=[];
+ const view=GlobalHud.mount(d.container,{embedded:true,panicContainer:emergency,panicNotice:notice,send:async m=>{requests.push(m);return m.type==='HUD_GLOBAL_PANIC'?response:{success:true,state:state()};}});await view.ready;
+ const button=d.find(n=>n.dataset.action==='panic');assert.equal(button.textContent,'■');assert.equal(button.attributes['aria-label'],'Parar todas as operações');const pending=button.onclick({stopPropagation(){}});assert.equal(button.attributes['aria-busy'],'true');assert.equal(notice.textContent,'Encerrando operações…');
+ release({success:true,remoteStopped:true,state:{...state(2),jobs:[]}});await pending;assert.equal(button.attributes['aria-busy'],'false');assert.equal(notice.textContent,'');assert.equal(requests.filter(m=>m.type==='HUD_GLOBAL_PANIC').length,1);view.destroy();
+ const panel=fixture();await panel.view.ready;assert.equal(panel.find(n=>n.dataset.action==='panic')?.textContent??'🛑','🛑');panel.view.destroy();
 });

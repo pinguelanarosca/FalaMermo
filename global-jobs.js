@@ -14,7 +14,7 @@ function bytes(value){let size=0;for(const character of JSON.stringify(value)){c
 const TASK_SETTING_FIELDS=['agentSnapshot','modelId','models','voiceName','transformInstruction','transformModels','thinkingLevel','thinkingBudget','sttRecognition','speechConfig','generationConfig','responseModalities','inputAudioTranscription','outputAudioTranscription','outputAudioFormat','chunkSize','parallelism','systemInstruction','ttsConfig','voiceConfig','jsonMode','advancedJson','sampleRate','playbackRate','volume'];
 function safeTaskSettings(raw){const secrets=Array.isArray(raw?.apiKeys)?raw.apiKeys.filter(value=>typeof value==='string'&&value.length):[];const scrub=value=>{if(typeof value==='string')return secrets.reduce((safe,key)=>safe.split(key).join('[segredo removido]'),value);if(Array.isArray(value))return value.map(scrub);if(value&&typeof value==='object')return Object.fromEntries(Object.entries(value).filter(([key])=>!/(api.?key|token|secret|authorization)/i.test(key)).map(([key,item])=>[key,scrub(item)]));return value;};return Object.fromEntries(TASK_SETTING_FIELDS.filter(key=>raw?.[key]!==undefined).map(key=>[key,scrub(raw[key])]));}
 function origin(value={}){return{tabId:Number.isInteger(value.tabId)?value.tabId:0,frameId:Number.isInteger(value.frameId)?value.frameId:0,...(typeof value.documentId==='string'?{documentId:value.documentId}:{}),...(typeof value.page==='string'&&['options.html','popup.html'].includes(value.page)?{page:value.page}:{})};}
-function progress(raw={}){const result=Object.fromEntries(PROGRESS.filter(key=>Number.isFinite(raw[key])&&raw[key]>=0).map(key=>[key,raw[key]]));if(['running','suspended','closed','interrupted'].includes(raw.contextState))result.contextState=raw.contextState;for(const key of ['workletPaused','outputMuted','outputActive'])if(typeof raw[key]==='boolean')result[key]=raw[key];return result;}
+function progress(raw={}){const result=Object.fromEntries(PROGRESS.filter(key=>Number.isFinite(raw[key])&&raw[key]>=0).map(key=>[key,raw[key]]));if(['running','suspended','closed','interrupted'].includes(raw.contextState))result.contextState=raw.contextState;for(const key of ['workletPaused','outputMuted','outputActive','signalActive'])if(typeof raw[key]==='boolean')result[key]=raw[key];return result;}
 function textBoundaries(value,length){
  if(!Array.isArray(value)||value.length>10000)return undefined;
  let previous=0,end=0;
@@ -24,7 +24,8 @@ function textBoundaries(value,length){
  }
  return value.map(pair=>[...pair]);
 }
-function normalizeJob(raw,now){if(!id(raw?.jobId)||!['STT','TTS'].includes(raw.type))return null;return{jobId:raw.jobId,type:raw.type,...(raw.source==='lens'?{source:'lens',lensMode:raw.lensMode==='interpret'?'interpret':'literal',...(typeof raw.lensReadingInstruction==='string'?{lensReadingInstruction:raw.lensReadingInstruction}:{})}:{}),...(raw.source==='translation'?{source:'translation'}:{}),...(Number.isFinite(raw.hudStartedAt)?{hudStartedAt:raw.hudStartedAt}:{}),...(raw.outcome==='NO_SPEECH'?{outcome:'NO_SPEECH'}:{}),origin:origin(raw.origin),playerId:id(raw.playerId)||raw.jobId,requestId:id(raw.requestId)||raw.jobId,agentId:typeof raw.agentId==='string'?raw.agentId.slice(0,80):'narrator',status:raw.type==='STT'&&raw.status==='completed'&&raw.insertion?.inserted===false&&text(raw.text)&&!['OPTIONS_PREVIEW','EMPTY_TEXT'].includes(raw.insertion.reason)?'error':STATUSES.has(raw.status)?raw.status:'connecting',manual:raw.manual===true,collapsed:raw.collapsed!==false,hidden:raw.hidden===true,pinned:raw.pinned===true,...(Number.isFinite(raw.lastOpenedAt)?{lastOpenedAt:raw.lastOpenedAt}:{}),pausedAt:Number.isFinite(raw.pausedAt)?raw.pausedAt:0,...(raw.type==='STT'&&raw.narration?{narration:{status:STATUSES.has(raw.narration.status)?raw.narration.status:'ready',requestId:id(raw.narration.requestId)||raw.requestId,eventSeq:raw.narration.eventSeq||0,pausedAt:raw.narration.pausedAt||0,progress:progress(raw.narration.progress),...(raw.narration.warning?{warning:text(raw.narration.warning).slice(0,500)}:{})}}:{}),...(typeof raw.workingText==='string'?{workingText:raw.workingText}:{}),text:text(raw.text),...(textBoundaries(raw.textBoundaries,text(raw.text).length)?{textBoundaries:textBoundaries(raw.textBoundaries,text(raw.text).length)}:{}),partialText:text(raw.partialText),progress:progress(raw.progress),createdAt:Number.isFinite(raw.createdAt)?raw.createdAt:now,updatedAt:Number.isFinite(raw.updatedAt)?raw.updatedAt:now,eventSeq:Number.isInteger(raw.eventSeq)?raw.eventSeq:0,...(raw.editorDelivery===true?{editorDelivery:true,textRevision:raw.textRevision||0,textSequence:raw.textSequence,publishedAt:raw.publishedAt,transcriptFinal:raw.transcriptFinal===true}:{}),originAvailable:raw.originAvailable!==false,incomplete:raw.incomplete===true,microphoneReleased:raw.microphoneReleased===true,...(['reserved','active'].includes(raw.captureAdmission)?{captureAdmission:raw.captureAdmission}:{}),...(['saved','disabled','failed'].includes(raw.historyStatus)?{historyStatus:raw.historyStatus}:{}),...(raw.capacityWarning===true?{capacityWarning:true}:{}),...(raw.insertion?{insertion:{inserted:raw.insertion.inserted===true,reason:typeof raw.insertion.reason==='string'?raw.insertion.reason.slice(0,120):'',...(Number.isSafeInteger(raw.insertion.revision)?{revision:raw.insertion.revision,final:raw.insertion.final===true,characters:raw.insertion.characters||0}:{})}}:{}),...(typeof raw.warning==='string'?{warning:raw.warning.slice(0,500)}:{}),...(typeof raw.error==='string'?{error:raw.error.slice(0,500)}:{})};}
+function captureTelemetry(raw){const result={};for(const key of ['sileroProbability','tenProbability'])if(Number.isFinite(raw?.[key])&&raw[key]>=0&&raw[key]<=1)result[key]=raw[key];if(typeof raw?.confirmed==='boolean')result.confirmed=raw.confirmed;if(Number.isSafeInteger(raw?.recoveries)&&raw.recoveries>=0)result.recoveries=raw.recoveries;return result;}
+function normalizeJob(raw,now){if(!id(raw?.jobId)||!['STT','TTS'].includes(raw.type))return null;return{jobId:raw.jobId,type:raw.type,...(raw.source==='lens'?{source:'lens',lensMode:raw.lensMode==='interpret'?'interpret':'literal',...(typeof raw.lensReadingInstruction==='string'?{lensReadingInstruction:raw.lensReadingInstruction}:{})}:{}),...(raw.source==='translation'?{source:'translation'}:{}),...(Number.isFinite(raw.hudStartedAt)?{hudStartedAt:raw.hudStartedAt}:{}),...(raw.outcome==='NO_SPEECH'?{outcome:'NO_SPEECH'}:{}),origin:origin(raw.origin),playerId:id(raw.playerId)||raw.jobId,requestId:id(raw.requestId)||raw.jobId,agentId:typeof raw.agentId==='string'?raw.agentId.slice(0,80):'narrator',status:raw.type==='STT'&&raw.status==='completed'&&raw.insertion?.inserted===false&&text(raw.text)&&!['OPTIONS_PREVIEW','EMPTY_TEXT'].includes(raw.insertion.reason)?'error':STATUSES.has(raw.status)?raw.status:'connecting',manual:raw.manual===true,collapsed:raw.collapsed!==false,hidden:raw.hidden===true,pinned:raw.pinned===true,...(Number.isFinite(raw.lastOpenedAt)?{lastOpenedAt:raw.lastOpenedAt}:{}),pausedAt:Number.isFinite(raw.pausedAt)?raw.pausedAt:0,...(raw.type==='STT'&&raw.narration?{narration:{status:STATUSES.has(raw.narration.status)?raw.narration.status:'ready',requestId:id(raw.narration.requestId)||raw.requestId,eventSeq:raw.narration.eventSeq||0,pausedAt:raw.narration.pausedAt||0,progress:progress(raw.narration.progress),...(raw.narration.warning?{warning:text(raw.narration.warning).slice(0,500)}:{})}}:{}),...(typeof raw.workingText==='string'?{workingText:raw.workingText}:{}),text:text(raw.text),...(textBoundaries(raw.textBoundaries,text(raw.text).length)?{textBoundaries:textBoundaries(raw.textBoundaries,text(raw.text).length)}:{}),partialText:text(raw.partialText),...(raw.type==='STT'&&raw.captureTelemetry?{captureTelemetry:captureTelemetry(raw.captureTelemetry)}:{}),progress:progress(raw.progress),createdAt:Number.isFinite(raw.createdAt)?raw.createdAt:now,updatedAt:Number.isFinite(raw.updatedAt)?raw.updatedAt:now,eventSeq:Number.isInteger(raw.eventSeq)?raw.eventSeq:0,...(raw.editorDelivery===true?{editorDelivery:true,textRevision:raw.textRevision||0,textSequence:raw.textSequence,publishedAt:raw.publishedAt,transcriptFinal:raw.transcriptFinal===true}:{}),originAvailable:raw.originAvailable!==false,incomplete:raw.incomplete===true,microphoneReleased:raw.microphoneReleased===true,...(['reserved','active'].includes(raw.captureAdmission)?{captureAdmission:raw.captureAdmission}:{}),...(['saved','disabled','failed'].includes(raw.historyStatus)?{historyStatus:raw.historyStatus}:{}),...(raw.capacityWarning===true?{capacityWarning:true}:{}),...(raw.insertion?{insertion:{inserted:raw.insertion.inserted===true,reason:typeof raw.insertion.reason==='string'?raw.insertion.reason.slice(0,120):'',...(Number.isSafeInteger(raw.insertion.revision)?{revision:raw.insertion.revision,final:raw.insertion.final===true,characters:raw.insertion.characters||0}:{})}}:{}),...(typeof raw.warning==='string'?{warning:raw.warning.slice(0,500)}:{}),...(typeof raw.error==='string'?{error:raw.error.slice(0,500)}:{})};}
 function audioJob(job){return job.type==='STT'?{...job,type:'TTS',status:'ready',progress:{},pausedAt:0,error:undefined,warning:undefined,...job.narration,text:job.workingText??job.text}:job;}
 function holdsMicrophone(job){return job.type==='STT'&&Boolean(job.captureAdmission)&&!job.microphoneReleased;}
 function hasAudio(job){return !TERMINAL.has(audioJob(job).status);}
@@ -42,18 +43,39 @@ function create(services={}){
  const busy=job=>!TERMINAL.has(job.status)||holdsMicrophone(job)||hasAudio(job)||(job.progress.pendingChunks||0)>0&&!['cancelled','error'].includes(job.status);
  const hudFocus=()=>[...jobs.values()].filter(busy).sort((a,b)=>(b.hudStartedAt??b.createdAt)-(a.hudStartedAt??a.createdAt)||b.createdAt-a.createdAt)[0]?.jobId||null;
  function cancelHudTimer(){if(hudTimer!==null)unschedule(hudTimer);hudTimer=null;hudTimerToken++;hudAutomation.closeAt=0;}
- function beginHudActivity(job){
-  cancelHudTimer();hudAutomation.armed=true;
-  const tabId=job.origin.tabId;
-  if(tabId>0){hudAutomation.manualTabs=hudAutomation.manualTabs.filter(id=>id!==tabId);if(!hudAutomation.autoTabs.includes(tabId))hudAutomation.autoTabs.push(tabId);}
+ const manuallyOpen=tabId=>hudAutomation.manualTabs.includes(tabId)&&(tabHud.get(tabId)?.visible??visible)===true;
+ function beginHudActivity(job,{reveal=true}={}){
+  cancelHudTimer();
   job.hudStartedAt=Math.max(now(),...[...jobs.values()].map(item=>(item.hudStartedAt??item.createdAt)+1));
+  // Replaying an existing task must preserve the user's presentation choices.
+  if(!reveal)return;
+  hudAutomation.armed=true;
+  const tabId=job.origin.tabId;
+  if(tabId>0){if(!manuallyOpen(tabId))hudAutomation.manualTabs=hudAutomation.manualTabs.filter(id=>id!==tabId);if(!hudAutomation.autoTabs.includes(tabId))hudAutomation.autoTabs.push(tabId);}
   for(const item of jobs.values())item.collapsed=item!==job;
-  job.collapsed=false;job.hidden=false;if(tabId>0)setHud({visible:true,minimized:false},tabId);
+  // The panel starts as a rail; setHud preserves an already-open manual choice.
+  // Card expansion remains independent of panel minimization.
+  job.collapsed=false;job.hidden=false;if(tabId>0)setHud({visible:true,minimized:true,automatic:true},tabId);
  }
  function manualHud(payload,tabId){
-  if(typeof payload.visible!=='boolean'||payload.automatic===true)return;
-  if(tabId>0){if(!hudAutomation.manualTabs.includes(tabId))hudAutomation.manualTabs.push(tabId);}
-  else{hudAutomation.armed=false;cancelHudTimer();}
+  if(payload.automatic===true){
+   // An automatic preflight reveal must not revive the manual marker left by
+   // hiding the HUD, before the task's own opening reaches the registry.
+   if(tabId>0&&payload.visible===true&&!manuallyOpen(tabId))hudAutomation.manualTabs=hudAutomation.manualTabs.filter(id=>id!==tabId);
+   return;
+  }
+  const visibility=typeof payload.visible==='boolean',presentation=typeof payload.minimized==='boolean'||!!payload.size||payload.interaction===true;
+  if(!visibility&&!presentation)return;
+  if(tabId>0){
+   if(visibility||(tabHud.get(tabId)?.visible??visible)===true){if(!hudAutomation.manualTabs.includes(tabId))hudAutomation.manualTabs.push(tabId);}
+   if(payload.interaction===true&&manuallyOpen(tabId)){
+    hudAutomation.autoTabs=hudAutomation.autoTabs.filter(id=>id!==tabId);
+    if(!hudAutomation.autoTabs.some(id=>!hudAutomation.manualTabs.includes(id))){hudAutomation.armed=false;cancelHudTimer();}
+   }
+  }else{
+   for(const [id,current]of tabHud)if(payload.visible===true||!visibility&&(current.visible??visible)===true){if(!hudAutomation.manualTabs.includes(id))hudAutomation.manualTabs.push(id);}
+   if(visibility){if(!payload.visible)hudAutomation.manualTabs=[];hudAutomation.armed=false;cancelHudTimer();}
+  }
  }
  function syncHud(){
   const running=new Set([...jobs.values()].filter(busy).map(job=>job.jobId));
@@ -66,7 +88,7 @@ function create(services={}){
   hudTimer=schedule(()=>void serial(async()=>{
    if(token!==hudTimerToken||!hudAutomation.armed||[...jobs.values()].some(busy))return;
    hudTimer=null;hudAutomation.armed=false;hudAutomation.closeAt=0;
-   for(const tabId of hudAutomation.autoTabs)if(!hudAutomation.manualTabs.includes(tabId))setHud({visible:false},tabId);
+   for(const tabId of hudAutomation.autoTabs)if(!hudAutomation.manualTabs.includes(tabId))setHud({visible:false,automatic:true},tabId);
    hudAutomation.autoTabs=[];
    await publish();
   }).catch(error=>services.warn?.(error.message)),Math.max(0,hudAutomation.closeAt-now()));
@@ -85,15 +107,16 @@ function create(services={}){
   const fields=HUD_FIELDS.filter(key=>typeof payload?.[key]==='boolean');
   if(!fields.length)return;
   if(tabId>0){
+   if(payload.automatic===true&&manuallyOpen(tabId))return;
    tabHud.set(tabId,{...tabHud.get(tabId),...Object.fromEntries(fields.map(key=>[key,payload[key]]))});
    return;
   }
   if(fields.includes('visible'))visible=payload.visible;
   if(fields.includes('minimized'))minimized=payload.minimized;
   for(const [id,current] of tabHud){
-   const remaining=HUD_FIELDS.filter(key=>key in current&&!fields.includes(key));
-   if(remaining.length)tabHud.set(id,Object.fromEntries(remaining.map(key=>[key,current[key]])));
-   else tabHud.delete(id);
+   if(payload.automatic===true&&manuallyOpen(id))continue;
+   // Presentation changes must retain the document identity used by attachHud.
+   tabHud.set(id,{...current,...Object.fromEntries(fields.map(key=>[key,payload[key]]))});
   }
  }
  async function init(){if(ready)return ready;ready=(async()=>{const raw=(await store?.get?.(STORAGE_KEY))?.[STORAGE_KEY];if(raw){revision=Number.isInteger(raw.revision)?raw.revision:0;visible=raw.visible===true;minimized=raw.minimized===true;for(const [key,value] of Object.entries(raw.tabHud||{})){const tabId=Number(key);if(Number.isSafeInteger(tabId)&&tabId>0){setHud(value,tabId);if(typeof value.documentId==='string')tabHud.get(tabId).documentId=value.documentId;}}activeTaskId=id(raw.activeTaskId);pausedSelection=id(raw.playback?.selectedJobId);if(Number.isFinite(raw.playback?.volume))globalVolume=Math.max(0,Math.min(1,raw.playback.volume));for(const rawJob of raw.jobs||[]){const job=normalizeJob(rawJob,now());if(job)jobs.set(job.jobId,job);}for(const p of raw.protections||[])if(Number.isInteger(p.tabId))protections.set(p.tabId,{previous:p.previous!==false});if(raw.hudAutomation)hudAutomation={armed:raw.hudAutomation.armed===true,manualTabs:(raw.hudAutomation.manualTabs||[]).filter(Number.isInteger),autoTabs:(raw.hudAutomation.autoTabs||[]).filter(id=>Number.isInteger(id)&&id>0),closeAt:Number.isFinite(raw.hudAutomation.closeAt)?raw.hudAutomation.closeAt:0};}if(!jobs.has(activeTaskId))activeTaskId=jobs.keys().next().value||null;hudRunning=new Set([...jobs.values()].filter(busy).map(job=>job.jobId));syncHud();const history=await services.getHistory?.();historyLimit=Math.max(1,Math.min(5000,history?.maxEntries||50));retentionDays=Math.max(1,Math.min(3650,history?.retentionDays||365));})();return ready;}
@@ -174,15 +197,16 @@ function create(services={}){
    }
    if(existing)throw new Error('jobId já registrado.');
    const blocker=admission&&[...jobs.values()].find(holdsMicrophone);
-   if(blocker)throw Object.assign(new Error('Já existe um ditado em andamento. Aguarde a finalização para iniciar outro.'),{
+   if(blocker)throw Object.assign(new Error('O microfone já está sendo usado por outro ditado.'),{
     code:'STT_CAPTURE_BUSY',
+    busyTabId:blocker.origin.tabId,
     otherTab:blocker.origin.tabId>0&&raw.origin?.tabId>0&&blocker.origin.tabId!==raw.origin.tabId,
    });
    const active=[...jobs.values()].filter(job=>!TERMINAL.has(job.status));if(active.length>=256)throw new Error('Há tarefas demais em execução.');const job=normalizeJob({...raw,...(admission?{captureAdmission:admission==='reserve-stt'?'reserved':'active',microphoneReleased:false}:{}),status:raw.source==='translation'?'translating':raw.source==='lens'?'analyzing':'connecting',createdAt:nextCreatedAt(),updatedAt:now(),eventSeq:0},now());if(!job)throw new Error('Identidade da tarefa inválida.');await ensureCapacity(job);await captureTaskSettings(job.jobId,raw);jobs.set(job.jobId,job);activeTaskId=job.jobId;beginHudActivity(job);await protect(job.origin.tabId);await publish();return clone(job);}),
   event:event=>serial(async()=>{const job=jobs.get(event.jobId);if(!job)return{changed:false};if(job.type==='STT'&&event.narration){if(!job.narration)return{changed:false};const audio=audioJob(job);if(!applyEvent(audio,event))return{changed:false};job.narration=Object.fromEntries(['status','requestId','eventSeq','progress','pausedAt','warning','capacityWarning','error'].filter(key=>audio[key]!==undefined).map(key=>[key,audio[key]]));}else{if(!applyEvent(job,event))return{changed:false};await saveHistory(job);}if(['play','first-playback'].includes(event.event))pausedSelection=null;await publish();return{changed:true};}),
   fail:(jobId,reason)=>serial(async()=>{const job=getMutable(jobId);if(TERMINAL.has(job.status)||job.status==='cancelling')return;job.status='error';job.error=text(reason).slice(0,500);job.incomplete=job.type==='STT';job.updatedAt=now();await saveHistory(job);await publish();}),
-  ui:(payload,tabId)=>serial(async()=>{manualHud(payload,tabId);setHud(payload,tabId);if(payload.activeTaskId!==undefined){const selected=getMutable(payload.activeTaskId);activeTaskId=payload.activeTaskId;if(audioJob(selected).status==='paused')pausedSelection=selected.jobId;}return publish();}),
-  draft:raw=>serial(async()=>{if(jobs.has(raw.jobId))throw new Error('jobId já registrado.');const job=normalizeJob({...raw,type:'TTS',status:'ready',text:'',createdAt:nextCreatedAt(),updatedAt:now()},now());if(!job)throw new Error('Identidade da tarefa inválida.');job.manual=true;job.collapsed=false;await ensureCapacity(job);jobs.set(job.jobId,job);for(const item of jobs.values())item.collapsed=item!==job;activeTaskId=job.jobId;manualHud({visible:true});setHud({visible:true});return publish();}),
+  ui:(payload,tabId)=>serial(async()=>{if(payload.toggleVisible===true){if(!(tabId>0))throw new Error('Visibilidade exige aba de origem.');payload={...payload,visible:!(tabHud.get(tabId)?.visible??visible)};}if(payload.toggleMinimized===true){if(!(tabId>0))throw new Error('Alternância exige aba de origem.');payload={...payload,minimized:!(tabHud.get(tabId)?.minimized??minimized)};}manualHud(payload,tabId);setHud(payload,tabId);if(payload.activeTaskId!==undefined){const selected=getMutable(payload.activeTaskId);activeTaskId=payload.activeTaskId;if(audioJob(selected).status==='paused')pausedSelection=selected.jobId;}return publish();}),
+  draft:(raw,tabId)=>serial(async()=>{if(jobs.has(raw.jobId))throw new Error('jobId já registrado.');const job=normalizeJob({...raw,type:'TTS',status:'ready',text:'',createdAt:nextCreatedAt(),updatedAt:now()},now());if(!job)throw new Error('Identidade da tarefa inválida.');job.manual=true;job.collapsed=false;await ensureCapacity(job);jobs.set(job.jobId,job);for(const item of jobs.values())item.collapsed=item!==job;activeTaskId=job.jobId;if(tabId>0){const presentation={visible:true,...(!manuallyOpen(tabId)?{minimized:true}:{})};manualHud(presentation,tabId);setHud(presentation,tabId);}return publish();}),
   edit:payload=>serial(async()=>{const job=getMutable(payload.jobId);if(!TERMINAL.has(job.status)||hasAudio(job))throw new Error('Pare a reprodução antes de editar.');if(typeof payload.text!=='string')throw new Error('Texto inválido.');if(payload.expectedText!==undefined&&payload.expectedText!==(job.type==='STT'?job.workingText??job.text:job.text))throw new Error('Texto alterado em outro painel. Copie sua edição e reabra a tarefa.');const size=bytes(payload.text),field=job.type==='STT'?'workingText':'text',growth=bytes({[field]:payload.text})-bytes({[field]:job[field]})+(field in job?0:1);if(size>SESSION_BUDGET||bytes(snapshot())+growth>SESSION_BUDGET)throw new Error('Texto excede o limite de sessão.');if(job.type==='STT')job.workingText=payload.text;else{job.text=payload.text;job.status='ready';delete job.historyStatus;}job.updatedAt=now();return publish();}),
   collapse:payload=>serial(async()=>{const job=getMutable(payload.jobId);job.collapsed=payload.collapsed===true;return publish();}),
   selectionResult:(raw,signal)=>serial(async()=>{
@@ -197,7 +221,7 @@ function create(services={}){
    job.status=result?(job.source==='translation'?'translating':'analyzing'):'completed';
    job.updatedAt=now();await saveHistory(job);await publish();return clone(job);
   }),
-  preparePlayback:(raw,signal)=>serial(async()=>{signal?.throwIfAborted();const job=getMutable(raw.jobId),audio=audioJob(job);if((!TERMINAL.has(job.status)||!TERMINAL.has(audio.status))&&!(job.source==='lens'&&job.status==='analyzing'||job.source==='translation'&&job.status==='translating')||!audio.text.trim())throw new Error('Tarefa não está pronta para reprodução.');const continuation=job.source==='lens'&&job.status==='analyzing'||job.source==='translation'&&job.status==='translating';const next={status:'connecting',requestId:raw.requestId,eventSeq:0,pausedAt:0,progress:{volume:raw.volume??audio.progress.volume??1,playbackRate:raw.playbackRate??audio.progress.playbackRate??1}};if(job.type==='STT')job.narration=next;else{Object.assign(job,next);job.partialText='';delete job.error;delete job.warning;delete job.capacityWarning;delete job.historyStatus;}if(typeof raw.agentId==='string')job.agentId=raw.agentId;job.updatedAt=now();if(!continuation){activeTaskId=job.jobId;beginHudActivity(job);}await publish();return clone(job);}),
+  preparePlayback:(raw,signal)=>serial(async()=>{signal?.throwIfAborted();const job=getMutable(raw.jobId),audio=audioJob(job);if((!TERMINAL.has(job.status)||!TERMINAL.has(audio.status))&&!(job.source==='lens'&&job.status==='analyzing'||job.source==='translation'&&job.status==='translating')||!audio.text.trim())throw new Error('Tarefa não está pronta para reprodução.');const continuation=job.source==='lens'&&job.status==='analyzing'||job.source==='translation'&&job.status==='translating';const next={status:'connecting',requestId:raw.requestId,eventSeq:0,pausedAt:0,progress:{volume:raw.volume??audio.progress.volume??1,playbackRate:raw.playbackRate??audio.progress.playbackRate??1}};if(job.type==='STT')job.narration=next;else{Object.assign(job,next);job.partialText='';delete job.error;delete job.warning;delete job.capacityWarning;delete job.historyStatus;}if(typeof raw.agentId==='string')job.agentId=raw.agentId;job.updatedAt=now();if(!continuation){activeTaskId=job.jobId;beginHudActivity(job,{reveal:false});}await publish();return clone(job);}),
   globalSettings:payload=>serial(async()=>{if(Number.isFinite(payload.volume))globalVolume=Math.max(0,Math.min(1,payload.volume));return publish();}),
   settings:payload=>serial(async()=>{const job=getMutable(payload.jobId);if(job.type==='STT'&&!TERMINAL.has(job.status))throw new Error('Controle indisponível para ditado em andamento.');const audio=audioJob(job);for(const[key,min,max]of [['volume',0,1],['playbackRate',.5,2]])if(Number.isFinite(payload[key]))audio.progress[key]=Math.max(min,Math.min(max,payload[key]));if(job.type==='STT')job.narration={...job.narration,status:audio.status,progress:audio.progress};return publish();}),
   beginPanic:()=>serial(async()=>{
@@ -239,6 +263,7 @@ function create(services={}){
    const released=payload.microphoneReleased===true&&!job.microphoneReleased;
    if(released)job.microphoneReleased=true;
    if(['cancelling','cancelled'].includes(job.status))return released?publish():snapshot();
+   if(payload.captureTelemetry)job.captureTelemetry=captureTelemetry(payload.captureTelemetry);
    const status={'finalizing-send':'flushing','awaiting-gemini':'waiting'}[payload.status]||payload.status;
    if(!job.transcriptFinal&&!TERMINAL.has(job.status)&&STATUSES.has(status)&&!(job.microphoneReleased&&['connecting','recording'].includes(status)))job.status=status;
    job.progress={...job.progress,...progress(payload)};
@@ -260,7 +285,7 @@ function create(services={}){
   }),
   stopped:(jobId,status='flushing',narration=false)=>serial(async()=>{const job=getMutable(jobId);if(narration&&job.type==='STT'){if(job.narration)job.narration={...job.narration,status:'cancelled',pausedAt:0,warning:undefined,capacityWarning:undefined,progress:{volume:job.narration.progress.volume??1,playbackRate:job.narration.progress.playbackRate??1}};return publish();}if(TERMINAL.has(job.status)||job.status==='cancelling'||job.type==='STT'&&['transforming','inserting'].includes(job.status))return snapshot();if(job.type==='TTS'){job.pausedAt=0;delete job.warning;delete job.capacityWarning;job.progress={volume:job.progress.volume??1,playbackRate:job.progress.playbackRate??1};}job.status=job.type==='STT'?(status==='waiting'?'waiting':'flushing'):'cancelled';job.incomplete=job.type==='STT';job.updatedAt=now();await saveHistory(job);return publish();}),
   remove:jobId=>serial(async()=>{const job=getMutable(jobId);job.hidden=true;return publish();}),
-  reopen:jobId=>serial(async()=>{
+  reopen:(jobId,tabId)=>serial(async()=>{
    let job=jobs.get(jobId),fromArchive=false,settingsStored=true;
    if(!job){
     const archived=await services.taskArchive?.getTask(jobId);
@@ -268,7 +293,7 @@ function create(services={}){
     else{const history=await services.getHistory?.(),archivedHistory=(await services.taskArchive?.listHistory?.())||[],entry=history?.recentItems?.find(item=>item.jobId===jobId)||archivedHistory.find(item=>item.jobId===jobId)?.item;if(!entry)throw new Error('Resultado não disponível no histórico arquivado.');if(archivedHistory.some(item=>item.jobId===jobId))fromArchive=true;job=normalizeJob({jobId,type:entry.type.toUpperCase(),source:entry.source,lensMode:entry.lensMode,lensReadingInstruction:entry.lensReadingInstruction,agentId:entry.agentId,text:entry.text||entry.previewText,status:entry.status==='error'?'error':entry.status==='cancelled'?'cancelled':'completed',createdAt:entry.createdAt||entry.timestamp,updatedAt:entry.timestamp,originAvailable:false,insertion:entry.insertion,incomplete:entry.incomplete,pinned:entry.pinned,historyStatus:'saved'},now());}
     if(!job)throw new Error('Histórico incompatível.');await ensureCapacity(job);jobs.set(jobId,job);
    }
-   job.hidden=false;job.collapsed=false;job.lastOpenedAt=now();manualHud({visible:true});setHud({visible:true});activeTaskId=jobId;const state=await publish();if(fromArchive&&settingsStored&&state.jobs.some(item=>item.jobId===jobId)){try{await services.taskArchive?.deleteTask(jobId);for(const item of(await services.taskArchive?.listHistory?.())||[])if(item.jobId===jobId)await services.taskArchive?.deleteHistory?.(item.id);}catch{}}return state;
+   job.hidden=false;job.collapsed=false;job.lastOpenedAt=now();if(tabId>0){manualHud({visible:true},tabId);setHud({visible:true},tabId);}activeTaskId=jobId;const state=await publish();if(fromArchive&&settingsStored&&state.jobs.some(item=>item.jobId===jobId)){try{await services.taskArchive?.deleteTask(jobId);for(const item of(await services.taskArchive?.listHistory?.())||[])if(item.jobId===jobId)await services.taskArchive?.deleteHistory?.(item.id);}catch{}}return state;
   }),
   pin:(jobId,pinned)=>serial(async()=>{const job=jobs.get(jobId);if(job){job.pinned=pinned===true;job.updatedAt=now();await saveHistory(job);return publish();}const archived=await services.taskArchive?.setTaskPinned(jobId,pinned);if(archived){await services.updateHistory?.(current=>({...current,recentItems:(current.recentItems||[]).map(item=>item.jobId===jobId?{...item,pinned:pinned===true}:item)}));return publish();}const history=await services.getHistory?.(),entry=history?.recentItems?.find(item=>item.jobId===jobId);if(entry)await services.updateHistory?.(current=>({...current,recentItems:(current.recentItems||[]).map(item=>item.jobId===jobId?{...item,pinned:pinned===true}:item)}));await services.taskArchive?.setHistoryPinned?.(entry?.id||jobId,pinned);return publish();}),
   clearHistory:()=>serial(async()=>{await services.updateHistory?.(history=>({...history,recentItems:[]}));await services.taskArchive?.clearTasks?.();for(const [jobId,job]of jobs)if(TERMINAL.has(job.status)&&!holdsMicrophone(job)&&!hasAudio(job)&&job.status!=='ready'){jobs.delete(jobId);taskSettings.delete(jobId);}return publish();}),

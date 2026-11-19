@@ -200,7 +200,7 @@ exports.handleExtensionMessage = async (message,sender,guiJob)=>{
  }catch(error){reply={success:false,error:error.message,cancelled:controller?.signal.aborted===true};}
  finally{if(controller){pendingOperations.delete(controller);pendingTtsStarts.delete(controller);}}
  if(!reply?.state?.tabHud)return reply;
- return {...reply,state:viewHud(reply.state,senderOrigin(sender))};
+ const tabId=await presentationTab(sender);return {...reply,state:{...globalThis.GlobalJobs.forHud(reply.state,tabId),...(tabId?{presentationTabId:tabId}:{})}};
 };
 const defaultAgents_1 = __require("shared/constants/defaultAgents.ts");
 const defaultSettings_1 = __require("shared/constants/defaultSettings.ts");
@@ -251,6 +251,34 @@ const hybridRequested=async()=>true;
 const sameVadOwner=(payload,sender)=>Boolean(vadOwner&&payload)&&vadOwner.id===payload.jobId&&
     vadOwner.generation===payload.generation&&vadOwner.documentId===sender.documentId&&
     vadOwner.tabId===sender.tab?.id&&vadOwner.frameId===sender.frameId&&vadOwner.page===(sender.tab?undefined:cleanPage(sender));
+const validHudSize=size=>size&&Number.isFinite(size.width)&&Number.isFinite(size.height)&&size.width>0&&size.height>0;
+const normalizeHudSize=size=>({width:Math.max(320,Math.min(10000,size.width)),height:Math.max(260,Math.min(10000,size.height))});
+async function migrateHudSize(){
+ if(!chrome.storage.local)return;
+ const saved=await chrome.storage.local.get('hudSize'),key=globalThis.GlobalJobs.STORAGE_KEY,stored=(await chrome.storage.session.get(key))?.[key];
+ const candidates=Object.entries(stored?.tabHud||{}).filter(([,v])=>validHudSize(v.size)).sort((a,b)=>Number(b[0])-Number(a[0]));
+ if(!validHudSize(saved.hudSize)&&candidates.length){
+  const active=await chrome.tabs.query?.({active:true,lastFocusedWindow:true})||[];
+  const candidate=candidates.find(([id])=>Number(id)===active[0]?.id)||candidates[0];
+  await chrome.storage.local.set({hudSize:normalizeHudSize(candidate[1].size)});
+ }
+ // Clean up only after the local preference is saved; preserve every other field.
+ if(stored&&Object.values(stored.tabHud||{}).some(v=>'size'in v)){
+  const tabHud=Object.fromEntries(Object.entries(stored.tabHud).map(([id,value])=>{const {size,...local}=value;return[id,local];}));
+  await chrome.storage.session.set({[key]:{...stored,tabHud}});
+ }
+}
+// Bind an extension panel to its originating tab once, never to a later focus.
+const panelOrigins=new Map();
+async function presentationTab(sender){
+ if(sender.tab?.id>0)return sender.tab.id;
+ if(cleanPage(sender)!=='popup.html')return 0;
+ const key=sender.documentId;if(key&&panelOrigins.has(key))return panelOrigins.get(key);
+ const contexts=key&&chrome.runtime.getContexts?await chrome.runtime.getContexts({documentIds:[key]}):[];
+ const windowId=contexts.find(c=>c.windowId>=0)?.windowId;
+ const tabs=await chrome.tabs.query?.(windowId!==undefined?{active:true,windowId}:{active:true,lastFocusedWindow:true})||[];
+ const tabId=tabs[0]?.id||0;if(key&&tabId){if(panelOrigins.size>=256)panelOrigins.delete(panelOrigins.keys().next().value);panelOrigins.set(key,tabId);}return tabId;
+}
 const viewHud=(state,viewer)=>globalThis.GlobalJobs.forHud(state,viewer?.page?0:viewer?.tabId);
 const globalJobs=globalThis.GlobalJobs.create({storage:chrome.storage?.session,
  taskArchive:globalThis.TaskArchive.getDefault(),
@@ -265,11 +293,11 @@ const globalJobs=globalThis.GlobalJobs.create({storage:chrome.storage?.session,
    void deliveryDeadline(chrome.tabs.sendMessage(viewer.tabId,{...packet,state:viewHud(state,viewer)},viewer.documentId?{documentId:viewer.documentId}:{frameId:viewer.frameId}))
     .then(()=>stopViewerRecovery(key),()=>recoverViewer(key,viewer));
   }
-  void deliveryDeadline(chrome.runtime.sendMessage({...packet,state:viewHud(state)})).catch(()=>{});
+  void deliveryDeadline(chrome.runtime.sendMessage({...packet,state})).catch(()=>{});
  }
 });
 let globalRecovery=null;
-async function recoverGlobalJobs(){if(globalRecovery)return globalRecovery;globalRecovery=(async()=>{const saved=await chrome.storage.session?.get(viewerStorageKey);for(const viewer of saved?.[viewerStorageKey]||[])if(Number.isInteger(viewer.tabId)&&viewer.tabId>0&&Number.isInteger(viewer.frameId)){const safe={tabId:viewer.tabId,frameId:viewer.frameId,...(typeof viewer.documentId==='string'?{documentId:viewer.documentId}: {}),...(['options.html','popup.html','task.html'].includes(viewer.page)?{page:viewer.page}:{})};globalViewers.set(`${safe.tabId}:${safe.frameId}:${safe.documentId||''}`,safe);}await globalJobs.get();if(backgroundPlayback_1.hasDocument){const present=await backgroundPlayback_1.hasDocument();const response=present?await backgroundPlayback_1.send({operation:'GLOBAL_JOBS_SNAPSHOT'}):{success:true,jobs:[]};if(response?.success&&Array.isArray(response.jobs)){const persisted=await globalJobs.reconcile(response.jobs);if(present)await backgroundPlayback_1.send({operation:'GLOBAL_JOBS_ACK',sequences:Object.fromEntries(persisted.jobs.map(job=>[job.jobId,job.narration?.eventSeq??job.eventSeq]))});}}await globalJobs.restoreProtections();
+async function recoverGlobalJobs(){if(globalRecovery)return globalRecovery;globalRecovery=(async()=>{await migrateHudSize();const saved=await chrome.storage.session?.get(viewerStorageKey);for(const viewer of saved?.[viewerStorageKey]||[])if(Number.isInteger(viewer.tabId)&&viewer.tabId>0&&Number.isInteger(viewer.frameId)){const safe={tabId:viewer.tabId,frameId:viewer.frameId,...(typeof viewer.documentId==='string'?{documentId:viewer.documentId}: {}),...(['options.html','popup.html','task.html'].includes(viewer.page)?{page:viewer.page}:{})};globalViewers.set(`${safe.tabId}:${safe.frameId}:${safe.documentId||''}`,safe);}await globalJobs.get();if(backgroundPlayback_1.hasDocument){const present=await backgroundPlayback_1.hasDocument();const response=present?await backgroundPlayback_1.send({operation:'GLOBAL_JOBS_SNAPSHOT'}):{success:true,jobs:[]};if(response?.success&&Array.isArray(response.jobs)){const persisted=await globalJobs.reconcile(response.jobs);if(present)await backgroundPlayback_1.send({operation:'GLOBAL_JOBS_ACK',sequences:Object.fromEntries(persisted.jobs.map(job=>[job.jobId,job.narration?.eventSeq??job.eventSeq]))});}}await globalJobs.restoreProtections();
  for(const job of (await globalJobs.get()).jobs.filter(globalThis.GlobalJobs.holdsMicrophone))await recoverSttCapture(job);
  if(globalPanic)return;
  for(const job of (await globalJobs.get()).jobs.filter(job=>job.editorDelivery))scheduleEditorDelivery(job);
@@ -423,8 +451,6 @@ exports.verifyOriginDocuments=async tabId=>{
 };
 exports.historyChanged=async()=>{await recoverGlobalJobs();return globalJobs.historyChanged(()=>chromeStorageAdapter_1.chromeStorage.get('history'));};
 const guiCommands=new Map();
-const taskWindows=new Map();
-const taskWindowsKey='falamermo.taskWindows.v1';
 let globalPlaybackCommand=Promise.resolve(),globalVolumeCommands=Promise.resolve();
 function setGlobalVolume(payload){const work=globalVolumeCommands.catch(()=>{}).then(async()=>{
  await recoverGlobalJobs();const volume=payload?.volume;if(!Number.isFinite(volume))return{success:false,error:'Volume inválido.'};
@@ -452,13 +478,13 @@ async function toggleGlobalPlayback(intent={},signal){
  globalPlaybackCommand=work;
  return work;
 }
-async function controlGlobalJob(payload,signal){
+async function controlGlobalJob(payload,signal,sender){
  if(['play','resume','narrate'].includes(payload.action))payload={...payload,playbackIntent:nextPlaybackIntent()};
- const work=(guiCommands.get(payload.jobId)||Promise.resolve()).catch(()=>{}).then(()=>runGlobalJobCommand(payload,signal));
+ const work=(guiCommands.get(payload.jobId)||Promise.resolve()).catch(()=>{}).then(()=>runGlobalJobCommand(payload,signal,sender));
  guiCommands.set(payload.jobId,work);
  try{return await work;}finally{if(guiCommands.get(payload.jobId)===work)guiCommands.delete(payload.jobId);}
 }
-async function runGlobalJobCommand(payload,signal){let job=await globalJobs.find({jobId:payload.jobId});signal?.throwIfAborted();if(!job)return{success:false,error:'Tarefa não encontrada.'};
+async function runGlobalJobCommand(payload,signal,sender){let job=await globalJobs.find({jobId:payload.jobId});signal?.throwIfAborted();if(!job)return{success:false,error:'Tarefa não encontrada.'};
  if(['stop','pause','resume','seek','set'].includes(payload.action)&&payload.requestId&&payload.requestId!==(job.type==='STT'&&globalThis.GlobalJobs.TERMINAL.has(job.status)?audioJob(job).requestId:job.requestId))return{success:false,error:'Controle de reprodução antigo. Atualize o painel; a tarefa atual foi preservada.'};
  if(payload.action==='stop'&&lensOperations.has(job.jobId)){
   lensOperations.get(job.jobId).abort(Object.assign(new Error('Seleção cancelada.'),{cancelled:true}));
@@ -469,11 +495,12 @@ async function runGlobalJobCommand(payload,signal){let job=await globalJobs.find
  if(['play','narrate'].includes(payload.action)&&payload.expectedText!==undefined&&payload.expectedText!==(job.type==='STT'?job.workingText??job.text:job.text))return{success:false,error:'O texto foi alterado em outro painel. Revise a tarefa antes de narrar.'};
  if(payload.action==='reopen')return{success:true,state:await globalJobs.reopen(job.jobId)};
  if(payload.action==='maximize'){
-  if(!taskWindows.has(job.jobId)){const saved=(await chrome.storage.session?.get(taskWindowsKey))?.[taskWindowsKey];if(Number.isInteger(saved?.[job.jobId]))taskWindows.set(job.jobId,saved[job.jobId]);}
-  const windowId=taskWindows.get(job.jobId);
-  if(windowId){try{await chrome.windows.update(windowId,{focused:true});return{success:true};}catch{taskWindows.delete(job.jobId);}}
-  const opened=await chrome.windows.create({url:chrome.runtime.getURL('task.html')+'?jobId='+encodeURIComponent(job.jobId),type:'popup',width:700,height:640,focused:true});
-  if(opened?.id){taskWindows.set(job.jobId,opened.id);await chrome.storage.session?.set({[taskWindowsKey]:Object.fromEntries([...taskWindows].slice(-128))});}return{success:true};
+  if(cleanPage(sender)==='popup.html'){
+   const tabId=await presentationTab(sender);if(!tabId)return{success:false,error:'Abra a tarefa pelo HUD de uma página.'};
+   try{const reply=await chrome.tabs.sendMessage(tabId,{type:'HUD_TASK_OPEN',payload:{jobId:job.jobId}},{frameId:0});if(!reply?.success)throw Error();return{success:true};}
+   catch{return{success:false,error:'Não foi possível abrir a tarefa nesta aba. Atualize a página e tente novamente.'};}
+  }
+  return{success:true,openTaskId:job.jobId};
  }
  if((job.status==='cancelling'||job.narration?.status==='cancelling')&&['play','narrate','resume','pause','stop','seek'].includes(payload.action))return{success:false,error:'Tarefa em encerramento.'};
  if(payload.action==='play'||payload.action==='narrate'){
@@ -595,7 +622,7 @@ async function handleExtensionMessage(message, sender, guiJob, signal) {
                 await recoverGlobalJobs();return toggleGlobalPlayback(message.payload,signal);
             case 'HUD_GLOBAL_REOPEN':
                 if(!allowedHudSender(sender))return{success:false};
-                await recoverGlobalJobs();return{success:true,state:await globalJobs.reopen(message.payload?.jobId)};
+                await recoverGlobalJobs();return{success:true,state:await globalJobs.reopen(message.payload?.jobId,await presentationTab(sender))};
             case 'HUD_GLOBAL_PIN':
                 if(cleanPage(sender)!=='options.html')return{success:false,error:'Fixação disponível nas opções.'};
                 await recoverGlobalJobs();return{success:true,state:await globalJobs.pin(message.payload?.jobId,message.payload?.pinned===true)};
@@ -606,11 +633,12 @@ async function handleExtensionMessage(message, sender, guiJob, signal) {
                 if(!allowedHudSender(sender))return{success:false};
                 const payload=message.payload||{},origin=senderOrigin(sender);
                 if(payload.scope==='tab'&&(!origin.tabId||origin.page))return{success:false,error:'HUD sem aba de origem.'};
+                if(payload.toggleMinimized===true&&(payload.scope!=='tab'||!origin.tabId||origin.page))return{success:false,error:'Alternância do HUD exige a aba remetente.'};
                 await recoverGlobalJobs();
                 if(origin.tabId&&!origin.page)await globalJobs.attachHud(origin);
-                const state=payload.scope==='tab'||origin.tabId>0&&!origin.page
-                    ?await globalJobs.ui({visible:payload.visible,minimized:payload.minimized,automatic:payload.automatic},origin.tabId)
-                    :await globalJobs.ui(payload);
+                const tabId=await presentationTab(sender);if(!tabId)return{success:false,error:'HUD sem aba de origem.'};
+                if(payload.size!==undefined){if(!validHudSize(payload.size))return{success:false,error:'Dimensões do HUD inválidas.'};await chrome.storage.local.set({hudSize:normalizeHudSize(payload.size)});}
+                const state=await globalJobs.ui({visible:payload.visible,toggleVisible:payload.toggleVisible,minimized:payload.minimized,size:payload.size,toggleMinimized:payload.toggleMinimized,automatic:payload.automatic,interaction:payload.interaction===true},tabId);
                 return{success:true,state};
             }
             case 'HUD_OPEN_OPTIONS':
@@ -622,14 +650,14 @@ async function handleExtensionMessage(message, sender, guiJob, signal) {
                 await recoverGlobalJobs();
                 const agents=await chromeStorageAdapter_1.chromeStorage.get('agents');
                 const agent=globalThis.LiveConfig.resolveAgent(agents,null,defaultAgents_1.DEFAULT_AGENTS,defaultAgents_1.AGENT_ID_ALIASES);
-                return{success:true,state:await globalJobs.draft({jobId:liveId('manual'),agentId:agent.metadata.id,origin:{tabId:0,frameId:0}})};
+                return{success:true,state:await globalJobs.draft({jobId:liveId('manual'),agentId:agent.metadata.id,origin:{tabId:0,frameId:0}},await presentationTab(sender))};
             }
             case 'HUD_HISTORY_CLEAR':
                 if(cleanPage(sender)!=='options.html')return{success:false,error:'Limpeza disponível somente nas opções.'};
                 await recoverGlobalJobs();return{success:true,state:await globalJobs.clearHistory(),history:await chromeStorageAdapter_1.chromeStorage.get('history')};
             case 'HUD_GLOBAL_COMMAND':
                 if(!allowedHudSender(sender))return{success:false};
-                await recoverGlobalJobs();return controlGlobalJob(message.payload||{},signal);
+                await recoverGlobalJobs();if(message.payload?.action==='reopen')return{success:true,state:await globalJobs.reopen(message.payload.jobId,await presentationTab(sender))};return controlGlobalJob(message.payload||{},signal,sender);
             case 'HUD_GLOBAL_PANIC':
                 if(!allowedHudSender(sender))return{success:false,error:'Painel sem origem válida.'};
                 return stopAllOperations();
@@ -925,7 +953,10 @@ async function handleExtensionMessage(message, sender, guiJob, signal) {
                     }
                 } catch(error) {
                     if(error.code!=='STT_CAPTURE_BUSY')throw error;
-                    return {success:false,code:error.code,error:error.message,otherTab:error.otherTab};
+                    let title='';
+                    if(error.busyTabId>0){try{const tab=await chrome.tabs.get(error.busyTabId);if(typeof tab.title==='string')title=tab.title.trim();}catch{/* Closed or inaccessible origin: use the generic notice. */}}
+                    // The real title is returned only to the requesting view, never logged or persisted.
+                    return {success:false,code:error.code,error:title?'O microfone já está em uso na aba “'+title+'”.':'O microfone já está sendo usado por outro ditado.',otherTab:error.otherTab};
                 }
                 return {success:true};
             }

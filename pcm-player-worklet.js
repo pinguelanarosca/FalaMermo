@@ -46,6 +46,8 @@ class GeminiPcmProcessor extends AudioWorkletProcessor{
    this.rendering=Boolean(written);
    this.port.postMessage({type:'playback-state',rendering:this.rendering,controlSeq:this.controlSeq});
   }
+  const audible=out.some(value=>Math.abs(value)>1e-6);
+  if(audible!==this.audible){this.audible=audible;this.port.postMessage({type:'signal-state',active:audible});}
   if(written)this.report();return true;
  }
 }

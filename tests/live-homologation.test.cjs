@@ -7,7 +7,7 @@ function environment(acquire,slowInit=false,cacheLimit){
  let Processor;vm.runInNewContext(fs.readFileSync(path.join(__dirname,'..','pcm-player-worklet.js'),'utf8'),{sampleRate:24000,Float32Array,AudioWorkletProcessor:class{constructor(){this.port={postMessage(){}};}},registerProcessor:(_name,type)=>Processor=type});
  class AudioWorkletNode{constructor(){this.sent=[];this.processor=new Processor();this.processor.port.postMessage=data=>queueMicrotask(()=>this.port.onmessage?.({data}));this.port={postMessage:(data,transfer)=>{const copy=structuredClone(data,{transfer});this.sent.push(copy);this.processor.port.onmessage({data:copy});}};nodes.push(this);}connect(x){return x;}}
  class Manager{async acquire(options){attempts.push({jobId:options.jobId,blockId:options.blockId,modelId:options.modelId,keyIndex:options.keyIndex});return acquire(options);}release(){}retire(session){session.closed=true;}}
- const context=vm.createContext({console,performance,structuredClone,setTimeout,clearTimeout,AudioContext,AudioWorkletNode,AbortController,DataView,Float32Array,Uint8Array,LiveConfig:config,LiveSessions:{LiveSessionManager:Manager,classifyLiveError:require('../live-session-manager.js').classifyLiveError},chrome:{runtime:{getURL:x=>x,onMessage:{addListener(fn){listener=fn;}},sendMessage(msg){events.push(msg.payload);return Promise.resolve();}}}});
+ const context=vm.createContext({console,performance,structuredClone,setTimeout,clearTimeout,AudioContext,AudioWorkletNode,AbortController,DataView,Float32Array,Uint8Array,LiveConfig:config,LiveSessions:{LiveSessionManager:Manager,classifyLiveError:require('../live-session-manager.js').classifyLiveError},chrome:{runtime:{getURL:x=>x,onMessage:{addListener(fn){listener=fn;}},sendMessage(msg){events.push(msg.payload);return Promise.resolve({success:true,jobId:msg.payload?.jobId??null,eventSeq:msg.payload?.eventSeq??null,result:'applied'});}}}});
  vm.runInContext(fs.readFileSync(path.join(__dirname,'..','offscreen.js'),'utf8').replace('PLAYBACK_CACHE_LIMIT=128*1024*1024',cacheLimit?'PLAYBACK_CACHE_LIMIT='+cacheLimit:'PLAYBACK_CACHE_LIMIT=128*1024*1024'),context);
  const command=payload=>new Promise(resolve=>listener({target:'offscreen',type:'LIVE_OFFSCREEN_COMMAND',payload},{},resolve));
  return{command,events,contexts,nodes,attempts};
@@ -19,7 +19,7 @@ const shortTurn={async sendTurn(_text,onMessage){
 }};
 const base={operation:'TTS_LIVE_START',tabId:1,playerId:'p',requestId:'r',jobId:'j',modelId:'gemini-3.8-live',models:['gemini-3.8-live','gemini-3.8-live-extended-thinking'],apiKeys:Array.from({length:9},(_,i)=>'fake-'+i),text:'Teste.',maxParallelLiveSessions:1};
 test('cadeia completa ordena modelos, esgota chaves e nunca aciona convencionais',async()=>{
- const models=config.LIVE_MODEL_PRIORITY,env=environment(async()=>{throw Error('Quota exceeded');});await env.command({...base,models:[models[0],models[3],models[2],models[1],'gemini-3.8-flash-tts']});await flush();await flush();
+ const models=config.eligibleModels('tts'),env=environment(async()=>{throw Error('Quota exceeded');});await env.command({...base,models:[models[0],models[3],models[2],models[1],'gemini-3.8-flash-tts']});await flush();await flush();
  assert.deepEqual(env.attempts.map(x=>[x.modelId,x.keyIndex]),models.flatMap(model=>Array.from({length:9},(_,i)=>[model,i+1])));assert.ok(env.events.some(e=>e.event==='error'&&/Fallback Live esgotado/.test(e.error)));
 });
 test('ranking passivo só altera chaves do modelo atual, respeitando cooldown',async()=>{

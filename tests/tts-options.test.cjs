@@ -82,9 +82,9 @@ function createOptions({ text = 'Texto para narração.', status = 200, emptyAud
 }
 
 test('prévia TTS encaminha texto completo ao background Live sem fetch unary',async()=>{
- const text='Texto inteiro com ação 😀.\n'.repeat(500).trim(),env=createOptions({text});await env.synthesize('gemini-3.1-flash-live-preview');
- const message=env.messages.find(m=>m.type==='TTS_REQUEST');assert.equal(env.calls.length,0);assert.equal(message.payload.text,text);assert.equal(message.payload.previewAgent.modelPreferences.ttsModelId,'gemini-3.1-flash-live-preview');
- const preview=JSON.parse(env.elements.ttsPayload.textContent);assert.equal(preview.setup.setup.model,'models/gemini-3.1-flash-live-preview');assert.equal(JSON.parse(preview.turn.clientContent.turns[0].parts[0].text).textToNarrate,text);assert.equal(preview.setup.setup.generationConfig.speechConfig.voiceConfig.prebuiltVoiceConfig.voiceName,'Kore');assert.ok(!JSON.stringify(message).includes('test-key'));
+ const text='Texto inteiro com ação 😀.\n'.repeat(500).trim(),env=createOptions({text});await env.synthesize('gemini-3.8-live-extended-thinking');
+ const message=env.messages.find(m=>m.type==='TTS_REQUEST');assert.equal(env.calls.length,0);assert.equal(message.payload.text,text);assert.equal(message.payload.previewAgent.modelPreferences.ttsModelId,'gemini-3.8-live-extended-thinking');
+ const preview=JSON.parse(env.elements.ttsPayload.textContent);assert.equal(preview.setup.setup.model,'models/gemini-3.8-live-extended-thinking');assert.equal(JSON.parse(preview.turn.clientContent.turns[0].parts[0].text).textToNarrate,text);assert.equal(preview.setup.setup.generationConfig.speechConfig.voiceConfig.prebuiltVoiceConfig.voiceName,'Kore');assert.ok(!JSON.stringify(message).includes('test-key'));
 });
 test('configuração convencional antiga é preservada mas execução efetiva usa Live',async()=>{
  const env=createOptions();await env.synthesize('gemini-3.8-flash-tts');const agent=env.messages.find(m=>m.type==='TTS_REQUEST').payload.previewAgent;

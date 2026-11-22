@@ -2,7 +2,8 @@ const {voicePcm}=require('./stt-audio-fixture.cjs');
 'use strict';
 const test=require('node:test'),assert=require('node:assert/strict'),vm=require('node:vm'),fs=require('node:fs');
 const LiveConfig=require('../live-config.js'),flush=()=>new Promise(r=>setImmediate(r));
-function fixture(deliver=()=>({success:true}),customize=()=>({})){
+const acknowledge=msg=>({success:true,jobId:msg.payload?.jobId??null,eventSeq:msg.payload?.eventSeq??null,result:'applied'});
+function fixture(deliver=acknowledge,customize=()=>({})){
  const events=[],sessions=[],timers=new Map();let listener,nextTimer=0;
  class Manager{async acquire(options){const s={options,sent:[],socketOpenMs:1,setupCompleteMs:2,sendAudio(bytes){this.sent.push(bytes.length);},endAudio(){this.ended=true;},close(){this.closed=true;},...customize(options)};sessions.push(s);return s;}release(s){s.busy=false;}retire(s){s.closed=true;s.options?.onRetire?.(s);}}
  const context=vm.createContext({console,performance,structuredClone,AbortController,Uint8Array,DataView,Float32Array,
@@ -14,7 +15,7 @@ function fixture(deliver=()=>({success:true}),customize=()=>({})){
  const fire=async ms=>{for(const[id,timer]of [...timers])if(timer.ms===ms){timers.delete(id);timer.fn();}await flush();};
  return{command,sessions,events,timers,fire};
 }
-const start=id=>({operation:'STT_LIVE_START',jobId:id,modelId:'gemini-3.8-live',apiKeys:['fake-for-unit-test-'+id],tabId:12,frameId:0,documentId:'original-document'});
+const start=id=>({operation:'STT_LIVE_START',jobId:id,modelId:'gemini-3.5-transcribe-live',apiKeys:['fake-for-unit-test-'+id],tabId:12,frameId:0,documentId:'original-document'});
 test('Stop sem pacote confirmado pelo VAD encerra normalmente, sem transcrição inventada nem erro técnico',async()=>{
  const e=fixture();await e.command({...start('no-speech-audit'),chunked:true,distributed:true});
  await e.command({operation:'STT_LIVE_STOP',jobId:'no-speech-audit'});await flush();
@@ -38,9 +39,9 @@ test('dois ditados mantêm PCM, origem, segmentos e cancelamento independentes; 
  await e.command({operation:'STT_LIVE_AUDIO',jobId:'one',audioBase64:'AAA=',sampleRate:16000});
  await e.command({operation:'STT_LIVE_AUDIO',jobId:'two',audioBase64:'AAAAAA==',sampleRate:16000});
  assert.deepEqual(e.sessions.map(s=>s.sent),[[2],[4]]);
- e.sessions[0].handler({serverContent:{interimInputTranscription:{text:'provisório'},inputTranscription:{text:'confirmado'}}});await flush();
- const packets=e.events.filter(x=>x.payload?.event==='stt-partial').map(x=>x.payload);
- assert.equal(packets[0].confirmed,false);assert.equal(packets[0].confirmedText,'');assert.equal(packets[1].confirmed,true);assert.equal(packets[1].confirmedText,'confirmado');assert.equal(packets[1].partialText,'');
+ e.sessions[0].handler({serverContent:{interimInputTranscription:{text:'provisório'}}});e.sessions[0].handler({serverContent:{inputTranscription:{text:'confirmado'}}});await flush();
+ const packets=e.events.filter(x=>['stt-partial','stt-segment'].includes(x.payload?.event)).map(x=>x.payload);
+ assert.equal(packets[0].confirmed,false);assert.equal(packets[0].confirmedText,'');assert.equal(packets[1].event,'stt-segment');assert.equal(packets[1].confirmedText,'confirmado');assert.equal(packets[1].partialText,'');
  await e.command({operation:'STT_LIVE_CANCEL',jobId:'one'});await flush();
  const count=e.events.length;e.sessions[0].handler({serverContent:{inputTranscription:{text:'atrasado'},turnComplete:true}});await flush();assert.equal(e.events.length,count);
  const state=await e.command({operation:'GLOBAL_JOBS_SNAPSHOT'});assert.deepEqual(Array.from(state.activeJobIds),['two']);assert.equal(e.sessions[1].closed,undefined);
@@ -48,30 +49,30 @@ test('dois ditados mantêm PCM, origem, segmentos e cancelamento independentes; 
  await e.command({operation:'STT_LIVE_CANCEL',jobId:'two'});
 });
 test('perda de origem finaliza apenas PCM já recebido, preserva texto incompleto e não reproduz saída do assistente',async()=>{
- const e=fixture();await e.command(start('lost'));e.sessions[0].handler({serverContent:{inputTranscription:{text:'resultado recuperável'},outputTranscription:{text:'não é ditado'},modelTurn:{parts:[{text:'não é ditado'}]}}});
+ const e=fixture();await e.command(start('lost'));await e.command({operation:'STT_LIVE_AUDIO',jobId:'lost',audioBase64:'AQA='});e.sessions[0].handler({serverContent:{inputTranscription:{text:'resultado recuperável'},outputTranscription:{text:'não é ditado'},modelTurn:{parts:[{text:'não é ditado'}]}}});
  await e.command({operation:'STT_ORIGIN_LOST',jobId:'lost'});assert.equal(e.sessions[0].ended,true);
- e.sessions[0].handler({serverContent:{turnComplete:true}});await e.fire(900);
+ e.sessions[0].handler({serverContent:{turnComplete:true}});await e.fire(15000);
  const result=e.events.find(x=>x.payload?.event==='stt-final').payload;assert.equal(result.text,'resultado recuperável');assert.equal(result.incomplete,true);
  const state=await e.command({operation:'GLOBAL_JOBS_SNAPSHOT'});assert.equal(state.activeJobIds.length,0);assert.equal(state.jobs[0].incomplete,true);assert.equal(e.sessions[0].closed,true);
  assert.ok(e.events.some(x=>x.type==='LIVE_OFFSCREEN_IDLE'));
 });
 test('evento terminal rejeitado tem retries finitos, snapshot recuperável e ACK posterior libera fechamento',async()=>{
- let reject=true;const e=fixture(msg=>{if(reject&&msg.payload?.event==='stt-final')throw Error('worker reiniciando');return{success:true};});
- await e.command(start('retry'));e.sessions[0].handler({serverContent:{inputTranscription:{text:'resultado final'}}});await e.command({operation:'STT_LIVE_STOP',jobId:'retry'});e.sessions[0].handler({serverContent:{turnComplete:true}});await e.fire(900);
+ let reject=true;const e=fixture(msg=>{if(reject&&msg.payload?.event==='stt-final')throw Error('worker reiniciando');return acknowledge(msg);});
+ await e.command(start('retry'));await e.command({operation:'STT_LIVE_AUDIO',jobId:'retry',audioBase64:'AQA='});e.sessions[0].handler({serverContent:{inputTranscription:{text:'resultado final'}}});await e.command({operation:'STT_LIVE_STOP',jobId:'retry'});e.sessions[0].handler({serverContent:{turnComplete:true}});await e.fire(15000);
  assert.equal(e.events.filter(x=>x.payload?.event==='stt-final').length,3);assert.equal(e.events.some(x=>x.type==='LIVE_OFFSCREEN_IDLE'),false);
  const snapshot=await e.command({operation:'GLOBAL_JOBS_SNAPSHOT'}),job=snapshot.jobs[0];assert.equal(job.text,'resultado final');assert.equal(job.status,'inserting');assert.equal(snapshot.activeJobIds.length,0);
- reject=false;await e.command({operation:'GLOBAL_JOBS_ACK',sequences:{retry:job.eventSeq}});await flush();assert.ok(e.events.some(x=>x.type==='LIVE_OFFSCREEN_IDLE'));
+ reject=false;await e.command({operation:'GLOBAL_JOBS_ACK',sequences:{retry:{requestId:job.requestId,eventSeq:job.eventSeq}}});await flush();assert.ok(e.events.some(x=>x.type==='LIVE_OFFSCREEN_IDLE'));
  const seq=e.events.filter(x=>x.type==='LIVE_OFFSCREEN_EVENT').map(x=>x.payload.eventSeq);assert.ok(seq.every((v,i)=>i===0||v>=seq[i-1]));
 });
 test('cancelar transformação com AbortError não abre próximas chaves/modelos nem publica final atrasado',async()=>{
  const e=fixture(undefined,options=>options.mode==='agent'?{sendTurn(_text,_callback,signal){return new Promise((_resolve,reject)=>signal.addEventListener('abort',()=>reject(signal.reason),{once:true}));}}:{});
- await e.command({...start('transform-cancel'),apiKeys:Array.from({length:9},(_,i)=>'fake-'+i),transformInstruction:'Instrução pública de teste.'});e.sessions[0].handler({serverContent:{inputTranscription:{text:'Texto de teste.'}}});await e.command({operation:'STT_LIVE_STOP',jobId:'transform-cancel'});e.sessions[0].handler({serverContent:{turnComplete:true}});await e.fire(900);assert.equal(e.sessions.length,2);
+ await e.command({...start('transform-cancel'),apiKeys:Array.from({length:9},(_,i)=>'fake-'+i),transformInstruction:'Instrução pública de teste.'});await e.command({operation:'STT_LIVE_AUDIO',jobId:'transform-cancel',audioBase64:'AQA='});e.sessions[0].handler({serverContent:{inputTranscription:{text:'Texto de teste.'}}});await e.command({operation:'STT_LIVE_STOP',jobId:'transform-cancel'});e.sessions[0].handler({serverContent:{turnComplete:true}});await e.fire(15000);assert.equal(e.sessions.length,2);
  await e.command({operation:'STT_LIVE_CANCEL',jobId:'transform-cancel'});await flush();assert.equal(e.sessions.length,2);assert.ok(e.sessions.every(s=>s.closed));assert.equal(e.events.some(x=>x.payload?.event==='stt-final'),false);assert.equal((await e.command({operation:'GLOBAL_JOBS_SNAPSHOT'})).jobs[0].status,'cancelled');
 });
 test('scheduler integra nove jobs realtime com afinidade de sessão, cancelamento individual e finais ordenados',async()=>{
  const e=fixture(),keys=Array.from({length:9},(_,i)=>'unit-independent-'+i),ids=keys.map((_,i)=>'concurrent-'+i);
  const starts=await Promise.all(ids.map(id=>e.command({...start(id),apiKeys:keys,realtime:true,agentId:'agent-preserved',vad:{disabled:false}})));
- assert.ok(starts.every(x=>x.success));assert.equal(e.sessions.length,9);assert.equal(new Set(e.sessions.map(s=>s.options.keyIndex)).size,9);assert.ok(e.sessions.every(s=>s.options.modelId==='gemini-3.8-live'&&s.options.vad.disabled));
+ assert.ok(starts.every(x=>x.success));assert.equal(e.sessions.length,9);assert.equal(new Set(e.sessions.map(s=>s.options.keyIndex)).size,9);assert.ok(e.sessions.every(s=>s.options.modelId==='gemini-3.5-transcribe-live'&&s.options.vad.disabled));
  for(const id of ids){const packets=[],capture=new(require('../stt-realtime.js').CapturePipeline)({jobId:id,realtime:true,submitAudioChunk:p=>packets.push(p)});for(let turn=0;turn<2;turn++){capture.push(voicePcm());for(let n=0;n<5;n++)capture.push(new Uint8Array(3200));}capture.finish();for(const p of packets)assert.equal((await e.command({operation:'STT_LIVE_AUDIO',jobId:id,sampleRate:16000,chunk:p.chunk,...(p.endOnly?{endOnly:true}:{audioBase64:Buffer.from(p.pcm).toString('base64')})})).success,true);}
  const first=e.sessions.find(s=>s.options.jobId===ids[0]);await e.command({operation:'STT_LIVE_CANCEL',jobId:ids[0]});const before=e.events.length;first.handler({serverContent:{inputTranscription:{text:'Nunca inserir.'}}});assert.equal(e.events.length,before);
  // Acquires concorrentes não garantem ordem de criação: identidade vem do jobId, não do índice.
@@ -84,4 +85,47 @@ test('scheduler integra nove jobs realtime com afinidade de sessão, cancelament
 test('429 de socket após PCM não faz fallback; job seguinte evita a conta em cooldown',async()=>{
  const e=fixture(),apiKeys=['unit-account-1','unit-account-2'];await e.command({...start('socket-a'),apiKeys});const old=e.sessions[0];await e.command({operation:'STT_LIVE_AUDIO',jobId:'socket-a',audioBase64:'AAA=',sampleRate:16000});old.handler({error:{message:'quota',cause:Object.assign(Error('429 quota'),{httpStatus:429})}});await flush();assert.equal(e.sessions.length,1);assert.equal(old.closed,true);
  await e.command({...start('socket-b'),apiKeys});assert.equal(e.sessions.length,2);assert.equal(e.sessions[1].options.keyIndex,2);const failed=await e.command({operation:'STT_LIVE_AUDIO',jobId:'socket-a',audioBase64:'AAA='});assert.equal(failed.success,false);assert.equal(old.sent.length,1);await e.command({operation:'STT_LIVE_CANCEL',jobId:'socket-b'});
+});
+
+test('erro estrutural distribuído cancela réplicas sem percorrer as nove chaves',async()=>{
+ let attempts=0;
+ const e=fixture(undefined,()=>{
+  attempts++;
+  throw Object.assign(Error('Invalid setup'),{closeCode:1007,closeReason:'Invalid setup'});
+ });
+ const jobId='structural-stt';
+ const started=await e.command({...start(jobId),chunked:true,distributed:true,apiKeys:Array.from({length:9},(_,i)=>'fixture-'+i)});
+ assert.equal(started.success,true);
+ await e.command({operation:'STT_LIVE_AUDIO',jobId,audioBase64:'AQA=',chunk:{
+  jobId,chunkId:jobId+':1',sequence:1,packetSequence:1,startMs:0,endMs:1,status:'streaming',overlapMs:0,speechAfterOverlap:true
+ }});
+ for(let i=0;i<100&&!e.events.some(e=>e.payload?.event==='stt-error');i++)await flush();
+ assert.ok(e.events.some(e=>e.payload?.event==='stt-error'&&e.payload.incomplete));
+ assert.ok(attempts>=1&&attempts<=2);
+ assert.equal((await e.command({operation:'STT_SCHEDULER_SNAPSHOT'})).diagnostics.activeJobs,0);
+});
+
+test('ACK ausente ou com revisão incorreta deixa o desfecho disponível até reconciliação válida',async()=>{
+ let replies=0;
+ const e=fixture(msg=>{
+  if(msg.payload?.event==='stt-final'){
+   replies++;
+   if(replies===1)return;
+   return {...acknowledge(msg),eventSeq:msg.payload.eventSeq-1};
+  }
+  return acknowledge(msg);
+ });
+ await e.command({...start('ack-typed'),chunked:true,distributed:true});
+ await e.command({operation:'STT_LIVE_STOP',jobId:'ack-typed'});
+ await flush();
+ assert.equal(replies,3);
+ assert.equal(e.events.some(x=>x.type==='LIVE_OFFSCREEN_IDLE'),false);
+ const before=await e.command({operation:'GLOBAL_JOBS_SNAPSHOT'}),job=before.jobs[0];
+ assert.equal(before.pendingEvents,1);
+ await e.command({operation:'GLOBAL_JOBS_ACK',sequences:{'ack-typed':{requestId:'other',eventSeq:job.eventSeq}}});
+ assert.equal((await e.command({operation:'GLOBAL_JOBS_SNAPSHOT'})).pendingEvents,1);
+ await e.fire(250);
+ assert.equal(e.events.filter(x=>x.type==='LIVE_OFFSCREEN_RECONCILE').length,1);
+ assert.equal((await e.command({operation:'GLOBAL_JOBS_SNAPSHOT'})).pendingEvents,0);
+ assert.ok(e.events.some(x=>x.type==='LIVE_OFFSCREEN_IDLE'));
 });

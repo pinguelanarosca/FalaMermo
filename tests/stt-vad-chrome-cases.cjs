@@ -316,28 +316,19 @@ module.exports = async ({call,worker,content,evaluate,waitFor,offscreen,locate,b
     await prepare(true);
     const manual=await begin({hybrid:true});
     await speech();
-    await waitFor('PCM aceito antes de trocar',()=>content('fixtureStt.liveCapture.metrics.ackBytes>0'));
-    const switchingOptions=await target(base+'options.html');
-    await waitFor('seletor RMS pronto',()=>evaluate(switchingOptions.session,
-        'typeof document.querySelector("#sttVadDetector")?.onchange==="function"'));
-    await call('Page.bringToFront',{},page.session);
+    await waitFor('PCM aceito antes de gravar a preferência legada',()=>content('fixtureStt.liveCapture.metrics.ackBytes>0'));
     await content(`globalThis.fixtureVadHook=(message,send)=>message.type==='STT_LOCAL_VAD'&&message.payload.operation==='analyze'?
         send(message).then(result=>new Promise(resolve=>globalThis.fixtureLateAck=()=>resolve(result))):send(message)`);
     await inject(fixtures[0],1,false);
     await waitFor('ACK local retido',()=>content('typeof fixtureLateAck==="function"'));
-    await evaluate(switchingOptions.session,`(() => {
-        const field=document.querySelector('#sttVadDetector');
-        field.value='rms';field.dispatchEvent(new Event('change',{bubbles:true}));
-    })()`);
-    await waitFor('rollback manual',()=>content('fixtureStt.liveCapture.vad.metrics.fallback==="manual"'));
-    await call('Target.closeTarget',{targetId:switchingOptions.targetId});
-    await call('Page.bringToFront',{},page.session);
+    await fromWorker('chrome.storage.local.set({sttVadDetector:"rms"})');
     await content('fixtureLateAck();fixtureVadHook=null');
     await speech();
+    assert.equal((await snapshot()).mode,'hybrid');
     const switched=await finish(manual);
     results.manual={...await checks(manual.audio),stats:switched};
-    assert.equal(switched.metrics.fallback,'manual');
-    console.log('VAD: rollback manual e ACK tardio, sem replay');
+    assert.equal(switched.metrics.fallback,undefined);
+    console.log('VAD: preferência RMS legada e ACK tardio preservam o híbrido');
 
     await cleanOffscreen();
     await prepare(true);
@@ -414,16 +405,22 @@ module.exports = async ({call,worker,content,evaluate,waitFor,offscreen,locate,b
     await prepare(true);
     const deadline=await begin({hybrid:true});
     await speech();
-    await content(`globalThis.fixtureVadHook=(message,send)=>message.type==='STT_LOCAL_VAD'&&message.payload.operation==='analyze'?
-        send(message).then(result=>new Promise(resolve=>setTimeout(()=>resolve(result),150))):send(message)`);
+    await content(`globalThis.fixtureDelayVadOnce=true;
+        globalThis.fixtureVadHook=(message,send)=>{
+            if(message.type!=='STT_LOCAL_VAD'||message.payload.operation!=='analyze'||!fixtureDelayVadOnce)return send(message);
+            fixtureDelayVadOnce=false;
+            return send(message).then(result=>new Promise(resolve=>setTimeout(()=>resolve(result),1800)));
+        }`);
     await inject(tone);
     const timedOut=await snapshot();
     assert.equal(timedOut.metrics.fallback,'deadline');
+    assert.equal(timedOut.mode,'hybrid');
+    assert.equal(timedOut.metrics.recoveries,1);
     await content('fixtureVadHook=null');
     await inject(tone);
     const deadlineResult=await finish(deadline);
     results.deadline={fallbackAt:timedOut.metrics.fallbackAt,stats:deadlineResult,...await checks(deadline.audio)};
-    console.log('VAD: prazo local excedido, retorno para RMS, PCM e ACK íntegros');
+    console.log('VAD: prazo local excedido, híbrido recuperado e PCM íntegro');
 
     results.transportAck=[];
     for(const delivered of [false,true]){

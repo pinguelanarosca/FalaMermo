@@ -104,20 +104,23 @@ function liveFixture() {
             }
             const input = packet.realtimeInput;
             if (input?.audio && globalThis.fixtureVadWire) (this.fixtureAudio??=[]).push(input.audio.data);
+            if (input?.audio && globalThis.fixtureLatencyProbe) this.fixtureProbePackets=(this.fixtureProbePackets||0)+1;
             const phrase=globalThis.fixtureNumbered?'Bloco '+this.fixtureBlock+'.':'Ditado de teste.';
             if (input?.audio && globalThis.fixtureSilentHypothesis && !this.fixtureSilentReply && !/[^\x00]/.test(atob(input.audio.data))) {
                 this.fixtureSilentReply = true;
                 this.receive({interimInputTranscription: {text: '¿Qué?'}});
                 this.receive({inputTranscription: {text: '¿Qué?', finished: true}});
             }
-            if (input?.audio && !this.partial && !globalThis.fixtureNoInterim) {
+            if (input?.audio && !this.partial && !globalThis.fixtureNoInterim &&
+                (!globalThis.fixtureLatencyProbe || this.fixtureProbePackets>=3)) {
                 this.partial = true;
+                this.fixtureHypothesisAt??=Date.now();
                 this.receive({interimInputTranscription: {text: phrase.slice(0,-1)}});
             }
             if (input?.activityEnd || input?.audioStreamEnd) {
                 this.partial = false;
-                const complete = () => queueMicrotask(() => this.receive({inputTranscription: {text: phrase, finished: true}, turnComplete: true, interactionStatus: 'IDLE'}));
-                if (globalThis.fixtureHoldStt) fixtureSttHeld.push({complete,account:this.fixtureAccount});
+                const complete = () => queueMicrotask(() => this.receive({inputTranscription: {text: phrase}}));
+                if (globalThis.fixtureHoldStt||globalThis.fixtureLatencyProbe&&this.fixtureBlock===1) fixtureSttHeld.push({complete,account:this.fixtureAccount});
                 else complete();
             }
         }
@@ -135,7 +138,7 @@ function liveFixture() {
     }
     fs.cpSync(path.join(root, 'icons'), path.join(extension, 'icons'), {recursive: true});
     if (fs.existsSync(path.join(root,'vad-assets'))) fs.cpSync(path.join(root,'vad-assets'),path.join(extension,'vad-assets'),{recursive:true});
-    if(process.env.FALAMERMO_VAD_ONLY){
+    if(process.env.FALAMERMO_VAD_ONLY||process.env.FALAMERMO_STT_LATENCY_ONLY){
         const file=path.join(extension,'background.js');
         fs.writeFileSync(file,fs.readFileSync(file,'utf8').replace(
             "type: 'STT_VAD_OFFSCREEN', target: 'offscreen', payload",
@@ -143,6 +146,12 @@ function liveFixture() {
         ).replace(
             'if(globalPanic||!chrome.offscreen?.closeDocument',
             'if(globalThis.fixtureVadKeepOffscreen||globalPanic||!chrome.offscreen?.closeDocument'
+        ).replace(
+            "if(event.jobId&&(!Number.isSafeInteger(event.eventSeq)",
+            "if(globalThis.fixtureInvalidSttAck&&event.event==='stt-final'){globalThis.fixtureInvalidSttAttempts=(globalThis.fixtureInvalidSttAttempts||0)+1;return{success:true,jobId:event.jobId,eventSeq:event.eventSeq-1,result:'applied'};}if(event.jobId&&(!Number.isSafeInteger(event.eventSeq)"
+        ).replace(
+            "case 'LIVE_OFFSCREEN_RECONCILE': {",
+            "case 'LIVE_OFFSCREEN_RECONCILE': {if(globalThis.fixtureInvalidSttAck)return{success:false};"
         ));
     }
     const offscreenFile = path.join(extension, 'offscreen.html');
@@ -230,7 +239,7 @@ function liveFixture() {
     const press = async session => { await key('rawKeyDown', false, session); await key('keyUp', false, session); };
     const sttCount = async () => ((await state())?.jobs || []).filter(item => item.type === 'STT').length;
     let sttJobId;
-    if(!process.env.FALAMERMO_HUD_AUDIO_ONLY&&!process.env.FALAMERMO_PANIC_ONLY&&!process.env.FALAMERMO_VAD_ONLY)for (const mode of ['final', 'realtime']) {
+    if(!process.env.FALAMERMO_HUD_AUDIO_ONLY&&!process.env.FALAMERMO_PANIC_ONLY&&!process.env.FALAMERMO_VAD_ONLY&&!process.env.FALAMERMO_STT_LATENCY_ONLY)for (const mode of ['final', 'realtime']) {
         await waitFor('background inicializado', () => evaluate(worker, 'typeof chrome !== "undefined" && typeof GlobalJobs !== "undefined"'));
     await evaluate(worker, 'chrome.storage.local.set({ui:{dictationInsertion:' + JSON.stringify(mode) + '}})');
         await waitFor(mode, () => content('fixtureStt.insertionMode === ' + JSON.stringify(mode)));
@@ -258,8 +267,8 @@ function liveFixture() {
     let popup, options;
     const popupEval = expression => evaluate(popup.session, expression);
     const optionsEval = expression => evaluate(options.session, expression);
-    const command = async (type, payload) => {
-        const result = await popupEval('chrome.runtime.sendMessage(' + JSON.stringify({type, payload}) + ')');
+    const command = async (type, payload, view=popupEval) => {
+        const result = await view('chrome.runtime.sendMessage(' + JSON.stringify({type, payload}) + ')');
         assert.equal(result.success, true, result.error);
         return result;
     };
@@ -272,7 +281,7 @@ function liveFixture() {
     const defaultInstructions = require('../live-config.js').STT_DEFAULT_INSTRUCTIONS;
     const editedInstructions = 'Preserve siglas.\nMantenha nomes próprios.';
     const editedVocabulary = ['FalaMermo', 'Banco de Dados'];
-    if(!process.env.FALAMERMO_HUD_AUDIO_ONLY&&!process.env.FALAMERMO_VAD_ONLY){
+    if(!process.env.FALAMERMO_HUD_AUDIO_ONLY&&!process.env.FALAMERMO_VAD_ONLY&&!process.env.FALAMERMO_STT_LATENCY_ONLY){
     options = await target(base + 'options.html');
     const recognitionForm = () => optionsEval(`(() => ({
         instructions:document.querySelector('#sttRecognitionInstructions')?.value,
@@ -311,7 +320,7 @@ function liveFixture() {
     const openHudSettings = async () => {
         await waitFor('aba anterior de opções fechada', async () => !(await locate(base + 'options.html')));
         const position = await content(`(() => {
-            const rect = fixtureHud.querySelector('button[aria-label="Configurações"]').getBoundingClientRect();
+            const rect = fixtureHud.querySelector('#ext-btn-options').getBoundingClientRect();
             return {x:rect.x + rect.width / 2,y:rect.y + rect.height / 2};
         })()`);
         await call('Target.activateTarget', {targetId: page.targetId});
@@ -345,6 +354,10 @@ function liveFixture() {
         await require('./hud-audio-chrome-cases.cjs')({content,evaluate,worker,status,job,offscreen,waitFor,target,attach,base,click,act,card,toggle,sleep,call,page});
         return;
     }
+    if(process.env.FALAMERMO_STT_LATENCY_ONLY){
+        await require('./stt-latency-chrome-cases.cjs')({content,evaluate,worker,job,status,offscreen,waitFor,sleep,call,page,target,locate,base});
+        return;
+    }
     if(process.env.FALAMERMO_VAD_ONLY){
         await require(process.env.FALAMERMO_GHOST_ONLY?'./stt-ghost-chrome-cases.cjs':'./stt-vad-chrome-cases.cjs')({call,worker,content,evaluate,waitFor,offscreen,locate,base,status,job,sleep,page,click,target});
         return;
@@ -363,8 +376,8 @@ function liveFixture() {
     await waitFor('modo tempo real', () => content('fixtureStt.insertionMode === "realtime"'));
     await call('Page.bringToFront',{},page.session);
     const readEditorDiagnostics=async id=>{
-        const result=await evaluate(worker,'chrome.storage.session.get("liveSttDiagnosticsV1")');
-        return result.liveSttDiagnosticsV1?.jobs.find(item=>item.jobId===id);
+        const result=await evaluate(worker,'LiveSttDiagnostics.read()');
+        return result.jobs.find(item=>item.jobId===id);
     };
     for(const rejectLater of [false,true]){
         await content(`(() => {
@@ -406,11 +419,11 @@ function liveFixture() {
                 const setups=await evaluate(await offscreen(),'fixtureSttSetups.slice(-2)');
                 assert.equal(setups.length,2);
                 for(const setup of setups){
-                    assert.equal(setup.model,'models/gemini-3.8-live');
-                    assert.deepEqual(setup.inputAudioTranscription,{languageCodes:['pt-BR'],customVocabulary:editedVocabulary});
-                    assert.ok(setup.systemInstruction.parts[0].text.startsWith(editedInstructions));
+                    assert.equal(setup.model,'models/gemini-3.5-transcribe-live');
+                    assert.deepEqual(setup.inputAudioTranscription,{languageCodes:['pt-BR'],mode:'VERBATIM',customVocabulary:editedVocabulary});
+                    assert.equal(setup.systemInstruction,undefined);
                 }
-                console.log('STT no Chrome: duas sessões do bloco enviaram o mesmo idioma, vocabulário e instruções');
+                console.log('STT no Chrome: duas sessões do bloco usaram VERBATIM, mesmo idioma e vocabulário');
             }
             assert.equal(confirmed.insertion.inserted,inserted);
             assert.ok(confirmed.textRevision>previousRevision);
@@ -439,12 +452,15 @@ function liveFixture() {
         }
         assert.equal(await content('fixtureStt.isRecording'),true);
         await press();
-        const final=await status(id,'completed');
+        const final=await status(id,rejectLater?'error':'completed');
         assert.equal(final.insertion.inserted,!rejectLater);
         assert.equal(final.insertion.revision,final.textRevision);
         await waitFor('ACK final registrado no diagnóstico',async()=>(await readEditorDiagnostics(id))?.events.find(
             event=>event.stage==='editor-ack'&&event.revision===final.textRevision&&event.ackAccepted===true
-        ));
+        )).catch(async error=>{
+            const events=(await readEditorDiagnostics(id))?.events.filter(event=>event.scope==='editor');
+            throw Error(error.message+' (revisão '+final.textRevision+', eventos '+JSON.stringify(events)+')');
+        });
         if(rejectLater)await evaluate(page.session,'fixtureRejectInput.abort()');
         else assert.equal(await content('document.querySelector("#next-dictation").value'),'Antes '+final.text+'| depois');
     }
@@ -535,7 +551,7 @@ function liveFixture() {
     await waitFor('Opções carregadas', () => optionsEval('typeof toggleLiveSttTest === "function" && !!currentAgent'));
     await optionsEval('toggleLiveSttTest()');
     assert.equal(await optionsEval('liveMic'), null);
-    assert.match(await optionsEval('document.querySelector("#sttStatus").textContent'), /ditado em andamento/);
+    assert.match(await optionsEval('document.querySelector("#sttStatus").textContent'), /ditado em andamento|O microfone já está (?:em uso na aba|sendo usado por outro ditado)/);
     await waitFor('PCM', () => content('fixtureStt.liveCapture?.metrics?.forwardedBytes > 0'));
     await press();
     await status(activeDictation, 'completed');
@@ -714,15 +730,33 @@ function liveFixture() {
     for(const adaptive of [false,true]){
         await content('document.querySelector("#next-dictation").value = ""');
         const id=await startEditor('#next-dictation');
-        await content('fixtureStt.liveCapture.chunker.adaptive = '+adaptive);
+        await content(`(() => {
+            const capture=fixtureStt.liveCapture,handler=capture.node.port.onmessage;
+            capture.chunker.adaptive=${adaptive};
+            capture.node.port.onmessage=event=>{if(event.data?.type==='flushed')handler(event);};
+            const samples=new Int16Array(1600);
+            for(let i=0;i<samples.length;i++)samples[i]=5000*Math.sin(2*Math.PI*180*i/16000);
+            globalThis.fixtureLatencyFrame=new Uint8Array(samples.buffer);
+        })()`);
         await evaluate(await offscreen(),'globalThis.fixtureNoInterim=true;globalThis.fixtureNumbered=false');
         await call('Page.bringToFront',{},secondPage.session);
         await waitFor('origem oculta com AudioWorklet do microfone ativo',()=>content('document.visibilityState==="hidden"'));
+        // O WAV do microfone tem pausas e fecha cedo nos dois modos. Compare fala contínua em tempo real.
+        let closed=false;
+        for(let frame=0;frame<140&&!closed;frame++){
+            await sleep(100);
+            closed=await content(`(() => {
+                const capture=fixtureStt.liveCapture;
+                capture.chunker.push(fixtureLatencyFrame,true);
+                capture.metrics.capturedBytes=(capture.metrics.capturedBytes||0)+fixtureLatencyFrame.byteLength;
+                return capture.chunker.sequence===1&&!capture.chunker.chunk;
+            })()`);
+        }
+        assert.equal(closed,true,'primeiro bloco deve fechar com fala contínua');
         await waitFor('primeiro bloco contínuo confirmado',async()=> (await job(id)).insertion?.inserted===true &&
             (await job(id)).text==='Ditado de teste.',18000);
         const result=await waitFor('medição do bloco confirmado',async()=>{
-            const measurements=await evaluate(worker,'chrome.storage.session.get("liveSttDiagnosticsV1")');
-            return measurements.liveSttDiagnosticsV1?.jobs.find(item=>item.jobId===id)?.events.find(
+            return (await readEditorDiagnostics(id))?.events.find(
                 event=>event.stage==='inserted'&&event.whileRecording&&!event.provisional&&event.sequence===1);
         });
         latencies.push(result.editorReceivedMs+result.insertionDurationMs);
@@ -931,6 +965,7 @@ function liveFixture() {
         })()`));
         assert.equal(rendered.text,result.text);
         assert.doesNotMatch(rendered.note,/Inserção não confirmada/);
+        sttJobId=id;
         console.log('STT '+mode+': card e campo confirmam a revisão final após render que restaurou o valor original');
     }
 
@@ -938,7 +973,8 @@ function liveFixture() {
     await waitFor('PCM para o destino removido',()=>content('fixtureStt.liveCapture?.metrics?.forwardedBytes>0'));
     await content('document.querySelector("#next-dictation").remove()');
     await press();
-    const removedResult=await status(removed,'completed');
+    const removedResult=await status(removed,'error');
+    assert.equal(removedResult.insertion.inserted,false);
     assert.equal(removedResult.insertion.reason,'TARGET_REMOVED');
     assert.ok(removedResult.text);
 
@@ -953,12 +989,15 @@ function liveFixture() {
     const lost=await waitFor('captura em aba descartável',()=>navigationEval('fixtureStt.isRecording&&fixtureStt.liveJobId'));
     await waitFor('PCM persistido antes da navegação',()=>navigationEval('fixtureStt.liveCapture?.metrics?.ackBytes>0'));
     await call('Page.navigate',{url:'http://127.0.0.1:'+server.address().port+'/after-navigation'},navigated.session);
-    const lostResult=await status(lost,'completed');
+    const lostResult=await status(lost,'error');
+    assert.equal(lostResult.insertion.inserted,false);
     assert.equal(lostResult.originAvailable,false);
     assert.equal(lostResult.insertion.reason,'ORIGIN_LOST');
     assert.ok(lostResult.text);
     assert.equal(await evaluate(navigated.session,'document.querySelector("textarea").value'),'');
     await call('Target.closeTarget',{targetId:navigated.targetId});
+    await command('HUD_GLOBAL_COMMAND',{jobId:removed,action:'remove'},content);
+    await command('HUD_GLOBAL_COMMAND',{jobId:lost,action:'remove'},content);
     console.log('Remoção e navegação real preservam o texto no card sem redirecionar a inserção');
     await evaluate(worker, 'chrome.storage.local.set({api:{apiKeys:["fixture-local"]},sttVadDetector:"rms"})');
 
@@ -1042,7 +1081,7 @@ x.XSync(d,0); x.XCloseDisplay(d)
     assert.equal((await player(a)).currentTime, .6);
     await click(toggle, content);
     await status(a, 'paused');
-    await send(turnA, 'fixturePcm(12)');
+    await send(turnA, 'fixturePcm(20)');
     await click(toggle);
     await status(a, 'playing');
     console.log('HUD/pop-up: Resume sem PCM, fim do buffer, Pause e retomada sem outra síntese');
@@ -1098,36 +1137,39 @@ x.XSync(d,0); x.XCloseDisplay(d)
     await click(card(b, 'playPause'), content);
     await waitFor('nova síntese após Stop', async () => await turns() === turnA + 3);
     await send(turnA + 2, "{interactionStatus:'IDLE',turnComplete:true}");
-    // Empty results can fall back to the next existing model. Reject the next attempt explicitly.
-    await waitFor('fallback sem PCM', async () => await turns() === turnA + 4);
-    await playback("fixtureTurns.at(-1).message({error:{code:400,message:'Falha simulada no transporte Live'}})");
-    await status(b, 'error');
+    await waitFor('fallback após turno sem PCM', async () => await turns() === turnA + 4);
+    await playback("fixtureTurns["+(turnA+3)+"].message({error:{code:400,message:'Falha simulada no transporte Live'}})");
+    const emptyResult=await status(b, 'error');
+    assert.match(emptyResult.error,/Falha simulada no transporte Live/);
+    assert.equal(await turns(),turnA+4);
     assert.equal((await player(a)).playbackState, 'playing');
     console.log('Stop descarta somente o áudio do card, novo Play sintetiza e falha sem PCM fica visível');
 
     // A completed STT job narrates through the same player, keeping its transcript.
-    const transcript = (await job(sttJobId)).text;
-    await click(card(sttJobId, 'collapse'), content);
+    const reopened=await command('HUD_GLOBAL_REOPEN',{jobId:sttJobId},content);
+    const transcript=reopened.state.jobs.find(item=>item.jobId===sttJobId).text;
+    assert.ok(transcript);
+    const narrationTurn=await turns();
     await click(card(sttJobId, 'playPause'), content);
-    await waitFor('turno da narração STT', async () => await turns() === turnA + 5);
-    await send(turnA + 4, 'fixturePcm(8)');
+    await waitFor('turno da narração STT', async () => await turns() === narrationTurn + 1);
+    await send(narrationTurn, 'fixturePcm(8)');
     await status(sttJobId, 'playing', true);
-    await status(a, 'paused');
+    await status(a, 'playing');
     await click(card(sttJobId, 'playPause'), content);
     await status(sttJobId, 'paused', true);
     await click(card(sttJobId, 'stop'), content);
     await status(sttJobId, 'cancelled', true);
     assert.equal((await job(sttJobId)).text, transcript);
-    assert.equal((await job(a)).status, 'paused');
-    console.log('Card STT: Play/Pause/Stop no próprio áudio, com transcrição preservada');
+    assert.equal((await job(a)).status, 'playing');
+    console.log('Card STT: Play/Pause/Stop no próprio áudio, com transcrição preservada; outra origem continua reproduzindo');
     await click(card(b, 'playPause'), content);
-    await waitFor('última narração', async () => await turns() === turnA + 6);
-    await send(turnA + 5, "{...fixturePcm(.5),interactionStatus:'IDLE',turnComplete:true}");
+    await waitFor('última narração', async () => await turns() === narrationTurn + 2);
+    await send(narrationTurn + 1, "{...fixturePcm(.5),interactionStatus:'IDLE',turnComplete:true}");
     await status(b, 'completed');
     assert.equal((await job(a)).status, 'paused');
     console.log('Fim natural mantém as outras narrações pausadas');
 
-    if(process.env.FALAMERMO_HEADED)popup=await target(base+'popup.html');
+    popup=await target(base+'popup.html');
     await testPanic(secondContent);
     await testTtsVoices();
 
@@ -1143,14 +1185,13 @@ x.XSync(d,0); x.XCloseDisplay(d)
         })()`);
         const original=(await evaluate(worker,'chrome.storage.local.get("agents")')).agents;
         await evaluate(worker,'chrome.storage.local.set('+JSON.stringify({agents:{...original,customAgents:[...original.customAgents,custom]}})+')');
-        const hudAgent='.fm-global-agent-row select';
         const selectAgent = (view,selector,id) => view(`(() => {
             const select=(globalThis.fixtureHud||document).querySelector(${JSON.stringify(selector)});
             select.value=${JSON.stringify(id)};
             select.dispatchEvent(new Event('change',{bubbles:true}));
         })()`);
-        await waitFor('agente personalizado no HUD',()=>content(`!!fixtureHud.querySelector('${hudAgent} option[value="audit-voice"]')`));
-        await selectAgent(content,hudAgent,'audit-voice');
+        await waitFor('agente personalizado no popup',()=>popupEval(`!!document.querySelector('#agent option[value="audit-voice"]')`));
+        await selectAgent(popupEval,'#agent','audit-voice');
         await waitFor('agente do HUD sincronizado',async()=>await content('fixtureActiveAgent()')==='audit-voice'&&
             await popupEval('document.querySelector("#agent").value')==='audit-voice');
         assert.match(await popupEval('document.querySelector("#agent").selectedOptions[0].textContent'),/Kore$/);
@@ -1173,11 +1214,10 @@ x.XSync(d,0); x.XCloseDisplay(d)
         assert.equal(await wireVoice(0),'Kore');
         await audioEval('fixtureTurns[0].receive(fixturePcm(30))');
         await status(reading.jobId,'playing');
-        await act(reading.jobId,'maximize');
-        const task=await waitFor('janela individual',()=>locate(base+'task.html?jobId='+reading.jobId));
-        const taskSession=await attach(task.targetId);
-        const taskEval=expression=>evaluate(taskSession,expression);
-        await waitFor('card na janela individual',()=>taskEval(`document.querySelectorAll('.fm-global-card').length===1`));
+        await click(card(reading.jobId,'maximize'),content);
+        const taskRoot='document.querySelector("#ext-tts-stt-task-host")?.shadowRoot';
+        const taskEval=expression=>content(expression.replace('globalThis.fixtureHud',taskRoot));
+        await waitFor('card na tarefa flutuante',()=>content(`!!(${taskRoot})?.querySelector('[data-task-id="${reading.jobId}"] .fm-global-card')`));
         await volume(`[data-job-id="${reading.jobId}"] [data-card-control="volume"]`,'.35',taskEval);
         await volume('[data-control="playbackRate"]','1.4',popupEval);
         const adjusted=async()=>{
@@ -1186,8 +1226,7 @@ x.XSync(d,0); x.XCloseDisplay(d)
         };
         await waitFor('volume e velocidade do card',adjusted);
         await selectAgent(popupEval,'#agent','translator');
-        await waitFor('agente do popup sincronizado no HUD',async()=>await content('fixtureActiveAgent()')==='translator'&&
-            await content(`fixtureHud.querySelector('${hudAgent}').value`)==='translator');
+        await waitFor('agente do popup sincronizado no HUD',async()=>await content('fixtureActiveAgent()')==='translator');
         await click(card(reading.jobId,'playPause'),taskEval);
         const paused=await status(reading.jobId,'paused');
         assert.equal(await adjusted(),true,'trocar agente não redefine controles da narração aberta');
@@ -1201,13 +1240,14 @@ x.XSync(d,0); x.XCloseDisplay(d)
         assert.equal(await waitFor('setup da voz do popup',()=>wireVoice(1)),'Charon');
         await audioEval("fixtureTurns[1].receive({...fixturePcm(.25),turnComplete:true,interactionStatus:'IDLE'})");
         await status(fromPopup,'completed');
-        await status(reading.jobId,'paused');
+        await status(reading.jobId,'playing');
         await click(card(reading.jobId,'stop'),taskEval);
         await status(reading.jobId,'cancelled');
         assert.equal((await job(reading.jobId)).text,text);
-        await call('Target.closeTarget',{targetId:task.targetId});
+        await click(`[data-task-id="${reading.jobId}"] .fm-task-close`,taskEval);
         await waitFor('cache e documento liberados após a última narração',async()=>!await locate(base+'offscreen.html'));
 
+        await click('[data-tab="agents"]',optionsEval);
         await selectAgent(optionsEval,'#agentSelect','audit-voice');
         await click('[data-open-mode="tts"]',optionsEval);
         await optionsEval(`(() => {
@@ -1228,7 +1268,7 @@ x.XSync(d,0); x.XCloseDisplay(d)
         await click('#liveStop',optionsEval);
         await waitFor('prévia parada',()=>optionsEval('livePreview===null'));
         await evaluate(worker,'chrome.storage.local.set('+JSON.stringify({agents:original})+')');
-        console.log('TTS no Chrome: voz efetiva do HUD, popup e Opções; volume, velocidade, Pause e Resume sincronizados com a janela individual');
+        console.log('TTS no Chrome: voz efetiva do HUD, popup e Opções; volume, velocidade, Pause e Resume sincronizados com a tarefa flutuante');
     }
 
     async function testPanic(secondContent){

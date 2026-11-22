@@ -154,7 +154,7 @@ const GLASS_SKIN_CSS=String.raw`
   function can(job,action){const c=job.controls;return Array.isArray(c)?c.includes(action):!!(c&&c[action]);}
   function audioJob(job){return job?.type==='STT'?{...job,type:'TTS',status:'ready',progress:{},pausedAt:0,error:undefined,warning:undefined,...job.narration}:job;}
   function audioAvailable(job){return job?.type==='TTS'||['ready','completed','cancelled','error'].includes(job?.status);}
-  function availableText(job){return text(job.text)||text(job.partialText);}
+  function availableText(job){return text(job.text)||text(job.previewText??job.partialText);}
   function seekReason(job,delta){job=audioAvailable(job)?audioJob(job):null;if(job?.type!=='TTS')return 'Selecione uma narração TTS para navegar.';if(!can(job,'seek')||!(job.progress?.availableEnd>0))return 'PCM desta reprodução indisponível; inicie ou aguarde o áudio.';const p=job.progress;if(delta<0&&p.currentTime<=p.availableStart)return 'Início do PCM retido alcançado (até 60 s de retrocesso).';if(delta>0&&p.currentTime>=p.availableEnd)return 'Fim do PCM recebido; aguarde mais áudio ou retroceda.';return '';}
   function progressLabel(progress){
     if(typeof progress==='number'&&Number.isFinite(progress))return `${Math.round(Math.min(1,Math.max(0,progress))*100)}%`;
@@ -202,24 +202,25 @@ const GLASS_SKIN_CSS=String.raw`
     const panic=element('button','fm-global-panic',options.embedded?'■':'🛑');
     panic.type='button';panic.title='Parar todas as operações';
     panic.setAttribute('aria-label',panic.title);panic.dataset.action='panic';
-    let panicSending=false,panicAwaiting=false;
+    let panicSending=false,panicNoticePending=false,panicDeadline;
     function renderPanic(){
-      const closing=state.jobs.some(job=>job.status==='cancelling'||job.narration?.status==='cancelling');
-      panic.setAttribute('aria-busy',String(panicSending||closing||panicAwaiting));
-      if(panicSending||closing||panicAwaiting)setText(panicNotice,'Encerrando operações…');
-      else if(panicNotice.textContent==='Encerrando operações…')setText(panicNotice,'');
+      const pending=state.jobs.some(job=>job.panicPending||job.status==='cancelling'||job.narration?.status==='cancelling');
+      panic.setAttribute('aria-busy',String(panicSending));
+      setText(panicNotice,panicSending?'Encerrando operações…':pending||panicNoticePending?'Parada pendente de confirmação.':'');
     }
     if(options.panicContainer||options.surface==='popup'){
       (options.panicContainer||toolbar).append(panic);
       panic.onclick=async event=>{
         event.stopPropagation();
         if(panicSending)return;
-        panicSending=true;panicAwaiting=false;renderPanic();
+        panicSending=true;panicNoticePending=false;renderPanic();
         try{
-          const result=await request('HUD_GLOBAL_PANIC');
-          panicAwaiting=result.remoteStopped===false;
-        }catch(error){setText(panicNotice,error.message);}
-        finally{panicSending=false;renderPanic();}
+          const result=await Promise.race([request('HUD_GLOBAL_PANIC'),new Promise((_,reject)=>{
+            panicDeadline=setTimeout(()=>reject(Error('Parada sem confirmação.')),6500);
+          })]);
+          panicNoticePending=result.remoteStopped===false&&!state.jobs.some(job=>job.panicPending);
+        }catch{panicNoticePending=true;}
+        finally{clearTimeout(panicDeadline);panicSending=false;renderPanic();}
       };
     }
     async function ui(payload,button){
@@ -311,7 +312,7 @@ const GLASS_SKIN_CSS=String.raw`
         finally{card.busy.delete(action);if(!destroyed&&cards.has(id))renderCard(card,card.job);}
       }
       async function copy(partialOnly=false){
-        const content=partialOnly?text(card.job.partialText):card.dirty?card.editor.value:card.job.type==='STT'?card.job.workingText??[card.job.text,card.job.partialText].filter(Boolean).join(' '):!card.editor.hidden?card.editor.value:availableText(card.job),action=partialOnly?'copyPartial':'copy';
+        const content=partialOnly?text(card.job.previewText??card.job.partialText):card.dirty?card.editor.value:card.job.type==='STT'?card.job.workingText??[card.job.text,card.job.partialText].filter(Boolean).join(' '):!card.editor.hidden?card.editor.value:availableText(card.job),action=partialOnly?'copyPartial':'copy';
         if(!content||card.busy.has(action)||destroyed)return;
         card.busy.add(action);renderCard(card,card.job);
         try{
@@ -375,8 +376,8 @@ const GLASS_SKIN_CSS=String.raw`
       const source=job.origin||{};setText(card.origin,number(source.tabId)!==null&&source.tabId>0?`Origem: aba ${source.tabId}${number(source.frameId)!==null&&source.frameId!==0?' · frame '+source.frameId:''}`:'Origem: painel da extensão');if(options.jobId)setText(card.origin,card.origin.textContent+' · Agente: '+text(job.agentId)+' · Criado: '+(Number.isFinite(job.createdAt)?new Date(job.createdAt).toLocaleString('pt-BR'):'—')+' · ID: '+job.jobId);
       if(!card.metrics){setText(card.progress,progressLabel(job.narration?.progress||job.progress));card.progress.hidden=!card.progress.textContent;}
       setText(card.label,job.source==='translation'?'Tradução (PT-BR)':job.type==='TTS'?'Texto da narração':'Transcrição confirmada');setText(card.body,text(job.text));card.body.hidden=card.label.hidden=!job.text;
-      setText(card.partial,text(job.partialText));card.partial.hidden=card.partialLabel.hidden=!job.partialText;
-      if(card.transcript){card.transcript.hidden=!job.text&&!job.partialText;renderHudMetrics(card,job);}
+      const preview=text(job.previewText??job.partialText);setText(card.partial,preview);card.partial.hidden=card.partialLabel.hidden=!preview;
+      if(card.transcript){card.transcript.hidden=!job.text&&!preview;renderHudMetrics(card,job);}
       card.editor.hidden=!(job.manual||options.jobId);card.editor.disabled=!can(job,'edit');if(!card.dirty){card.editBase=text(job.type==='STT'?job.workingText??job.text:job.text);if(card.editor.value!==card.editBase)card.editor.value=card.editBase;}if(job.type==='STT')card.editor.setAttribute('aria-label','Cópia de trabalho (não altera transcrição nem texto inserido)');else card.editor.setAttribute('aria-label','Texto da narração');if(!card.editor.hidden&&job.type==='TTS'){card.body.hidden=true;if(card.transcript)card.transcript.hidden=true;}
       const collapsed=job.collapsed===true&&!options.jobId;card.node.dataset.collapsed=String(collapsed);card.detail.hidden=collapsed;card.origin.hidden=options.embedded||collapsed;card.progress.hidden=collapsed||(card.metrics?card.progress.hidden:!card.progress.textContent);card.actions.hidden=collapsed;card.summary.hidden=true;card.feedback.hidden=collapsed;
       if(card.waveform){
@@ -413,6 +414,7 @@ const GLASS_SKIN_CSS=String.raw`
       const nextRevision=number(next.revision);if(nextRevision!==null&&nextRevision<=revision)return false;
       if(nextRevision!==null)revision=nextRevision;
       state={...next,visible:options.taskOverlay||!!next.visible,minimized:!options.taskOverlay&&!!next.minimized,jobs:Array.isArray(next.jobs)?[...next.jobs].sort((a,b)=>(b.createdAt||0)-(a.createdAt||0)||b.jobId.localeCompare(a.jobId)):[]};
+      if(!state.jobs.some(job=>job.panicPending||job.status==='cancelling'||job.narration?.status==='cancelling'))panicNoticePending=false;
       if(typeof next.notice==='string'&&next.noticeId&&next.noticeId!==seenNoticeId){seenNoticeId=next.noticeId;setText(localNotice,next.notice);clearTimeout(noticeTimer);noticeTimer=setTimeout(()=>{if(localNotice.textContent===next.notice)setText(localNotice,'');},5000);}
       renderPanic();
       root.hidden=options.panel?false:!state.visible;root.dataset.minimized=String(!options.panel&&!options.embedded&&!options.jobId&&state.minimized);
@@ -425,6 +427,14 @@ const GLASS_SKIN_CSS=String.raw`
       for(const job of visibleJobs){if(!job||typeof job.jobId!=='string'||present.has(job.jobId)||(options.jobId?job.jobId!==options.jobId:job.hidden))continue;present.add(job.jobId);let card=cards.get(job.jobId);if(!card){card=createCard(job.jobId);cards.set(job.jobId,card);}card.node.hidden=false;renderCard(card,job);if(list.children[position]!==card.node)list.insertBefore(card.node,list.children[position]||null);position++;}
       for(const[id,card]of cards)if(!present.has(id)){if(card.dirty){card.node.hidden=true;setText(card.feedback,'Edição local não salva preservada. Copie o texto antes de fechar.');card.feedback.hidden=false;}else{card.node.remove();cards.delete(id);}}
       empty.hidden=present.size>0;setText(heading,`Tarefas globais (${present.size})`);
+      if(!root.hidden&&globalThis.FalaDiagnostics?.mode!=='off'&&globalThis.FalaDiagnostics){
+        for(const id of present){
+          const card=cards.get(id),job=card.job;
+          if(card.firstTextRendered||job.type!=='STT'||!availableText(job)||!card.description.getClientRects?.().length)continue;
+          card.firstTextRendered=true;
+          globalThis.FalaDiagnostics.event({component:'stt',category:'lifecycle',stage:'stt-first-card',jobId:id,details:{timelineAt:Date.now(),revision:job.eventSeq}});
+        }
+      }
       renderPlayer();
       if(typeof options.onState==='function')options.onState(state);
       return true;

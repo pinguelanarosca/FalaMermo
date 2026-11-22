@@ -214,11 +214,11 @@ test('botão Parar do HUD finaliza STT ativo; não apenas TTS',()=>{
 function offscreenEnv(acquire,deliver){const events=[],attempts=[],timers=new Map(),diagnostics=[];let listener,id=0,clock=0;const retired=[];
  const context=vm.createContext({console,performance:{now:()=>clock},structuredClone,AbortController,Uint8Array,performance,setTimeout(fn,ms){timers.set(++id,{fn,ms,at:clock+ms});return id;},clearTimeout:i=>timers.delete(i),SttScheduler:require('../stt-scheduler.js'),LiveConfig:config,LiveSessions:{classifyLiveError:sessions.classifyLiveError,decodeBase64:sessions.decodeBase64,LiveSessionManager:class{async acquire(o){attempts.push(o);return acquire(o);}retire(s){retired.push(s);}release(){}}},chrome:{runtime:{getURL:x=>x,onMessage:{addListener:fn=>listener=fn},sendMessage:m=>{events.push(m.payload);return Promise.resolve();}}}});
  const recovery=new Map();context.SttRecovery={async start(jobId){if(recovery.has(jobId))throw Error('duplicate recovery');recovery.set(jobId,{packets:[],state:'recording'});},async append(jobId,p){recovery.get(jobId).packets.push({pcm:p.pcm.slice(),chunk:{...p.chunk}});},async update(jobId,patch){Object.assign(recovery.get(jobId)||{},patch);}};context.SttRealtime=require('../stt-realtime.js');context.LiveSttDiagnostics={emit:p=>diagnostics.push(p)};
- const runtimeSend=context.chrome.runtime.sendMessage;context.chrome.runtime.sendMessage=message=>message.type==='LIVE_OFFSCREEN_EVENT'?runtimeSend(message).then(()=>deliver?.(message.payload)):Promise.resolve();
+ const runtimeSend=context.chrome.runtime.sendMessage;context.chrome.runtime.sendMessage=message=>message.type==='LIVE_OFFSCREEN_EVENT'?runtimeSend(message).then(()=>deliver?deliver(message.payload):{success:true,jobId:message.payload?.jobId??null,eventSeq:message.payload?.eventSeq??null,result:'applied'}):Promise.resolve();
  vm.runInContext(fs.readFileSync(require.resolve('../offscreen.js'),'utf8'),context);
  return{events,attempts,retired,timers,diagnostics,recovery,recoveryService:context.SttRecovery,command:p=>new Promise(r=>listener({type:'LIVE_OFFSCREEN_COMMAND',target:'offscreen',payload:p},{},r)),expire(){for(const [id,t]of [...timers]){timers.delete(id);t.fn();}},async advance(ms){const end=clock+ms;let count=0;for(;;){const next=[...timers].filter(([,t])=>t.at<=end).sort((a,b)=>a[1].at-b[1].at)[0];if(!next)break;assert.ok(++count<1000,'timers devem ser finitos');const [id,timer]=next;timers.delete(id);clock=timer.at;timer.fn();await flush();}clock=end;}};
 }
-const base={jobId:'test',modelId:'gemini-3.8-live',operation:'STT_LIVE_START',apiKeys:['fake-only']};
+const base={jobId:'test',modelId:config.DEFAULTS.sttModelId,operation:'STT_LIVE_START',apiKeys:['fake-only']};
 function preferenceFlow({mode='realtime',legacyMode,distributed=false}={}){
  const e=contentEnv({diagnostics:true}),raw={ui:{dictationInsertion:mode,theme:'dark',shortcuts:{startDictation:'Pause'}},api:{apiKeys:Array.from({length:9},(_,i)=>'unit-account-'+i)},agents:{activeAgentId:'custom',customAgents:[{metadata:{id:'custom',isBuiltIn:false},instructions:{sttFormattingInstruction:'Preserve o sentido da fala e pontue o texto público.'},live:{preferredModel:'gemini-3.8-live',stt:{transform:true,preferredModel:'gemini-3.8-live'}}}]},history:{enabled:false,recentItems:[]},...(legacyMode?{uiPreferences:{dictationInsertion:legacyMode,theme:'dark',shortcuts:{startDictation:'Pause'}}}:{})};
  const changes=new Set(),sessionStore={},deliveries=[],routed=[],liveSessions=[];let router;
@@ -247,7 +247,7 @@ test('STT distribuído fixa o reconhecimento nas nove contas até o próximo dit
   const request=(type,payload)=>e.runtime.sendMessage({type,payload});
   assert.equal((await request('STT_RECOGNITION_SAVE',first)).success,false,'páginas não podem alterar reconhecimento');
   assert.equal((await flow.saveRecognition(first)).success,true);
-  async function dictate(jobId,blocks,preferences,expectedHints){
+  async function dictate(jobId,blocks,expectedHints){
    const start=await request('STT_LIVE_START',{jobId,agentId:'narrator',distributed:true,chunked:true,realtime:mode==='realtime'});
    assert.equal(start.success,true,start.error);
    let packetSequence=0;
@@ -264,9 +264,10 @@ test('STT distribuído fixa o reconhecimento nas nove contas até o próximo dit
     for(const lane of lanes()){
      const setup=config.buildLiveSttSessionConfig(lane.options).setup;
      assert.deepEqual(setup.inputAudioTranscription,expectedHints);
-     assert.ok(setup.systemInstruction.parts[0].text.startsWith(preferences.instructions));
+     assert.equal(setup.systemInstruction,undefined);
     }
-    lanes()[1].live.handler({serverContent:{inputTranscription:{text:'Bloco '+sequence+'.',finished:true}}});
+    lanes()[1].live.handler({serverContent:{inputTranscription:{text:'Bloco '+sequence+'.'}}});
+    await offscreen.advance(900);
     if(blocks>1&&sequence===1)assert.equal((await flow.saveRecognition(next)).success,true);
    }
    assert.equal((await request('HUD_CAPTURE_STATE',{jobId,status:'waiting',microphoneReleased:true})).success,true);
@@ -276,9 +277,9 @@ test('STT distribuído fixa o reconhecimento nas nove contas até o próximo dit
     Array.from({length:blocks},(_,index)=>'Bloco '+(index+1)+'.').join(' '));
   }
   const firstJob='00000000-0000-4000-8000-000000000001',nextJob='00000000-0000-4000-8000-000000000002';
-  await dictate(firstJob,5,first,{languageCodes:['pt-BR'],customVocabulary:['FalaMermo','Kubernetes']});
+  await dictate(firstJob,5,{languageCodes:['pt-BR'],mode:'VERBATIM',customVocabulary:['FalaMermo','Kubernetes']});
   assert.equal(new Set(liveSessions.filter(lane=>lane.options.jobId===firstJob).map(lane=>lane.options.keyIndex)).size,9);
-  await dictate(nextJob,1,next,{customVocabulary:['OpenTelemetry']});
+  await dictate(nextJob,1,{languageCodes:[],mode:'VERBATIM',customVocabulary:['OpenTelemetry']});
   const restored=await flow.saveRecognition({restoreInstructions:true});
   assert.equal(restored.success,true);
   assert.deepEqual(flow.raw.sttRecognition,{...next,instructions:config.STT_DEFAULT_INSTRUCTIONS});
@@ -371,7 +372,7 @@ test('timeout de bloco é aviso; socket 429 continua fatal sem replay e conserva
 });
 test('offscreen: final e realtime recebem parciais antes do Stop, mesma sessão, transformação suspensa só realtime',async()=>{
  for(const realtime of [false,true]){let ended=0;const transformed=[],session={id:'live-1793242000000-test',sendAudio(){},endAudio(){ended++;}},agentSession={async sendTurn(text){transformed.push(text);return{text:'Texto transformado.'};}},e=offscreenEnv(async o=>o.mode==='agent'?agentSession:session),p={...base,jobId:'00000000-0000-4000-8000-000000000000',chunked:true,realtime,transformInstruction:'Instrução pública.'};
- const started=await e.command(p);assert.equal(started.success,true);assert.equal(started.transform,!realtime);assert.equal(e.attempts[0].vad.disabled,true);
+ const started=await e.command(p);assert.equal(started.success,true);assert.equal(started.transform,!realtime);assert.equal(config.buildLiveSttSessionConfig(e.attempts[0]).setup.realtimeInputConfig.automaticActivityDetection.disabled,true);
  const packets=[],pipeline=new (require('../stt-realtime.js').CapturePipeline)({jobId:p.jobId,realtime:true,submitAudioChunk:x=>packets.push(x)}),pcm=voicePcm();pipeline.push(pcm);for(let i=0;i<5;i++)pipeline.push(new Uint8Array(3200));
  for(const packet of packets)assert.equal((await e.command({...p,operation:'STT_LIVE_AUDIO',chunk:packet.chunk,endOnly:packet.endOnly,audioBase64:Buffer.from(packet.pcm).toString('base64')})).success,true);
  assert.equal(ended,1);session.handler({serverContent:{inputTranscription:{text:'Ditado público.',finished:true}}});await flush();assert.ok(e.events.some(x=>x.event==='stt-partial'&&x.text==='Ditado público.'));assert.equal(e.events.some(x=>x.event==='stt-final'),false);assert.equal(e.attempts.length,1);
@@ -381,7 +382,7 @@ test('offscreen: final e realtime recebem parciais antes do Stop, mesma sessão,
 test('Stop com fila de blocos conserva só deadline por bloco, sem timeout global prematuro ou nova sessão',async()=>{
  const session={sendAudio(){},endAudio(){}},e=offscreenEnv(async()=>session),p={...base,chunked:true};await e.command(p);const packets=[],pipeline=new(require('../stt-realtime.js').CapturePipeline)({jobId:p.jobId,realtime:true,submitAudioChunk:x=>packets.push(x)}),pcm=voicePcm();
  for(let n=0;n<3;n++){pipeline.push(pcm);for(let i=0;i<5;i++)pipeline.push(new Uint8Array(3200));}for(const packet of packets)await e.command({...p,operation:'STT_LIVE_AUDIO',chunk:packet.chunk,endOnly:packet.endOnly,audioBase64:Buffer.from(packet.pcm).toString('base64')});await e.command({...p,operation:'STT_LIVE_STOP'});
- assert.equal([...e.timers.values()].filter(t=>t.ms===15000).length,4,'três avisos de bloco e um deadline somente após Stop');for(const text of ['Um.',' Dois.',' Três.']){session.handler({serverContent:{inputTranscription:{text,finished:true}}});await flush();}await e.advance(15001);assert.equal(e.events.find(x=>x.event==='stt-final')?.text,'Um. Dois. Três.');assert.equal(e.attempts.length,1);assert.equal(e.retired.length,1);assert.equal(e.events.some(x=>x.event==='stt-error'),false);assert.equal(e.events.find(x=>x.event==='stt-final').incomplete,true);
+ assert.equal([...e.timers.values()].filter(t=>t.ms===15000).length,4,'três avisos de bloco e um deadline somente após Stop');for(const text of ['Um.',' Dois.',' Três.']){session.handler({serverContent:{inputTranscription:{text,finished:true}}});await flush();}await e.advance(15001);assert.equal(e.events.find(x=>x.event==='stt-final')?.text,'Um. Dois. Três.');assert.equal(e.attempts.length,1);assert.equal(e.retired.length,1);assert.equal(e.events.some(x=>x.event==='stt-error'),false);assert.equal(e.events.find(x=>x.event==='stt-final').incomplete,false);
 });
 test('turnComplete sem transcript não fecha antes de inputTranscription independente',async()=>{
  const session={sendAudio(){},endAudio(){}},e=offscreenEnv(async()=>session);await e.command(base);await e.command({...base,operation:'STT_LIVE_AUDIO',audioBase64:'AAA=',sampleRate:16000});await e.command({...base,operation:'STT_LIVE_STOP'});
@@ -389,9 +390,9 @@ test('turnComplete sem transcript não fecha antes de inputTranscription indepen
  for(const [id,timer]of [...e.timers])if(timer.ms<=900){e.timers.delete(id);timer.fn();}await flush();assert.equal(e.retired.length,0);assert.equal(e.events.some(x=>x.event==='stt-error'),false);
  session.handler({serverContent:{inputTranscription:{text:'Teste de ditado.'}}});e.expire();await flush();assert.equal(e.events.find(x=>x.event==='stt-final')?.text,'Teste de ditado.');
 });
-test('inputTranscription independente de turnComplete aguarda conclusão sem fechar em 900 ms',async()=>{
+test('dois segmentos finais são aceitos sem turnComplete na janela de acomodação',async()=>{
  const session={sendAudio(){},endAudio(){}},e=offscreenEnv(async()=>session);await e.command(base);await e.command({...base,operation:'STT_LIVE_AUDIO',audioBase64:'AAA='});await e.command({...base,operation:'STT_LIVE_STOP'});
- session.handler({serverContent:{inputTranscription:{text:'Teste'}}});await flush();assert.ok([...e.timers.values()].every(t=>t.ms===15000||t.ms===250));session.handler({serverContent:{inputTranscription:{text:' de ditado.'},turnComplete:true}});e.expire();await flush();assert.equal(e.events.find(x=>x.event==='stt-final').text,'Teste de ditado.');
+ session.handler({serverContent:{inputTranscription:{text:'Teste'}}});await flush();assert.ok([...e.timers.values()].some(t=>t.ms===900));session.handler({serverContent:{inputTranscription:{text:'de ditado.'}}});e.expire();await flush();assert.equal(e.events.find(x=>x.event==='stt-final').text,'Teste de ditado.');
 });
 test('interim isolado não é promovido a final e timeout não anuncia ausência de PCM',async()=>{
  const session={sendAudio(){},endAudio(){}},e=offscreenEnv(async()=>session);await e.command(base);await e.command({...base,operation:'STT_LIVE_AUDIO',audioBase64:'AAA='});session.handler({serverContent:{interimInputTranscription:{text:'provisório'}}});await e.command({...base,operation:'STT_LIVE_STOP'});e.expire();await flush();assert.equal(e.events.some(x=>x.event==='stt-final'),false);assert.match(e.events.find(x=>x.event==='stt-error').error,/provisória|parcial/i);
@@ -551,28 +552,44 @@ test('navegação invalida alvo, finaliza áudio já capturado e não insere em 
 test('cancelamento global individual limpa job antigo sem parar captura posterior ou reinserir final',async()=>{
  const e=contentEnv();await e.stt.startLiveRecording('narrator');const jobId=e.stt.liveJobId,generation=e.stt.liveGeneration;e.nodes[0].port.onmessage({data:voiceFrame().buffer});await e.stt.stopLiveRecording();e.doc.activeElement=e.other;await e.stt.startLiveRecording('narrator');const latest=e.stt.liveJobId;await e.stt.handleLiveEvent({jobId,generation,event:'stt-cancelled'});await e.stt.handleLiveEvent({jobId,generation,event:'stt-final',text:'não inserir'});assert.equal(e.input.value,'original');assert.equal(e.other.value,'outro');assert.equal(e.stt.liveJobId,latest);assert.equal(e.streams[1].track.stopped,false);assert.equal(e.stt.getJobState(jobId).status,'cancelled');e.stt.cancelRecording();await flush();
 });
-test('Extended STT aguarda IDLE sem fechar durante IN_PROGRESS',async()=>{
- const session={endAudio(){}},e=offscreenEnv(async()=>session),payload={...base,modelId:'gemini-3.8-live-extended-thinking'};await e.command(payload);
- session.handler({serverContent:{inputTranscription:{text:'Teste de ditado.'},interactionStatus:'IN_PROGRESS'}});await e.command({...payload,operation:'STT_LIVE_STOP'});
- session.handler({serverContent:{turnComplete:true,interactionStatus:'IN_PROGRESS'}});assert.equal(e.events.some(x=>x.event==='stt-final'),false);assert.equal(e.retired.length,0);await flush();assert.ok([...e.timers.values()].every(x=>x.ms===90000||x.ms===250));
- session.handler({serverContent:{interactionStatus:'IDLE'}});e.expire();await flush();assert.equal(e.events.find(x=>x.event==='stt-final').text,'Teste de ditado.');assert.equal(e.retired.length,1);
+test('Extended não abre sessão na rota STT',async()=>{
+ const e=offscreenEnv(async()=>{throw Error('não deve conectar');});
+ const result=await e.command({...base,modelId:config.DEFAULTS.lensModelId});
+ assert.equal(result.success,false);assert.equal(e.attempts.length,0);
 });
-test('compatibilidade STT Extended sem chunks: IN_PROGRESS/IDLE nunca arma deadline de sessão antes de Stop',async()=>{
- for(const idle of [false,true]){const session={sendAudio(){},endAudio(){}},e=offscreenEnv(async()=>session),payload={...base,modelId:'gemini-3.8-live-extended-thinking',realtime:false};await e.command(payload);await e.command({...payload,operation:'STT_LIVE_AUDIO',audioBase64:'AAA='});session.handler({serverContent:{inputTranscription:{text:'Fala anterior.',finished:true},interactionStatus:'IN_PROGRESS'}});if(idle)session.handler({serverContent:{interactionStatus:'IDLE'}});await e.advance(180000);await flush();assert.equal(e.events.some(p=>p.event==='stt-final'||p.event==='stt-error'),false,'estado interno do turno não pode finalizar a sessão de captura');assert.equal(e.retired.length,0);assert.equal((await e.command({operation:'GLOBAL_JOBS_SNAPSHOT'})).activeJobIds.includes(payload.jobId),true);await e.command({...payload,operation:'STT_LIVE_STOP'});session.handler({serverContent:{interactionStatus:'IDLE'}});await e.advance(900);await flush();assert.equal(e.events.find(p=>p.event==='stt-final')?.text,'Fala anterior.');assert.equal(e.retired.length,1);}
+test('atividade do modelo não arma deadline para a captura Transcribe',async()=>{
+ const session={sendAudio(){},endAudio(){}},e=offscreenEnv(async()=>session);
+ await e.command(base);await e.command({...base,operation:'STT_LIVE_AUDIO',audioBase64:'AQA='});
+ session.handler({serverContent:{inputTranscription:{text:'Fala anterior.'}}});
+ session.handler({serverContent:{interactionStatus:'IDLE',turnComplete:true}});
+ await e.advance(180000);assert.equal(e.events.some(p=>p.event==='stt-final'||p.event==='stt-error'),false);
+ assert.equal(e.retired.length,0);
+ await e.command({...base,operation:'STT_LIVE_STOP'});e.expire();await flush();
+ assert.equal(e.events.find(p=>p.event==='stt-final')?.text,'Fala anterior.');
 });
-test('STT completo esgota nove chaves em cada modelo e não tenta unary/Translate',async()=>{
- const e=offscreenEnv(async()=>{throw Error('Quota exceeded');}),result=await e.command({...base,apiKeys:Array.from({length:9},(_,i)=>'fake-'+i),models:[...config.LIVE_MODEL_PRIORITY].reverse().concat('gemini-3.8-flash-tts','gemini-3.5-live-translate-preview')});assert.equal(result.success,false);assert.deepEqual(e.attempts.map(o=>[o.modelId,o.keyIndex]),config.LIVE_MODEL_PRIORITY.flatMap(model=>Array.from({length:9},(_,i)=>[model,i+1])));
+test('STT esgota até nove chaves e mantém o modelo Transcribe',async()=>{
+ const e=offscreenEnv(async()=>{throw Error('Quota exceeded');}),result=await e.command({...base,apiKeys:Array.from({length:9},(_,i)=>'fake-'+i),models:[...config.LIVE_MODEL_PRIORITY].reverse().concat('gemini-3.8-flash-tts','gemini-3.5-live-translate-preview')});assert.equal(result.success,false);assert.deepEqual(e.attempts.map(o=>[o.modelId,o.keyIndex]),Array.from({length:9},(_,i)=>[base.modelId,i+1]));
 });
-test('STT nativo acumula inputTranscription parcial/final, ignora output/PCM e não cria player',async()=>{
- const session={sendAudio(){},endAudio(){}},e=offscreenEnv(async()=>session);assert.equal((await e.command(base)).success,true);
- session.handler({serverContent:{inputTranscription:{text:'Olá'}}});session.handler({serverContent:{inputTranscription:{text:' mundo'},outputTranscription:{text:'NÃO inserir'},modelTurn:{parts:[{inlineData:{data:'AAA='}}]}}});await flush();assert.equal(e.events.filter(x=>x.event==='stt-partial').at(-1).text,'Olá mundo');
- await e.command({...base,operation:'STT_LIVE_STOP'});session.handler({serverContent:{turnComplete:true}});e.expire();await flush();assert.equal(e.events.find(x=>x.event==='stt-final').text,'Olá mundo');assert.equal(e.events.some(x=>/play|pcm/.test(x.event)),false);assert.equal(e.retired.length,1);
+test('STT ignora output/PCM e confirma segmentos após setup e envio de áudio',async()=>{
+ const session={sendAudio(){},endAudio(){}},e=offscreenEnv(async()=>session);
+ assert.equal((await e.command(base)).success,true);
+ session.handler({serverContent:{inputTranscription:{text:'Histórico sem áudio'}}});
+ await e.command({...base,operation:'STT_LIVE_AUDIO',audioBase64:'AQA='});
+ session.handler({serverContent:{interimInputTranscription:{text:'Ol'}}});
+ session.handler({serverContent:{inputTranscription:{text:'Olá'}}});
+ session.handler({serverContent:{inputTranscription:{text:'mundo'},outputTranscription:{text:'Não inserir'},modelTurn:{parts:[{inlineData:{data:'AAA='}}]}}});
+ await flush();assert.equal(e.events.filter(x=>x.event==='stt-partial').at(-1).partialText,'Ol');
+ await e.command({...base,operation:'STT_LIVE_STOP'});e.expire();await flush();
+ assert.equal(e.events.find(x=>x.event==='stt-final').text,'Olá mundo');
+ assert.equal(e.events.some(x=>/play|pcm/.test(x.event)),false);assert.equal(e.retired.length,1);
 });
-test('fallback STT esgota nove chaves por modelo e respeita modelos compatíveis',async()=>{
- const e=offscreenEnv(async o=>{if(o.modelId===base.modelId)throw Error('Quota exceeded');return{endAudio(){}};});assert.equal((await e.command({...base,apiKeys:Array.from({length:9},(_,i)=>'fake-'+i),models:[base.modelId,'gemini-3.5-transcribe-live','gemini-3.5-flash-lite','gemini-3.5-live-translate-preview','gemini-3.8-live-extended-thinking']})).success,true);
- assert.deepEqual(e.attempts.map(o=>[o.modelId,o.keyIndex]),[...Array.from({length:9},(_,i)=>[base.modelId,i+1]),['gemini-3.8-live-extended-thinking',1]]);await e.command({...base,operation:'STT_LIVE_CANCEL'});
+test('STT troca de chave quando uma conta falha e mantém o modelo',async()=>{
+ const e=offscreenEnv(async o=>{if(o.keyIndex===1)throw Error('Quota exceeded');return{endAudio(){}};});
+ assert.equal((await e.command({...base,apiKeys:['fake-first','fake-second'],models:[config.DEFAULTS.lensModelId]})).success,true);
+ assert.deepEqual(e.attempts.map(o=>[o.modelId,o.keyIndex]),[[base.modelId,1],[base.modelId,2]]);
+ await e.command({...base,operation:'STT_LIVE_CANCEL'});
 });
-test('offscreen não abre sessão especializada mesmo em payload antigo direto',async()=>{const e=offscreenEnv(async()=>{throw Error('não deve conectar');}),result=await e.command({...base,modelId:'gemini-3.5-transcribe-live',models:['gemini-3.5-transcribe-live']});assert.equal(result.success,false);assert.equal(e.attempts.length,0);});
+test('offscreen rejeita modelo STT antigo mesmo quando enviado diretamente',async()=>{const e=offscreenEnv(async()=>{throw Error('não deve conectar');}),result=await e.command({...base,modelId:'gemini-3.8-live',models:['gemini-3.8-live']});assert.equal(result.success,false);assert.equal(e.attempts.length,0);});
 test('cancelamento STT durante acquire retira sessão tardia e não anuncia setup',async()=>{
  const pending=deferred(),session={},e=offscreenEnv(()=>pending.promise),started=e.command(base);for(let n=0;n<1000&&!e.attempts.length;n++)await flush();assert.equal(e.attempts.length,1);await e.command({...base,operation:'STT_LIVE_CANCEL'});pending.resolve(session);assert.equal((await started).success,false);await flush();assert.equal(e.retired[0],session);assert.equal(e.events.some(x=>x.event==='setup-complete'),false);
 });

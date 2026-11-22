@@ -2,17 +2,17 @@
 
 Extensão Chrome Manifest V3 para narração, ditado e seleção visual com Gemini, agentes personalizados e HUD na página.
 
-FalaMermo v1.0.9 publica o HUD Glass, com barra compacta, transparências independentes, tamanho global persistente, apresentação local por aba e tarefas flutuantes dentro da página. A versão do manifesto é `1.0.9`; ZIP e checksum acompanham a [release v1.0.9](https://github.com/pinguelanarosca/FalaMermo/releases/tag/v1.0.9).
+FalaMermo v1.0.10 reduz a espera pelas primeiras parciais do ditado e melhora a recuperação do STT e do comando **Parar tudo**. Consulte a [release v1.0.10](https://github.com/pinguelanarosca/FalaMermo/releases/tag/v1.0.10) para baixar o ZIP e o checksum.
 
 ## Instalação no Chrome
 
-1. Baixe e extraia `FalaMermo-v1.0.9.zip` da [release v1.0.9](https://github.com/pinguelanarosca/FalaMermo/releases/tag/v1.0.9), ou clone [este repositório](https://github.com/pinguelanarosca/FalaMermo) na branch `main`.
+1. Baixe e extraia `FalaMermo-v1.0.10.zip` da [release v1.0.10](https://github.com/pinguelanarosca/FalaMermo/releases/tag/v1.0.10), ou clone [este repositório](https://github.com/pinguelanarosca/FalaMermo) na branch `main`.
 2. Mantenha o código em uma pasta permanente. `manifest.json` deve estar diretamente nessa pasta.
 3. Abra `chrome://extensions`, ative **Modo do desenvolvedor** e escolha **Carregar sem compactação**.
 4. Selecione a pasta extraída, abra as opções da extensão e configure sua chave Gemini.
 5. Atualize as páginas que já estavam abertas. Após atualizar/recarregar a extensão, atualize também essas páginas.
 
-Não há etapa de build obrigatória. Para atualizar uma instalação descompactada, feche trabalhos ativos, atualize o código na mesma pasta já carregada e clique **Recarregar** em `chrome://extensions`. Não remova a extensão nem limpe seu armazenamento; mantenha a pasta para preservar a instalação e as preferências. Atualize também as páginas abertas. Pacotes anteriores não contêm as mudanças da v1.0.9.
+Não há etapa de build obrigatória. Para atualizar uma instalação descompactada, feche trabalhos ativos, atualize o código na mesma pasta já carregada e clique **Recarregar** em `chrome://extensions`. Não remova a extensão nem limpe seu armazenamento; mantenha a pasta para preservar a instalação e as preferências. Atualize também as páginas abertas.
 
 ## Configuração e utilização
 
@@ -20,7 +20,7 @@ Nas opções, salve sua chave Gemini e escolha o agente ativo. É possível conf
 
 - **Narração:** selecione texto na página e use o atalho ou o item direto **Narrar** no menu de contexto. HUD e popup controlam tarefas já criadas; não iniciam leitura de uma nova seleção da página.
 - **Tradução:** selecione texto e use `Alt+Shift+Y` para traduzir para PT-BR e narrar o resultado, sem substituir a seleção original. O comando é configurável em `chrome://extensions/shortcuts`. O menu de contexto mantém somente **Narrar**, diretamente.
-- **Ditado:** posicione o cursor em um campo editável, use o atalho de ditado, autorize o microfone e aguarde “Gravando” antes de falar. Use novamente o atalho ou **Parar** no cartão daquele ditado para concluir. O Gemini 3.8 Live usa VAD manual por padrão para delimitar a fala; preferências explícitas de VAD são preservadas. A inserção usa o campo/seleção original; não deve acompanhar uma mudança de foco para outro campo. Se o campo desaparecer, copie o resultado mostrado no HUD. Nas opções, o botão **Copiar diagnóstico STT** fornece contadores e estados sem exigir Console.
+- **Ditado:** posicione o cursor em um campo editável, use o atalho de ditado, autorize o microfone e aguarde “Gravando” antes de falar. Use novamente o atalho ou **Parar** no cartão daquele ditado para concluir. O Gemini 3.5 Transcribe Live recebe áudio delimitado pelo VAD Silero + TEN e devolve texto incremental em modo VERBATIM. A inserção usa o campo/seleção original; não deve acompanhar uma mudança de foco para outro campo. Se o campo desaparecer, copie o resultado mostrado no HUD. Nas opções, o botão **Copiar diagnóstico STT** fornece contadores e estados sem exigir Console.
 - **Lens:** extrai apenas o texto legível da área e o narra literalmente, preservando palavras, pontuação e quebras relevantes, sem análise da persona. Duas contas disputam a primeira resposta válida; há substituição progressiva, fallback e Stop, com uma tarefa e uma narração. Sem texto legível, o cartão informa a ausência e não gera áudio. Use o atalho Lens e selecione uma região. Quando necessário, a extensão abre sua própria interface para pedir autorização opcional de captura. A autorização exige acesso a todos os sites por uma limitação da API de captura do Chrome. Pode ser recusada ou revogada; não é concedida permanentemente na instalação. A captura depende de uma ação explícita do usuário.
 - **Personalização:** agentes compartilham identidade e mantêm instruções próprias para narração e ditado; o Lens usa um contrato fixo de OCR literal. Há configurações por modelo e editor avançado com painel, override JSON, JSON completo e preview. Parâmetros incompatíveis não devem ser enviados indiscriminadamente entre STT e TTS.
 
@@ -58,9 +58,9 @@ Trocar de aba não cancela o ditado. Navegar ou fechar a página de origem destr
 
 ### Scheduler STT por conta
 
-Jobs de ditado independentes são distribuídos entre as API keys configuradas, tratadas como recursos de contas independentes. Não há login/senha nem redistribuição dos chunks: cada job permanece na mesma sessão, modelo e conta até encerrar. Não há duplicação de áudio ou corrida do mesmo ditado entre modelos.
+O scheduler pode abrir até duas réplicas de um bloco em contas distintas. As duas recebem o mesmo PCM, e o reconciliador publica um único resultado por bloco. Cada sessão de STT usa o Gemini 3.5 Transcribe Live.
 
-Por padrão, há até nove sessões STT, uma por conta, e até nove admissões pendentes. A seleção considera ocupação, consumo/reservas estimados, número de admissões e uso recente. O scheduler preserva a preferência de modelo e tenta as contas elegíveis desse modelo antes de avançar na cadeia. Contas ocupadas aguardam admissão por até 2 s; ocupação local não faz saltar modelos. Zero-Retry impede repetir pares que falharam e replay de operações recentes.
+Por padrão, há até nove sessões STT, uma por conta, e até nove admissões pendentes. A seleção considera ocupação, consumo e reservas estimados, número de admissões e uso recente. Contas ocupadas aguardam admissão por até 2 s. O scheduler evita repetir pares que falharam e rejeita replay de operações recentes.
 
 O orçamento usa uma janela de 60 s, duração de PCM/contexto e `usageMetadata` quando recebido. Tetos conhecidos podem ser definidos pela política numérica `api.sttScheduler`; não há nova tela nem alteração automática de configurações. Sem teto conhecido, o diagnóstico indica `UNKNOWN`, mantém limites de sessões e reage a 429/cooldown — não presume TPM infinito nem promete controle exato de faturamento. Consumo de TTS, Lens e outros clientes não está integralmente incluído nesse orçamento STT.
 
@@ -76,14 +76,14 @@ São exibidos conta (`key#1`…`key#9`), modelo, jobs ativos, estimativas/observ
 
 ## Modelos e fallback
 
-TTS e STT executam exclusivamente Gemini Live por WebSocket. O catálogo geral e a prioridade padrão são:
+O STT usa `gemini-3.5-transcribe-live` por WebSocket, com português brasileiro por padrão e detecção automática opcional. O vocabulário personalizado é enviado ao reconhecimento. A prioridade do catálogo TTS é:
 
 1. `gemini-3.8-live`
 2. `gemini-3.8-live-extended-thinking`
 3. `gemini-3.1-flash-live-preview`
 4. `gemini-2.5-flash-native-audio-preview-12-2025`
 
-Uma preferência explícita válida é tentada primeiro. O fallback tenta as chaves elegíveis **no mesmo modelo antes de passar ao próximo**. Ranking oportunista e cooldowns não mudam essa regra. A disponibilidade depende do acesso da chave e do serviço; previews podem ser retirados do catálogo ao vencerem. Modelos unary, Flash TTS convencional e Transcribe especializado não são alternativas nas rotas STT/TTS. Lens mantém seu fluxo de visão próprio.
+Uma preferência explícita válida é tentada primeiro. O fallback tenta as chaves elegíveis **no mesmo modelo antes de passar ao próximo**. Ranking oportunista e cooldowns não mudam essa regra. A disponibilidade depende do acesso da chave e do serviço; previews podem ser retirados do catálogo ao vencerem. A narração usa modelos Live com saída de áudio. O ditado usa a rota Transcribe, com rotação de chaves dentro desse modelo. Lens mantém seu fluxo de visão próprio.
 
 ## Privacidade
 
@@ -107,21 +107,18 @@ O estado de sessão permite recuperar o service worker, mas não sobrevive ao re
 
 ## Limitações conhecidas
 
-- O gargalo dos pacotes STT permanece em investigação. Esta release não comprova sua correção nem anuncia ganho de latência do ditado.
 
 - A validação da v1.0.7 está registrada nas notas da release. O teste geral de controles Chrome ainda apresenta timeout ao localizar a medição diagnóstica do bloco confirmado; não há homologação completa de todo navegador, site, editor, chave e modelo.
 - O usuário confirmou o funcionamento do STT com microfone físico no Chrome após a correção de finalização do Gemini 3.8 Live. Isso não homologa todos os dispositivos, editores e ambientes. Microfone físico, inserção e cenários de reload/contexto invalidado não foram repetidos de ponta a ponta pela automação desta publicação. A referência `svg` anteriormente relatada no DevTools ainda não foi correlacionada a um stack original.
 - Depois de recarregar a extensão, um content script antigo pode perder autorização para comunicar-se. O STT trata a invalidação, libera sua captura e orienta F5; não reconecta nem recarrega páginas automaticamente. Uma página com código anterior à correção precisa ser atualizada para receber a proteção.
 - Campos removidos, editores especiais, páginas internas/restritas do Chrome e permissões recusadas podem impedir inserção/captura. Lens não funciona em todas as páginas.
 - Conectividade, cotas, permissões de modelo, latência, mudanças do serviço e encerramento de previews podem afetar o funcionamento. Não há promessa de tempo fixo ou disponibilidade de todas as chaves.
-- Gemini 3.8 Live e Extended Thinking usam VAD manual por padrão no ditado, mantendo preferências explícitas. O automático do 3.8 apresentou sessões sem transcrição em testes anteriores; uma preferência explícita automática continua sendo respeitada. Extended Thinking utiliza configuração específica de thinking; VAD automático desse modelo não foi homologado. Microfone físico não foi repetido nesta preparação da release.
-- Em testes anteriores, o 3.8 retornou texto mesmo para PCM inteiramente silencioso. Texto reconhecido não comprova que houve fala; revise o resultado. No modo Ao finalizar, sessões sem confirmação de finalização podem aguardar o deadline existente de 15 segundos após Parar (90 segundos no Extended). Isso não limita a duração da gravação. A sincronização entre abas, janelas e service worker ainda requer homologação física no Chrome instalado.
 
 O seek exato por palavra ainda está indisponível. No ciclo de correção anterior à publicação, foram testadas duas narrações reais simultâneas no Chrome; o usuário confirmou silêncio nas pausas individual/global e ao fim da sequência de Stop. O seek cumulativo em pausa foi medido no cursor PCM. A retomada seletiva teve evidência técnica, mas o usuário não conseguiu distinguir as vozes para homologá-la pelo ouvido. Controles no popup nativo, Opções e janela individual, assim como microfone físico e inserção nesta versão, não foram homologados integralmente pela automação. Uma geração retornou áudio muito curto; o replay explícito posterior retornou áudio longo, sem alteração da geração para contornar o resultado.
 
 Não há ganho comparativo de latência comprovado para o scheduler nem teto real de TPM conhecido automaticamente. Os testes reais anteriores do scheduler usaram áudio sintético e não substituem homologação física da instalação atual.
 
-Consulte as [notas da v1.0.9](docs/RELEASE-v1.0.9.md), as [notas da v1.0.8](docs/RELEASE-v1.0.8.md), as [notas da v1.0.7](docs/RELEASE-v1.0.7.md), as [notas da v1.0.6](docs/RELEASE-v1.0.6.md), as [notas da v1.0.5](docs/RELEASE-v1.0.5.md), as [notas da v1.0.4](docs/RELEASE-v1.0.4.md), as [notas da v1.0.3](docs/RELEASE-v1.0.3.md), o [histórico v1.0.2](docs/RELEASE-v1.0.2.md), as [notas v1.0.1](docs/RELEASE-v1.0.1.md) e a [release v1.0.0](https://github.com/pinguelanarosca/FalaMermo/releases/tag/v1.0.0).
+Consulte as [notas da v1.0.10](docs/RELEASE-v1.0.10.md), as [notas da v1.0.9](docs/RELEASE-v1.0.9.md), as [notas da v1.0.8](docs/RELEASE-v1.0.8.md), as [notas da v1.0.7](docs/RELEASE-v1.0.7.md), as [notas da v1.0.6](docs/RELEASE-v1.0.6.md), as [notas da v1.0.5](docs/RELEASE-v1.0.5.md), as [notas da v1.0.4](docs/RELEASE-v1.0.4.md), as [notas da v1.0.3](docs/RELEASE-v1.0.3.md), o [histórico v1.0.2](docs/RELEASE-v1.0.2.md), as [notas v1.0.1](docs/RELEASE-v1.0.1.md) e a [release v1.0.0](https://github.com/pinguelanarosca/FalaMermo/releases/tag/v1.0.0).
 
 ## Validação do código
 

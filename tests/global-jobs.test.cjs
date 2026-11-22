@@ -134,11 +134,11 @@ test('evento de histórico atrasado lê valor atual dentro da fila e não apaga 
 
 function backgroundEnvironment(options={}){
  const routes=[],sent=[],sessionData=options.sessionData||{},runtimeJobs=options.runtimeJobs||new Map();let history=options.history||{enabled:true,maxEntries:50,recentItems:[]},offscreenCloses=0;
- const context=vm.createContext({structuredClone,AbortController,console,setTimeout,clearTimeout,chrome:{offscreen:{closeDocument:async()=>{offscreenCloses++;}},runtime:{getURL:name=>'chrome-extension://test/'+name,sendMessage:async message=>{sent.push(message);return{success:true};}},storage:{session:{get:async key=>({[key]:sessionData[key]}),set:async value=>Object.assign(sessionData,value)}},tabs:{sendMessage:async(tabId,message,sendOptions)=>{sent.push({tabId,message,options:sendOptions});if(message.type==='STT_GLOBAL_STATUS')return options.originStatus||{success:true,found:true,status:'waiting'};return{success:true};}}}});
+ const context=vm.createContext({structuredClone,AbortController,console,setTimeout,clearTimeout,chrome:{offscreen:{closeDocument:async()=>{offscreenCloses++;}},runtime:{getURL:name=>'chrome-extension://test/'+name,sendMessage:async message=>{sent.push(message);return{success:true};}},storage:{session:{get:async key=>({[key]:sessionData[key]}),set:async value=>Object.assign(sessionData,value)}},tabs:{sendMessage:async(tabId,message,sendOptions)=>{sent.push({tabId,message,options:sendOptions});if(message.type==='STT_GLOBAL_CANCEL'&&options.cancelReply)return options.cancelReply(message.payload.jobId);if(message.type==='STT_GLOBAL_STATUS')return options.originStatus||{success:true,found:true,status:'waiting'};return{success:true};}}}});
  vm.runInContext(require('./load-background.cjs')(require.resolve('../background.js')).replace('__require("extension/src/background/index.ts");','globalThis.modules=__modules;'),context);
  const cache={},overrides={
   'extension/src/services/storage/chromeStorageAdapter.ts':{chromeStorage:{get:async key=>key==='history'?history:{},getMany:async()=>({api:{apiKeys:['fixture-key']},agents:{customAgents:[]},models:{sttModelId:'gemini-3.8-live'},audio:{}}),update:async(key,fn)=>{if(key==='history'){const value=fn(history);if(value)history=value;}}}},
-  'extension/src/services/backgroundPlayback.ts':{hasDocument:async()=>runtimeJobs.size>0,send:async payload=>{routes.push(payload);if(payload.operation==='GLOBAL_JOBS_SNAPSHOT')return{success:true,jobs:[...runtimeJobs.values()]};if(options.controlReply&&['PAUSE','RESUME','SEEK_PCM'].includes(payload.operation))return options.controlReply(payload);if(['PAUSE','RESUME','SEEK_PCM'].includes(payload.operation)){const runtime=runtimeJobs.get(payload.jobId),paused=payload.operation==='PAUSE'||payload.operation==='SEEK_PCM'&&runtime.paused===true;runtime.paused=paused;runtime.controlSeq=(runtime.controlSeq||0)+1;return{success:true,operation:payload.operation,eventSeq:10+runtime.controlSeq,status:{jobId:payload.jobId,playerId:payload.playerId,requestId:payload.requestId,controlSeq:runtime.controlSeq,paused,contextState:paused?'suspended':'running',workletPaused:paused,outputMuted:paused,currentTime:10,duration:30,availableStart:0,availableEnd:30}};}return{success:true};},handlePlaybackCommand:async(payload,sender)=>{routes.push(payload);if(payload.operation.endsWith('_START'))runtimeJobs.set(payload.jobId,{jobId:payload.jobId,type:payload.operation.startsWith('STT')?'STT':'TTS',status:'recording',origin:{tabId:sender.tab?.id||0,frameId:sender.frameId||0,documentId:sender.documentId}});return{success:true};}},
+  'extension/src/services/backgroundPlayback.ts':{hasDocument:async()=>runtimeJobs.size>0,stopAll:options.stopAll?async(...args)=>{routes.push({operation:'STOP_ALL_OPERATIONS'});return options.stopAll(...args);}:undefined,send:async payload=>{routes.push(payload);if(payload.operation==='GLOBAL_JOBS_SNAPSHOT')return options.snapshotReply?options.snapshotReply():{success:true,jobs:[...runtimeJobs.values()]};if(options.controlReply&&['PAUSE','RESUME','SEEK_PCM'].includes(payload.operation))return options.controlReply(payload);if(['PAUSE','RESUME','SEEK_PCM'].includes(payload.operation)){const runtime=runtimeJobs.get(payload.jobId),paused=payload.operation==='PAUSE'||payload.operation==='SEEK_PCM'&&runtime.paused===true;runtime.paused=paused;runtime.controlSeq=(runtime.controlSeq||0)+1;return{success:true,operation:payload.operation,eventSeq:10+runtime.controlSeq,status:{jobId:payload.jobId,playerId:payload.playerId,requestId:payload.requestId,controlSeq:runtime.controlSeq,paused,contextState:paused?'suspended':'running',workletPaused:paused,outputMuted:paused,currentTime:10,duration:30,availableStart:0,availableEnd:30}};}return{success:true};},handlePlaybackCommand:async(payload,sender)=>{routes.push(payload);if(payload.operation.endsWith('_START'))runtimeJobs.set(payload.jobId,{jobId:payload.jobId,requestId:payload.requestId,type:payload.operation.startsWith('STT')?'STT':'TTS',status:'recording',origin:{tabId:sender.tab?.id||0,frameId:sender.frameId||0,documentId:sender.documentId}});return{success:true};}},
   'extension/src/services/diagnosticLogger.ts':{logDiagnostic:async()=>{}},
  };
  function load(name){if(overrides[name])return overrides[name];if(cache[name])return cache[name].exports;const m=cache[name]={exports:{}};context.modules[name](m,m.exports,load);return m.exports;}
@@ -193,7 +193,7 @@ test('background acorda por evento, recupera viewers/versão e ACK só após sna
  const old=backgroundEnvironment();await old.run('HUD_GLOBAL_GET',{},old.original);await old.run('HUD_GLOBAL_GET',{},{tab:{id:2},frameId:0,documentId:'viewer',url:'https://viewer.invalid/'});await old.run('TTS_REQUEST',{text:'texto sintético',agentId:'narrator'});const before=(await old.run('HUD_GLOBAL_GET')).state;
  const jobId=before.jobs[0].jobId;Object.assign(old.runtimeJobs.get(jobId),{status:'playing',eventSeq:8,text:'texto sintético'});
  const current=backgroundEnvironment(old);await current.run('LIVE_OFFSCREEN_EVENT',{jobId,event:'play',eventSeq:9,operation:'TTS_LIVE_START',tabId:1,frameId:2},{url:'chrome-extension://test/offscreen.html'});
- const state=(await current.run('HUD_GLOBAL_GET')).state;assert.equal(state.jobs.length,1);assert.ok(state.revision>before.revision);assert.ok(current.sent.some(item=>item.tabId===2&&item.message?.type==='HUD_GLOBAL_STATE'));assert.equal(current.routes.find(command=>command.operation==='GLOBAL_JOBS_ACK').sequences[jobId],8);assert.ok(current.sessionData[GlobalJobs.STORAGE_KEY].jobs[0].eventSeq>=9);
+ const state=(await current.run('HUD_GLOBAL_GET')).state;assert.equal(state.jobs.length,1);assert.ok(state.revision>before.revision);assert.ok(current.sent.some(item=>item.tabId===2&&item.message?.type==='HUD_GLOBAL_STATE'));assert.equal(current.routes.find(command=>command.operation==='GLOBAL_JOBS_ACK').sequences[jobId].eventSeq,8);assert.ok(current.sessionData[GlobalJobs.STORAGE_KEY].jobs[0].eventSeq>=9);
 });
 test('background recupera confirmação perdida de inserção sem inserir novamente nem duplicar histórico',async()=>{
  const old=backgroundEnvironment();await old.run('STT_LIVE_START',{jobId:'s1',agentId:'narrator'});Object.assign(old.runtimeJobs.get('s1'),{status:'inserting',text:'frase pública',eventSeq:7});
@@ -544,4 +544,36 @@ test('falha ao salvar migração preserva as dimensões legadas na sessão',asyn
  const key=GlobalJobs.STORAGE_KEY,sessionData={[key]:{revision:1,visible:false,minimized:false,jobs:[],tabHud:{1:{visible:true,minimized:false,documentId:'one',size:{width:510,height:610}}}}},e=backgroundEnvironment({sessionData});
  e.context.chrome.storage.local={get:async()=>({}),set:async()=>{throw Error('fixture storage failure')}};
  await e.run('HUD_GLOBAL_GET',{}, {tab:{id:1},frameId:0,documentId:'one',url:'https://one.test'});assert.deepEqual(sessionData[key].tabHud[1].size,{width:510,height:610});
+});
+
+test('Parar tudo despacha com snapshot pendente e repete liberação da origem sem liberar o microfone cedo',async()=>{
+ const sender={url:'chrome-extension://test/offscreen.html'};
+ let opened,releaseSnapshot,releaseMic=false,cancels=0,stopCalls=0;
+ const environment=backgroundEnvironment({stopAll:async()=>{stopCalls++;return true;},
+  cancelReply:jobId=>{cancels++;return {success:true,jobId,microphoneReleased:releaseMic};}});
+ await environment.run('STT_LIVE_START',{jobId:'test-stop',editorDelivery:true});
+ const snapshotStarted=new Promise(resolve=>{opened=resolve;});
+ const resumed=backgroundEnvironment({sessionData:structuredClone(environment.sessionData),runtimeJobs:environment.runtimeJobs,
+  stopAll:async()=>{stopCalls++;return true;},cancelReply:jobId=>{cancels++;return {success:true,jobId,microphoneReleased:releaseMic};},
+  snapshotReply:()=>new Promise(resolve=>{releaseSnapshot=resolve;opened();})});
+ const event=resumed.run('LIVE_OFFSCREEN_EVENT',{jobId:'test-stop',eventSeq:1,event:'stt-partial',text:'Texto'},sender);
+ await snapshotStarted;
+ const stopping=await resumed.run('HUD_GLOBAL_PANIC',{});
+ assert.equal(stopCalls,1);
+ assert.equal(stopping.state.jobs[0].status,'cancelling');
+ assert.equal(stopping.pending,true);
+ assert.equal(stopping.state.jobs[0].microphoneReleased,false);
+ releaseSnapshot({success:true,jobs:[]});
+ await event;
+ const blocked=await resumed.run('STT_CAPTURE_RESERVE',{jobId:'blocked'});
+ assert.equal(blocked.code,'STT_CAPTURE_BUSY');
+ releaseMic=true;
+ const until=Date.now()+3000;
+ while(resumed.sessionData[GlobalJobs.STORAGE_KEY].jobs.find(job=>job.jobId==='test-stop').status!=='cancelled'){
+  assert.ok(Date.now()<until);
+  await new Promise(resolve=>setTimeout(resolve,25));
+ }
+ assert.ok(cancels>=2);
+ assert.equal(stopCalls,1,'recuperação da origem não encerra o offscreen novamente');
+ assert.equal((await resumed.run('STT_CAPTURE_RESERVE',{jobId:'new-after-stop'})).success,true);
 });

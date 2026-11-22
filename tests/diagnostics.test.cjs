@@ -104,3 +104,12 @@ test('ID real de tarefa Lens atravessa o adaptador TTS e mantém a correlação'
 test('tempo decorrido da captura não é anunciado como custo de operação nem média zero fictícia',()=>{
  const d=core.create();d.legacy('stt',{jobId,scope:'capture',stage:'capture-progress',elapsedMs:90000});d.flush();const e=d.snapshot().events[0];assert.equal(e.details.elapsedMs,90000);assert.equal(e.durationMs,undefined);assert.equal(e.details.meanDurationMs,undefined);assert.equal(e.details.maxDurationMs,undefined);
 });
+
+test('a projeção do editor conserva a decisão do ACK sem incluir conteúdo',()=>{
+ for(const ackAccepted of [true,false]){
+  const safe=core.sanitize({component:'stt',category:'editor',stage:'editor-ack',jobId,details:{
+   revision:3,ackRevision:3,ackAccepted,text:'conteúdo privado'
+  }});
+  assert.deepEqual(safe.details,{revision:3,ackRevision:3,ackAccepted});
+ }
+});

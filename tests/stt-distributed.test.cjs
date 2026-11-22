@@ -2,7 +2,7 @@
 const test=require('node:test');
 const assert=require('node:assert/strict');
 const {CapturePipeline,DistributedDictation}=require('../stt-realtime.js');
-const {create,MODELS}=require('../stt-scheduler.js');
+const {create}=require('../stt-scheduler.js');
 const {classifyLiveError}=require('../live-session-manager.js');
 
 const {voicePcm}=require('./stt-audio-fixture.cjs');
@@ -12,7 +12,7 @@ async function until(predicate){
  for(let i=0;i<3000&&!predicate();i++)await tick();
  assert.ok(predicate(),'condição assíncrona não atingida');
 }
-function fixture({credentials=keys,rejectAccount=()=>{},config={},transportConfig={},budgetLimit=Infinity}={}){
+function fixture({credentials=keys,rejectAccount=()=>{},config={},transportConfig={},budgetLimit=Infinity,verbatim=false}={}){
  let now=1000,number=0,buffered=0,peak=0;
  const timers=new Map(),attempts=[],sessions=[];
  const setTimer=(fn,ms)=>{const id=++number;timers.set(id,{fn,at:now+ms});return id;};
@@ -32,7 +32,7 @@ function fixture({credentials=keys,rejectAccount=()=>{},config={},transportConfi
    onWarning:warning=>warnings.push(warning),onFailure:error=>errors.push(error),
    async openLane({sequence,copy,accounts,signal,receive,fail}){
     const lease=await scheduler.admit({
-     jobId:jobId+':'+sequence+':'+copy,keys:credentials,models:[MODELS[0]],signal,config,blockAccounts:accounts,
+     jobId:jobId+':'+sequence+':'+copy,keys:credentials,models:['gemini-3.5-transcribe-live'],signal,config,blockAccounts:accounts,
      async open({keyIndex}){
       attempts.push({jobId,sequence,copy,keyIndex});
       rejectAccount(keyIndex);
@@ -43,7 +43,7 @@ function fixture({credentials=keys,rejectAccount=()=>{},config={},transportConfi
     });
     const session=lease.session;
     return {
-     timeoutMs:15000,
+     timeoutMs:15000,verbatim,
      send:pcm=>scheduler.sendAudio(lease,pcm,value=>session.packets.push(value)),
      end:()=>scheduler.endAudio(lease,()=>{session.ended=true;}),
      confirm:latency=>scheduler.recordChunk(lease,latency),
@@ -384,4 +384,132 @@ test('pausas com ruído baixo e DC não apagam vocalizações breves ou mudança
  assert.equal(packets.length,0);
  const result=await job.transport.finish();
  assert.equal(result.blocks,3);assert.equal(result.text,'Quê? ¿Qué? Hum.');
+});
+
+test('VERBATIM reconcilia revisões, finais atrasados e réplicas sem reemitir blocos',async()=>{
+ const env=fixture({verbatim:true}),job=env.job('verbatim-order');
+ const hypothesis=(lane,text,startOffset,endOffset)=>lane.receive({interimInputTranscription:{text,startOffset,endOffset}},true,true);
+ const confirmed=(lane,text,startOffset,endOffset)=>lane.receive({inputTranscription:{text,startOffset,endOffset}},true,true);
+ await block(job,1);await block(job,2);
+ await until(()=>env.sessions.filter(lane=>lane.ended).length===4);
+ const [a,discarded]=job.lanes(1),[b]=job.lanes(2);
+ hypothesis(a,'Prim','0s','0.2s');
+ hypothesis(a,'Primeira','0s','0.4s');
+ hypothesis(a,'Pri','0s','0.1s');
+ assert.equal(job.partials.at(-1).partialText,'Primeira');
+ confirmed(b,'¿Qué?','0s','0.4s');
+ confirmed(a,'Segunda.','0.5s','0.9s');
+ confirmed(a,'Primeira.','0s','0.4s');
+ confirmed(a,'Primeira.','0s','0.4s');
+ hypothesis(a,'Primei','0s','0.35s');
+ a.receive({interimInputTranscription:{text:'Provisória atrasada sem offset'}},true,true);
+ a.receive({turnComplete:true,modelTurn:{parts:[{text:'Não inserir'}]}},true,true);
+ await env.advance(900);
+ assert.equal(job.published.at(-1).text,'Primeira. Segunda. ¿Qué?');
+ assert.deepEqual(job.published.at(-1).textBoundaries,[[1,18],[2,24]]);
+ confirmed(discarded,'Tardia.','0s','0.4s');
+ await block(job,3);await until(()=>job.lanes(3).some(lane=>lane.ended));
+ confirmed(job.lanes(3)[0],'¿Qué?','0s','0.4s');
+ await env.advance(900);
+ assert.equal((await job.transport.finish()).text,'Primeira. Segunda. ¿Qué? ¿Qué?');
+ assert.equal(job.errors.length,0);
+});
+
+test('VERBATIM não publica interim como confirmado quando falham as duas conexões',async()=>{
+ const env=fixture({verbatim:true}),job=env.job('verbatim-disconnect');
+ await block(job,1);await until(()=>job.lanes(1).every(lane=>lane.ended)&&job.lanes(1).length===2);
+ job.lanes(1)[0].receive({inputTranscription:{text:'Confirmada.'}});
+ job.lanes(1)[0].fail(Object.assign(Error('Encerrado'),{closeCode:1006}));
+ await env.advance(900);
+ await block(job,2);await until(()=>job.lanes(2).filter(lane=>lane.ended).length===2);
+ for(const lane of job.lanes(2)){
+  lane.receive({interimInputTranscription:{text:'Tentativa'}});
+  lane.fail(Object.assign(Error('Encerrado'),{closeCode:1006}));
+  lane.receive({inputTranscription:{text:'Confirmada.'}});
+ }
+ await block(job,3);await until(()=>job.lanes(3).filter(lane=>lane.ended).length===2);
+ job.lanes(3)[0].receive({inputTranscription:{text:'Retomada.'}});
+ await env.advance(900);
+ const result=await job.transport.finish();
+ assert.equal(result.text,'Confirmada. Retomada.');
+ assert.equal(result.partialText,'');
+ assert.deepEqual(result.unresolvedSequences,[2]);
+ assert.equal(job.retained.length,3);
+});
+
+test('um bloco com confirmação e hipótese nova retém só o trecho confirmado se a conexão cair',async()=>{
+ const env=fixture({verbatim:true}),job=env.job('verbatim-incomplete');
+ await block(job,1);await until(()=>job.lanes(1).filter(lane=>lane.ended).length===2);
+ const [lane]=job.lanes(1);
+ lane.receive({inputTranscription:{text:'Fala confirmada.',startOffset:'0s',endOffset:'0.4s'}});
+ lane.receive({interimInputTranscription:{text:'Fala incerta',startOffset:'0.6s',endOffset:'0.9s'}});
+ assert.equal(job.partials.at(-1).partialText,'Fala confirmada. Fala incerta');
+ lane.fail(Object.assign(Error('Encerrado'),{closeCode:1006}));
+ const result=await job.transport.finish();
+ assert.equal(result.text,'Fala confirmada.');assert.equal(result.partialText,'');
+ assert.equal(result.incomplete,true);assert.deepEqual(result.unresolvedSequences,[1]);
+});
+
+test('hipóteses fora de ordem atualizam o HUD imediatamente e preservam a fronteira do editor',async()=>{
+ const env=fixture({verbatim:true}),job=env.job('visual-out-of-order');
+ await block(job,1);await job.send(2,pcm);
+ await until(()=>job.lanes(1).filter(lane=>lane.ended).length===2&&job.lanes(2).some(lane=>lane.packets.length));
+ const [first]=job.lanes(1),[second]=job.lanes(2);
+ second.receive({interimInputTranscription:{text:'Segundo',endOffset:'0.6s'}},false,true);
+ assert.equal(job.partials.at(-1).previewText,'Segundo');
+ assert.equal(job.partials.at(-1).partialText,'');
+ assert.equal(job.partials.at(-1).previewOnly,true);
+ first.receive({inputTranscription:{text:'Primeiro.'}},true,true);
+ assert.equal(job.partials.at(-1).previewText,'Primeiro.\nSegundo');
+ await env.advance(900);
+ assert.equal(job.published.at(-1).previewText,'Segundo');
+ assert.equal(job.partials.at(-1).partialText,'Segundo');
+ assert.deepEqual(job.partials.at(-1).textBoundaries,[[1,9]]);
+ await job.send(2,empty,{cutReason:'silence'});
+ second.receive({inputTranscription:{text:'Segundo.'}},true,true);
+ await env.advance(900);
+ assert.equal((await job.transport.finish()).text,'Primeiro. Segundo.');
+});
+
+test('réplica estagnada cede a hipótese mais avançada e rejeita regressões ou alternância imediata',async()=>{
+ const env=fixture({verbatim:true}),job=env.job('visual-replica');
+ await job.send(1,pcm);await until(()=>job.lanes(1).filter(lane=>lane.packets.length).length===2);
+ const [a,b]=job.lanes(1);
+ const partial=(lane,text,end)=>lane.receive({interimInputTranscription:{text,endOffset:end}},false,true);
+ partial(a,'Primeira','0.4s');
+ partial(b,'Primeira versão','0.6s');
+ assert.equal(job.partials.at(-1).partialText,'Primeira');
+ await env.advance(1000);
+ partial(b,'Primeira versão mais recente','0.9s');
+ assert.equal(job.partials.at(-1).partialText,'Primeira versão mais recente');
+ partial(a,'Alternativa','0.5s');
+ partial(b,'Atrasada','0.3s');
+ partial(b,'Primeira versão mais recente','0.9s');
+ assert.equal(job.partials.length,2);
+ job.transport.cancel();
+});
+
+test('confirmação de áudio permanece quando ambas as réplicas caem antes de fechar atividade',async()=>{
+ const env=fixture({verbatim:true}),job=env.job('confirmed-before-end');
+ await job.send(1,pcm);await until(()=>job.lanes(1).filter(lane=>lane.packets.length).length===2);
+ const [lane]=job.lanes(1);
+ lane.receive({inputTranscription:{text:'Confirmada.',startOffset:'0s',endOffset:'0.4s'}},false,true);
+ lane.receive({interimInputTranscription:{text:'incompleta',startOffset:'0.5s',endOffset:'0.8s'}},false,true);
+ for(const copy of job.lanes(1))copy.fail(Object.assign(Error('Rede indisponível'),{closeCode:1006}));
+ await job.send(1,empty,{cutReason:'finalization'});
+ const result=await job.transport.finish();
+ assert.equal(result.text,'Confirmada.');
+ assert.equal(result.incomplete,true);
+});
+
+test('setup em paralelo ao journal mantém PCM no disco antes de enviar à primeira sessão',async()=>{
+ const env=fixture({verbatim:true}),job=env.job('setup-and-journal');
+ let persist;
+ job.transport.retain=()=>new Promise(resolve=>{persist=resolve;});
+ const inserting=job.send(1,pcm);
+ await until(()=>persist&&job.lanes(1).length===2);
+ assert.ok(job.lanes(1).every(lane=>!lane.packets.length));
+ persist();await inserting;
+ assert.ok(job.lanes(1).every(lane=>lane.packets.length===1));
+ job.transport.cancel();
 });

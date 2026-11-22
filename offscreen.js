@@ -73,7 +73,11 @@ function effectiveVolume(player){return player.volume*globalVolume;}
 
 function viewFor(p){let v=jobViews.get(p.jobId);if(!v||v.requestId!==p.requestId){v={jobId:p.jobId,type:p.operation==='STT_LIVE_START'?'STT':'TTS',origin:{tabId:p.tabId||0,frameId:p.frameId||0,documentId:p.documentId||null},playerId:p.playerId,requestId:p.requestId,status:'connecting',...(p.narration?{narration:true}:{}),text:p.operation==='STT_LIVE_START'?'':p.text||'',partialText:'',createdAt:Date.now(),updatedAt:Date.now(),eventSeq:0,progress:{}};jobViews.set(p.jobId,v);}return v;}
 function applyView(p,event,extra){if(!p.jobId)return;const v=viewFor(p);v.eventSeq++;v.updatedAt=Date.now();if(extra.modelId)v.modelId=extra.modelId;
- if(p.editorDelivery&&['stt-partial','stt-segment','stt-final'].includes(event)){v.textRevision=v.eventSeq;v.textSequence=extra.sequence;v.publishedAt=extra.publishedAt;v.transcriptFinal=event==='stt-final';}
+ if(['stt-partial','stt-segment','stt-final'].includes(event)){
+  if(typeof extra.previewText==='string')v.previewText=extra.previewText;
+  else delete v.previewText;
+ }
+ if(p.editorDelivery&&!extra.previewOnly&&['stt-partial','stt-segment','stt-final'].includes(event)){v.textRevision=v.eventSeq;v.textSequence=extra.sequence;v.publishedAt=extra.publishedAt;v.transcriptFinal=event==='stt-final';}
  if(Array.isArray(extra.textBoundaries))v.textBoundaries=extra.textBoundaries.map(pair=>[...pair]);
  else if(event==='stt-final')delete v.textBoundaries;
  if(event==='play'||event==='first-playback')v.status='playing';if(event==='buffering')v.status='connecting';if(event==='pause'){v.status='paused';v.pausedAt=Date.now();}if(event==='ended')v.status='completed';if(event==='error'||event==='stt-error'){v.status='error';v.incomplete=true;v.error=extra.error;}
@@ -91,15 +95,60 @@ function applyView(p,event,extra){if(!p.jobId)return;const v=viewFor(p);v.eventS
  return v;
 }
 function eventTimeout(promise){let timer;return Promise.race([promise,new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('Confirmação de evento indisponível.')),5000);})]).finally(()=>clearTimeout(timer));}
+function acknowledgeEvent(jobId,requestId,eventSeq){
+ const pending=unacknowledged.get(jobId);
+ if(pending&&pending.requestId===requestId&&pending.eventSeq<=eventSeq)unacknowledged.delete(jobId);
+}
+function validEventAck(reply,jobId,eventSeq){
+ return reply?.success===true&&reply.jobId===(jobId??null)&&reply.eventSeq===(eventSeq??null)&&
+  ['applied','duplicate','discarded'].includes(reply.result);
+}
+let eventRecoveryTimer;
+function retryEventRecovery(delay=250){
+ if(eventRecoveryTimer||panicCleanup)return;
+ eventRecoveryTimer=setTimeout(async()=>{
+  let retry=false;
+  for(const [jobId,pending] of unacknowledged){
+   if(!pending.failed)continue;
+   const view=jobViews.get(jobId);
+   if(!view||panicCleanup)continue;
+   const job=structuredClone(view);
+   try{
+    const reply=await eventTimeout(chrome.runtime.sendMessage({type:'LIVE_OFFSCREEN_RECONCILE',target:'background',payload:job}));
+    if(!validEventAck(reply,jobId,job.eventSeq))throw Error('Reconciliação não confirmada.');
+    acknowledgeEvent(jobId,job.requestId,reply.eventSeq);
+   }catch{retry=true;}
+  }
+  eventRecoveryTimer=null;
+  if(retry||[...unacknowledged.values()].some(item=>item.failed))retryEventRecovery(Math.min(delay*2,15000));
+  notifyIdle();
+ },delay);
+}
 function publicEvent(payload,event,extra={}){const current=jobs.get(routeKey(payload));if(current&&current.payload.requestId!==payload.requestId)return Promise.resolve();globalThis.LiveTtsDiagnostics?.captureEvent(payload,event,extra);if(event==='block-complete')globalThis.FalaDiagnostics?.event({component:'tts',category:'generation',stage:'block-complete',jobId:payload.jobId,details:{blockId:extra.blockId,blocks:extra.blocks,completed:extra.completed}});const v=applyView(payload,event,extra);const {apiKeys,apiKey,schedulerPolicy,text,systemInstruction,advancedJson,customVocabulary,transformInstruction,previewAgent,sttRecognition,...safe}=payload;const packet={...safe,event,...extra,eventSeq:v?.eventSeq};
  const diagnosticQueue=globalThis.FalaDiagnostics?.queue('offscreen-events',payload.jobId),diagnostic=diagnosticQueue?.enter();
  const id=payload.jobId||'legacy',previous=eventQueues.get(id)||Promise.resolve();
- const delivered=previous.catch(()=>{}).then(async()=>{diagnosticQueue?.begin(diagnostic);for(let attempt=0;attempt<3;attempt++){try{const ack=await eventTimeout(Promise.resolve().then(()=>chrome.runtime.sendMessage({type:'LIVE_OFFSCREEN_EVENT',target:'background',payload:packet})));if(ack?.success===false)throw Error('Evento não confirmado.');if(['stt-final','ended','stt-error','error','cancelled','stt-cancelled'].includes(event))unacknowledged.delete(id);return;}catch{unacknowledged.set(id,packet.eventSeq);}}void globalThis.LiveSttDiagnostics?.emit({jobId:id,scope:'transport',stage:'event-delivery-error',outcome:'EVENT_DELIVERY_FAILED'});});
+ const pending={requestId:packet.requestId,eventSeq:packet.eventSeq};
+ if(v)unacknowledged.set(id,pending);
+ if(panicCleanup)return Promise.resolve();
+ const delivered=previous.catch(()=>{}).then(async()=>{
+  diagnosticQueue?.begin(diagnostic);
+  for(let attempt=0;attempt<3;attempt++){
+   try{
+    const ack=await eventTimeout(chrome.runtime.sendMessage({type:'LIVE_OFFSCREEN_EVENT',target:'background',payload:packet}));
+    if(!validEventAck(ack,packet.jobId,packet.eventSeq))throw Error('Evento não confirmado.');
+    acknowledgeEvent(id,packet.requestId,packet.eventSeq);
+    return;
+   }catch{/* A mesma revisão pode ser reenviada com segurança. */}
+  }
+  pending.failed=true;
+  if(v)retryEventRecovery();
+  void globalThis.LiveSttDiagnostics?.emit({jobId:id,scope:'transport',stage:'event-delivery-error',outcome:'EVENT_DELIVERY_FAILED'});
+ });
  eventQueues.set(id,delivered);void delivered.finally(()=>{diagnosticQueue?.leave(diagnostic);if(eventQueues.get(id)===delivered)eventQueues.delete(id);});return delivered;
 }
 function activeJobIds(){return[...jobs.values()].map(j=>j.payload.jobId).concat([...dictations.keys()]);}
 function notifyIdle(){if(jobs.size||dictations.size||legacyPlayers.size)return;void Promise.all([...eventQueues.values(),...(sttScheduler?[sttScheduler.flush()]:[])]).then(()=>{if(jobs.size||dictations.size||legacyPlayers.size||unacknowledged.size)return;chrome.runtime.sendMessage({type:'LIVE_OFFSCREEN_IDLE',target:'background',payload:{}}).catch(()=>{});});}
-function globalSnapshot(){const active=new Set(activeJobIds());const recent=[...jobViews.values()].filter(v=>active.has(v.jobId)||Date.now()-v.updatedAt<86400000);const terminal=recent.filter(v=>!active.has(v.jobId)).sort((a,b)=>b.updatedAt-a.updatedAt).slice(0,50);for(const [id]of jobViews)if(!active.has(id)&&!terminal.some(v=>v.jobId===id))jobViews.delete(id);return{success:true,playback:{volume:globalVolume},activeJobIds:[...active],jobs:structuredClone([...recent.filter(v=>active.has(v.jobId)),...terminal])};}
+function globalSnapshot(){const active=new Set(activeJobIds());const recent=[...jobViews.values()].filter(v=>active.has(v.jobId)||unacknowledged.has(v.jobId)||Date.now()-v.updatedAt<86400000);const terminal=recent.filter(v=>!active.has(v.jobId)).sort((a,b)=>b.updatedAt-a.updatedAt).slice(0,50);for(const [id]of jobViews)if(!active.has(id)&&!unacknowledged.has(id)&&!terminal.some(v=>v.jobId===id))jobViews.delete(id);return{success:true,playback:{volume:globalVolume},activeJobIds:[...active],pendingEvents:unacknowledged.size,jobs:structuredClone([...recent.filter(v=>active.has(v.jobId)||unacknowledged.has(v.jobId)&&!terminal.includes(v)),...terminal])};}
 function legacyEvent(payload,event,status){chrome.runtime.sendMessage({type:'TTS_PLAYBACK_EVENT',target:'background',payload:{tabId:payload.tabId,frameId:payload.frameId||0,playerId:payload.playerId,event,status}}).catch(()=>{});}
 const playbackDiagnostics=[];
 globalThis.LivePlaybackDiagnostics={snapshot:()=>structuredClone(playbackDiagnostics)};
@@ -390,8 +439,6 @@ async function startTts(payload){
  return{success:true,jobId:payload.jobId,blocks:blocks.length};
 }
 async function transformTranscript(d,transcript){const {payload}=d,models=LiveConfig.modelChain('tts',payload.transformModels?.[0],payload.transformModels||LiveConfig.eligibleModels('tts'));let last;for(const modelId of models)for(let k=0;k<payload.apiKeys.length;k++){if(d.controller.signal.aborted)throw Object.assign(new Error('Transformação cancelada.'),{cancelled:true});let session;try{publicEvent(payload,'stt-transform-attempt',{modelId,keyLabel:'key#'+(k+1)});session=await manager.acquire({modelId,apiKey:payload.apiKeys[k],keyIndex:k+1,mode:'agent',signal:d.controller.signal,agentId:payload.agentId,jobId:payload.jobId,systemInstruction:payload.transformInstruction,outputTranscription:true,voiceName:payload.voiceName||'Kore'});if(d.controller.signal.aborted)throw Object.assign(new Error('Transformação cancelada.'),{cancelled:true});const output=await session.sendTurn(transcript,null,d.controller.signal);manager.release(session);if(output.text)return output.text;throw new Error('Agente Live não retornou texto de saída.');}catch(error){last=error;if(session)manager.retire(session);if(d.controller.signal.aborted)throw Object.assign(new Error('Transformação cancelada.'),{cancelled:true});const kind=LiveSessions.classifyLiveError(error);if(['REQUEST','CANCELLED','INVALIDATED_CONTEXT'].includes(kind))throw error;}}throw last||new Error('Transformação Live indisponível.');}
-function confirmedText(d){return [...d.finalParts,d.pendingText||''].filter(Boolean).join(' ').trim();}
-function commitNativeDictation(d){if(!d.pendingText?.trim())return;const text=d.pendingText.trim();d.pendingText='';d.finalParts.push(text);publicEvent(d.payload,'stt-segment',{text,confirmedText:confirmedText(d),partialText:''});}
 async function preserveSttAudio(work){try{return await eventTimeout(work);}catch(error){if(error.code)throw error;throw Object.assign(Error('Armazenamento do áudio STT sem confirmação. Material já retido continua disponível em Opções.'),{code:'RECOVERY_STORAGE'});}}
 function recoveryState(d,state){if(!d.recoveryStarted)return;return preserveSttAudio(d.recovery.update(d.payload.jobId,{state,...d.chunkTransport?.stats})).catch(()=>{sttDiagnostic(d,'error',{outcome:'RECOVERY_STORAGE'});});}
 function realtimeFailure(d,error,stopReason=error.code==='BACKPRESSURE'?'backpressure':error.code==='RECOVERY_STORAGE'?'recovery-storage':error.code==='RECOVERY_LIMIT'?'recovery-limit':'transport-error'){
@@ -401,10 +448,19 @@ function realtimeFailure(d,error,stopReason=error.code==='BACKPRESSURE'?'backpre
  d.recoveryEnding=Promise.resolve(d.distributed?d.chunkTransport?.work:undefined).then(()=>recoveryState(d,'interrupted')).finally(()=>{if(dictations.get(d.payload.jobId)===d)dictations.delete(d.payload.jobId);notifyIdle();});
  sttDiagnostic(d,'error',{stopReason,errorKind:LiveSessions.classifyLiveError(error),outcome:error.code==='BACKPRESSURE'?'BACKPRESSURE':'CONNECTION',closeCode:error.closeCode});publicEvent(d.payload,'stt-error',{stopReason,incomplete:true,recoveryAvailable:!!d.retainedBytes,error:LiveConfig.redactSecrets(error.message||String(error),d.payload.apiKeys)});
 }
-function publishSttPartial(d,result){if(d.timings.firstResponseMs===undefined){d.timings.firstResponseMs=performance.now()-d.startedAt;sttDiagnostic(d,'input-transcription',{sequence:result.sequence});}return publicEvent(d.payload,'stt-partial',{confirmed:false,...result,publishedAt:Date.now()});}
+function publishSttPartial(d,result){
+ const publishedAt=Date.now();
+ let timing;
+ if(d.timings.firstResponseMs===undefined&&(result.partialText||result.previewText||result.text)){
+  d.timings.firstResponseMs=performance.now()-d.startedAt;
+  sttDiagnostic(d,'input-transcription',{sequence:result.sequence});
+  timing={received:d.firstReceived,published:{sequence:result.sequence,timelineAt:performance.timeOrigin+performance.now()}};
+ }
+ return publicEvent(d.payload,'stt-partial',{confirmed:false,...result,publishedAt,...(timing?{timing}:{})});
+}
 async function ensureDictationSession(d){if(!d.awaitingResume)return;if(!d.resuming)d.resuming=(async()=>{const old=d.session;if(!old.resumeHandle)throw Error('Sessão remota expirou sem token de retomada; áudio local preservado.');sttDiagnostic(d,'session-resuming');const next=await manager.acquire({...old.options,resumeHandle:old.resumeHandle,signal:d.controller.signal});if(d.controller.signal.aborted){manager.retire(next);throw Object.assign(Error('Ditado cancelado.'),{cancelled:true});}d.session=next;d.lease.session=next;d.chunkTransport.resumeEpoch();next.handler=d.handleSessionMessage;d.awaitingResume=false;sttDiagnostic(d,'session-resumed');publicEvent(d.payload,'stt-status',{status:'Gravando · sessão remota retomada'});})();try{await d.resuming;}finally{d.resuming=null;}}
 function realtimeTransport(d){return new globalThis.SttRealtime.DictationTransport({
- jobId:d.payload.jobId,setTimer:setTimeout,clearTimer:clearTimeout,requiresIdle:LiveConfig.caps(d.payload.modelId).requiresInteractionIdle,timeoutMs:LiveConfig.caps(d.payload.modelId).requiresInteractionIdle?90000:15000,
+ jobId:d.payload.jobId,verbatim:true,setTimer:setTimeout,clearTimer:clearTimeout,requiresIdle:LiveConfig.caps(d.payload.modelId).requiresInteractionIdle,timeoutMs:LiveConfig.caps(d.payload.modelId).requiresInteractionIdle?90000:15000,
  retain:async packet=>{await preserveSttAudio(d.recovery.append(d.payload.jobId,packet));d.retainedBytes=(d.retainedBytes||0)+packet.pcm.byteLength;},
  sendAudio:async bytes=>{await ensureDictationSession(d);if((d.session.socket?.bufferedAmount||0)>SttRealtime.CONFIG.maxQueuedBytes)throw Object.assign(Error('WebSocket STT congestionado; áudio retido para recuperação.'),{code:'BACKPRESSURE'});sendSttAudio(d,bytes);},
  endAudio:()=>{if(!d.awaitingResume){endSttAudio(d);sttDiagnostic(d,'activity-end');}},
@@ -436,22 +492,38 @@ function distributedTransport(d,models,scheduler){
    const lease=await scheduler.admit({
     jobId:payload.jobId+':'+sequence+':'+copy,generation:payload.generation,
     keys:payload.apiKeys,models,config:payload.schedulerPolicy,signal,blockAccounts:accounts,
+    onAttemptError:({error})=>{
+     if(['REQUEST','MODEL'].includes(LiveSessions.classifyLiveError(error)))realtimeFailure(d,error);
+    },
     open:({modelId,keyIndex,signal})=>manager.acquire({
      modelId,apiKey:payload.apiKeys[keyIndex-1],keyIndex,signal,mode:'dictation',jobId:payload.jobId,blockId:sequence,
-     vad:{...payload.vad,disabled:true},sttRecognition:payload.sttRecognition,
-     thinkingLevel:payload.thinkingLevel,thinkingBudget:payload.thinkingBudget
+     sttRecognition:payload.sttRecognition
     })
    });
-   const {session,modelId,keyIndex}=lease,requiresIdle=LiveConfig.caps(modelId).requiresInteractionIdle;
+   const {session,modelId,keyIndex}=lease,caps=LiveConfig.caps(modelId),requiresIdle=caps.requiresInteractionIdle;
    const metric={sequence,copy,keyLabel:'key#'+keyIndex,sessionId:session.id,modelId};
    let sent=false;
    session.handler=(message,wire)=>{
-    if(message.error){fail(message.error.cause||Error(message.error.message||'Sessão STT encerrada.'));return;}
+    if(message.error){
+     const error=message.error.cause||Error(message.error.message||'Sessão STT encerrada.');
+     if(['REQUEST','MODEL'].includes(LiveSessions.classifyLiveError(error)))realtimeFailure(d,error);
+     else fail(error);
+     return;
+    }
     scheduler.observe(lease,message);
-    if(message.serverContent)receive(message.serverContent,wire?.afterAudioEnd,wire?.afterNewSpeech);
+    const content=message.serverContent;
+    if(content){
+     if(!d.firstReceived&&(content.interimInputTranscription?.text||content.inputTranscription?.text)){
+       d.firstReceived={
+        timelineAt:wire?.receivedAt??Date.now(),sequence,copy,hasInterim:Boolean(content.interimInputTranscription),
+        hasFinal:Boolean(content.inputTranscription),afterNewSpeech:wire?.afterNewSpeech,afterAudioEnd:wire?.afterAudioEnd
+       };
+     }
+     receive(content,wire?.afterAudioEnd,wire?.afterNewSpeech);
+    }
    };
    return {
-    requiresIdle,timeoutMs:requiresIdle?90000:15000,
+    requiresIdle,verbatim:caps.sttProtocol==='transcribe',timeoutMs:requiresIdle?90000:15000,
     send(bytes,hasNewSpeech){
      if((session.socket?.bufferedAmount||0)>SttRealtime.CONFIG.maxQueuedBytes){
       throw Object.assign(Error('WebSocket STT congestionado.'),{code:'BACKPRESSURE'});
@@ -462,7 +534,12 @@ function distributedTransport(d,models,scheduler){
       d.firstAudioSent=true;
       d.timings.firstPcmMs=performance.now()-d.startedAt;
       sttDiagnostic(d,'first-pcm',metric);
-      publicEvent(payload,'stt-audio-sent',{bytes:bytes.byteLength,sampleRate:16000});
+      const socketStartedAt=performance.timeOrigin+session.connectStartedAt;
+      const timing={
+       setup:{sequence,copy,socketStartedAt,socketOpenedAt:socketStartedAt+session.socketOpenMs,timelineAt:socketStartedAt+session.setupCompleteMs},
+       send:{sequence,copy,timelineAt:performance.timeOrigin+performance.now()}
+      };
+      publicEvent(payload,'stt-audio-sent',{bytes:bytes.byteLength,sampleRate:16000,timing});
      }
     },
     end(){scheduler.endAudio(lease,()=>session.endAudio());},
@@ -477,7 +554,7 @@ function distributedTransport(d,models,scheduler){
   onPartial:result=>publishSttPartial(d,result),
   onChunk:result=>{
    d.finalParts=result.text?[result.text]:[];
-   publicEvent(payload,'stt-segment',{text:result.text,confirmedText:result.text,partialText:'',incomplete:result.incomplete,sequence:result.sequence,textBoundaries:result.textBoundaries,publishedAt:Date.now()});
+   publicEvent(payload,'stt-segment',{text:result.text,confirmedText:result.text,partialText:'',previewText:result.previewText,incomplete:result.incomplete,sequence:result.sequence,textBoundaries:result.textBoundaries,publishedAt:Date.now()});
   },
   onWarning:({sequence,gap})=>{
    if(gap){d.incomplete=true;void recoveryState(d);}
@@ -495,7 +572,7 @@ function finalizeDictation(d){
  if(!d.distributed&&!(d.chunkTransport&&!d.receivedBytes)&&LiveConfig.caps(d.payload.modelId).requiresInteractionIdle&&d.interactionStatus!=='IDLE'){
   d.controller.abort();clearTimeout(d.finalTimer);void recoveryState(d,'interrupted');if(d.session)retireDictation(d);if(dictations.get(d.payload.jobId)===d)dictations.delete(d.payload.jobId);sttDiagnostic(d,'error',{outcome:'TIMEOUT'});publicEvent(d.payload,'stt-error',{incomplete:true,recoveryAvailable:!!d.retainedBytes,error:'Timeout aguardando interactionStatus IDLE no ditado Live.'});notifyIdle();return;
  }
- commitNativeDictation(d);d.finalized=true;clearTimeout(d.finalTimer);const text=d.finalParts.join(' ').trim();
+ d.finalized=true;clearTimeout(d.finalTimer);const text=d.finalParts.join(' ').trim();
  const finish=async()=>{
   try{
    if(!text&&d.chunkTransport&&!d.receivedBytes){await recoveryState(d,'completed');if(d.controller.signal.aborted)return;sttDiagnostic(d,'final',{outcome:'NO_SPEECH',characters:0});await publicEvent(d.payload,'stt-final',{text:'',confirmedText:'',partialText:'',outcome:'NO_SPEECH',incomplete:false,publishedAt:Date.now()});return;}
@@ -514,10 +591,10 @@ function getSttScheduler(){return sttScheduler||=globalThis.SttScheduler.create(
 function sendSttAudio(d,bytes){getSttScheduler().sendAudio(d.lease,bytes,pcm=>d.session.sendAudio(pcm,16000));}
 function endSttAudio(d){getSttScheduler().endAudio(d.lease,()=>d.session.endAudio());}
 async function startStt(payload){
- if(payload.realtime===true)payload={...payload,transformInstruction:null,transformModels:undefined};
+ if(payload.realtime===true)payload={...payload,transformInstruction:null};
  if(dictations.has(payload.jobId))throw new Error('Sessão STT duplicada.');
- const d={payload,startedAt:performance.now(),timings:{},finalParts:[],pendingText:'',stopped:false,finalized:false,controller:new AbortController(),finalTimer:null};dictations.set(payload.jobId,d);
- const models=LiveConfig.modelChain('stt',payload.modelId,payload.models||[]),scheduler=getSttScheduler();
+ const d={payload,startedAt:performance.now(),timings:{},finalParts:[],stopped:false,finalized:false,controller:new AbortController(),finalTimer:null};dictations.set(payload.jobId,d);
+ const models=LiveConfig.modelChain('stt'),scheduler=getSttScheduler();
  try{
   LiveConfig.assertRouteModel(payload.modelId,'stt');if(payload.realtime===true||payload.chunked===true){d.recovery=globalThis.SttRecovery||SttRealtime.recovery;d.recoveryOpening=preserveSttAudio(d.recovery.start(payload.jobId,payload)).then(()=>{d.recoveryStarted=true;});await d.recoveryOpening;}sttDiagnostic(d,'connecting');
   if(payload.distributed===true&&payload.chunked===true){
@@ -527,8 +604,8 @@ async function startStt(payload){
    publicEvent(payload,'stt-status',{status:'Gravando · blocos STT distribuídos'});
    return{success:true,jobId:payload.jobId,modelId:payload.modelId,transform:!!payload.transformInstruction};
   }
-  d.lease=await scheduler.admit({jobId:payload.jobId,generation:payload.generation,keys:payload.apiKeys,models,signal:d.controller.signal,config:payload.schedulerPolicy,onAttempt:({modelId,keyIndex})=>publicEvent(payload,'stt-connect-attempt',{modelId,keyLabel:'key#'+keyIndex}),onAttemptError:({modelId,keyIndex,error})=>publicEvent(payload,'stt-connect-error',{modelId,keyLabel:'key#'+keyIndex,error:LiveConfig.redactSecrets(error.message||String(error),payload.apiKeys)}),open:({modelId,keyIndex,signal})=>manager.acquire({modelId,apiKey:payload.apiKeys[keyIndex-1],keyIndex,signal,mode:'dictation',jobId:payload.jobId,vad:payload.realtime===true||payload.chunked===true?{...payload.vad,disabled:true}:payload.vad,sttRecognition:payload.sttRecognition,thinkingLevel:payload.thinkingLevel,thinkingBudget:payload.thinkingBudget})});
-  d.timings.admissionMs=performance.now()-d.startedAt;d.session=d.lease.session;d.native=LiveConfig.caps(d.lease.modelId).sttProtocol==='native-audio';d.payload={...payload,modelId:d.lease.modelId};
+  d.lease=await scheduler.admit({jobId:payload.jobId,generation:payload.generation,keys:payload.apiKeys,models,signal:d.controller.signal,config:payload.schedulerPolicy,onAttempt:({modelId,keyIndex})=>publicEvent(payload,'stt-connect-attempt',{modelId,keyLabel:'key#'+keyIndex}),onAttemptError:({modelId,keyIndex,error})=>publicEvent(payload,'stt-connect-error',{modelId,keyLabel:'key#'+keyIndex,error:LiveConfig.redactSecrets(error.message||String(error),payload.apiKeys)}),open:({modelId,keyIndex,signal})=>manager.acquire({modelId,apiKey:payload.apiKeys[keyIndex-1],keyIndex,signal,mode:'dictation',jobId:payload.jobId,vad:{disabled:true},sttRecognition:payload.sttRecognition})});
+  d.timings.admissionMs=performance.now()-d.startedAt;d.session=d.lease.session;d.transcription=new SttRealtime.VerbatimTranscription();d.payload={...payload,modelId:d.lease.modelId};
   if(payload.realtime===true||payload.chunked===true)d.chunkTransport=realtimeTransport(d);
   d.session.handler=msg=>{
    if(d.controller.signal.aborted||d.finalized)return;
@@ -537,19 +614,17 @@ async function startStt(payload){
    if(msg.voiceActivity)sttDiagnostic(d,'server-event',{voiceActivity:msg.voiceActivity.type});
    const sc=msg.serverContent;if(!sc)return;
    if(d.chunkTransport){if(sc.interactionStatus)d.interactionStatus=sc.interactionStatus;d.chunkTransport.receive(sc);return;}
-   if(sc.modelTurn||sc.generationComplete||sc.interrupted||sc.waitingForInput){if(!d.lastServerDiagnosticAt||Date.now()-d.lastServerDiagnosticAt>=1000){d.lastServerDiagnosticAt=Date.now();sttDiagnostic(d,'server-event',{generationComplete:sc.generationComplete===true,interrupted:sc.interrupted===true,waitingForInput:sc.waitingForInput===true});}}
-   if(sc.interactionStatus){d.interactionStatus=sc.interactionStatus;if(d.stopped&&sc.interactionStatus==='IN_PROGRESS'&&LiveConfig.caps(d.payload.modelId).requiresInteractionIdle){clearTimeout(d.finalTimer);d.finalTimer=setTimeout(()=>finalizeDictation(d),90000);}}
-   if(sc.interimInputTranscription?.text){d.sawInterim=true;sttDiagnostic(d,'input-interim');publishSttPartial(d,{text:sc.interimInputTranscription.text,confirmedText:confirmedText(d),partialText:sc.interimInputTranscription.text});}
-   // Áudio/modelTurn/outputTranscription do assistente nunca entram no ditado ou no player.
-   if(sc.inputTranscription?.text){
-    sttDiagnostic(d,'input-transcription',{characters:sc.inputTranscription.text.length});
-    if(d.native){d.pendingText+=sc.inputTranscription.text;publishSttPartial(d,{text:d.pendingText,confirmed:true,confirmedText:confirmedText(d),partialText:''});}
-    else{d.finalParts.push(sc.inputTranscription.text);publicEvent(d.payload,'stt-segment',{text:sc.inputTranscription.text,confirmedText:confirmedText(d),partialText:''});}
+   if(!d.firstAudioSent||!d.transcription.update(sc))return;
+   if(d.transcription.length>1000000){realtimeFailure(d,Object.assign(Error('Limite de texto STT atingido.'),{code:'BACKPRESSURE'}));return;}
+   const text=d.transcription.text,partialText=d.transcription.interim;
+   if(sc.inputTranscription){
+    d.finalParts=text?[text]:[];
+    if(text)publicEvent(d.payload,'stt-segment',{text,confirmedText:text,partialText});
+    else if(d.sawInterim)publishSttPartial(d,{text:'',confirmedText:'',partialText:''});
+    if(d.stopped&&text){clearTimeout(d.finalTimer);d.finalTimer=setTimeout(()=>finalizeDictation(d),SttRealtime.CONFIG.settleMs);}
+   }else{
+    d.sawInterim=true;publishSttPartial(d,{text,confirmedText:text,partialText});
    }
-   if(d.native&&(sc.inputTranscription?.finished||sc.turnComplete||sc.interrupted))commitNativeDictation(d);
-   if(sc.turnComplete){if(d.stopped)d.stopTurnComplete=true;sttDiagnostic(d,'turn-complete',{turnComplete:true});}
-   // inputTranscription é independente de turnComplete. Sem texto, conserva o deadline maior.
-   if(d.stopped&&(!LiveConfig.caps(d.payload.modelId).requiresInteractionIdle||d.interactionStatus==='IDLE')&&(d.finalParts.length||d.pendingText?.trim())&&(d.stopTurnComplete||sc.inputTranscription?.finished||d.interactionStatus==='IDLE')){clearTimeout(d.finalTimer);if(!d.native&&sc.turnComplete)finalizeDictation(d);else d.finalTimer=setTimeout(()=>finalizeDictation(d),900);}
   };
   d.handleSessionMessage=d.session.handler;sttDiagnostic(d,'setup-complete',{setupComplete:true});publicEvent(d.payload,'setup-complete',{modelId:d.payload.modelId,socketOpenMs:d.session.socketOpenMs,setupCompleteMs:d.session.setupCompleteMs});return{success:true,jobId:payload.jobId,modelId:d.payload.modelId,transform:!!payload.transformInstruction};
  }catch(error){if(!d.controller.signal.aborted)await recoveryState(d,'interrupted');if(d.session)retireDictation(d);if(dictations.get(payload.jobId)===d)dictations.delete(payload.jobId);notifyIdle();throw error;}
@@ -621,7 +696,7 @@ function stopAllOperations(){
  manager.closeAll();
  panicCleanup=Promise.allSettled(releases).then(async results=>{
   await sttScheduler?.flush();
-  return{success:results.every(result=>result.status==='fulfilled'&&result.value!==false)};
+  return{success:results.every(result=>result.status==='fulfilled'&&result.value!==false),snapshot:globalSnapshot()};
  });
  return panicCleanup;
 }
@@ -630,7 +705,13 @@ async function command(payload){
  if(panicCleanup&&!['GLOBAL_JOBS_SNAPSHOT','GLOBAL_JOBS_ACK','STT_SCHEDULER_SNAPSHOT'].includes(payload.operation))return{success:false,error:'Documento de áudio em encerramento.'};
  if(payload.operation==='STT_SCHEDULER_SNAPSHOT')return{success:true,diagnostics:sttScheduler?.snapshot()||{version:1,activeJobs:0,accounts:[]}};
  if(payload.operation==='GLOBAL_JOBS_SNAPSHOT')return globalSnapshot();
- if(payload.operation==='GLOBAL_JOBS_ACK'){for(const [id,seq]of Object.entries(payload.sequences||{}))if(Number.isFinite(seq)&&seq>=(unacknowledged.get(id)??Infinity))unacknowledged.delete(id);notifyIdle();return{success:true};}
+ if(payload.operation==='GLOBAL_JOBS_ACK'){
+  for(const [id,ack] of Object.entries(payload.sequences||{})){
+   if(Number.isSafeInteger(ack?.eventSeq))acknowledgeEvent(id,ack.requestId,ack.eventSeq);
+  }
+  notifyIdle();
+  return{success:true};
+ }
  if(payload.operation==='PLAYBACK_INTENT'){if(Number.isSafeInteger(payload.playbackIntent)){latestIntent=Math.max(latestIntent,payload.playbackIntent);const scope=payload.tabId||0;tabIntents.set(scope,Math.max(tabIntents.get(scope)||0,payload.playbackIntent));}return{success:true};}
  if(payload.operation==='SET_GLOBAL'){
   globalVolumeInitialized=true;
@@ -641,7 +722,7 @@ async function command(payload){
  if(payload.operation==='TTS_LIVE_START'){if(!globalVolumeInitialized&&Number.isFinite(payload.globalVolume)){globalVolume=payload.globalVolume;globalVolumeInitialized=true;}return startTts(payload);}
  if(payload.operation==='STT_LIVE_START')return startStt(payload);
  // Só Stop/perda de origem inicia a espera final. Ausência de texto não para a captura.
- if((payload.operation==='STT_LIVE_STOP'||payload.operation==='STT_ORIGIN_LOST')&&dictations.get(payload.jobId)?.chunkTransport){const d=dictations.get(payload.jobId);if(d.stopped||d.finalized)return{success:true};d.stopped=true;d.stoppedAt=performance.now();d.stopReason=payload.operation==='STT_ORIGIN_LOST'||payload.stopReason==='origin-lost'?'origin-lost':'user-stop';sttDiagnostic(d,'session-ending',{stopReason:d.stopReason});if(payload.operation==='STT_ORIGIN_LOST'){d.originLost=true;publicEvent(d.payload,'stt-origin-lost');}sttDiagnostic(d,'awaiting-gemini');publicEvent(d.payload,'stt-status',{status:'Aguardando Gemini'});void d.chunkTransport.finish().then(result=>{if(d.controller.signal.aborted)return;d.finalParts=result.text?[result.text]:[];d.pendingText='';d.incomplete=d.incomplete||result.incomplete;sttDiagnostic(d,'consolidated',{stopToFinalMs:performance.now()-d.stoppedAt,characters:result.text.length,unresolved:result.unresolved});finalizeDictation(d);},()=>{});return{success:true};}
+ if((payload.operation==='STT_LIVE_STOP'||payload.operation==='STT_ORIGIN_LOST')&&dictations.get(payload.jobId)?.chunkTransport){const d=dictations.get(payload.jobId);if(d.stopped||d.finalized)return{success:true};d.stopped=true;d.stoppedAt=performance.now();d.stopReason=payload.operation==='STT_ORIGIN_LOST'||payload.stopReason==='origin-lost'?'origin-lost':'user-stop';sttDiagnostic(d,'session-ending',{stopReason:d.stopReason});if(payload.operation==='STT_ORIGIN_LOST'){d.originLost=true;publicEvent(d.payload,'stt-origin-lost');}sttDiagnostic(d,'awaiting-gemini');publicEvent(d.payload,'stt-status',{status:'Aguardando Gemini'});void d.chunkTransport.finish().then(result=>{if(d.controller.signal.aborted)return;d.finalParts=result.text?[result.text]:[];d.incomplete=d.incomplete||result.incomplete;sttDiagnostic(d,'consolidated',{stopToFinalMs:performance.now()-d.stoppedAt,characters:result.text.length,unresolved:result.unresolved});finalizeDictation(d);},()=>{});return{success:true};}
  if(payload.operation==='STT_LIVE_AUDIO'){
   const d=dictations.get(payload.jobId);if((!d?.session&&!d?.distributed)||d.stopped||d.finalized||d.controller.signal.aborted)return{success:false,error:'Ditado Live não está capturando.'};
   const boundary=!!d.chunkTransport&&(payload.endOnly===true||payload.activityEndOnly===true);

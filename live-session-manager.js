@@ -8,7 +8,19 @@ function websocketEndpoint(apiVersion='v1beta'){if(!['v1beta','v1alpha'].include
 async function readMessageData(data){if(typeof data==='string')return data;if(typeof Blob!=='undefined'&&data instanceof Blob)return data.text();if(data instanceof ArrayBuffer||ArrayBuffer.isView(data))return new TextDecoder().decode(data);throw new Error('Formato de mensagem WebSocket Live não suportado.');}
 function decodeBase64(value){const raw=atob(value),out=new Uint8Array(raw.length);for(let i=0;i<raw.length;i++)out[i]=raw.charCodeAt(i);return out;}
 function encodeBase64(bytes){let s='';for(let i=0;i<bytes.length;i+=0x8000)s+=String.fromCharCode(...bytes.subarray(i,i+0x8000));return btoa(s);}
-function classifyLiveError(error){const status=error?.httpStatus||Number(String(error?.message||'').match(/\b(400|401|403|404|422|429|500|502|503|529)\b/)?.[1]),m=String(error?.message||error||'');if(error?.cancelled||/cancel/i.test(m))return'CANCELLED';if(/invalidated/i.test(m))return'INVALIDATED_CONTEXT';if(status===429||/quota|rate limit/i.test(m))return'QUOTA';if(status===401||status===403||/api.?key|credential/i.test(m))return'AUTH';if(error?.closeCode===1007){const sent=error.lastSentType,phase=error.protocolPhase;if(['setup','turn'].includes(sent)&&['awaiting-setup-complete','awaiting-first-pcm','streaming'].includes(phase)&&/invalid[_ ]argument|invalid (?:argument|json)|unknown (?:field|name)|cannot find field|malformed|unsupported (?:field|parameter)/i.test(error.closeReason||''))return'REQUEST';return'UNKNOWN';}if(status===400||status===422||/invalid.argument|invalid setup|payload/i.test(m))return'REQUEST';if(status===404||/model.*(?:not found|unavailable|denied)/i.test(m))return'MODEL';if(status>=500||/timeout|goaway|closed|socket/i.test(m))return'TRANSIENT';return'NETWORK';}
+function classifyLiveError(error){
+ const message=String(error?.message||error||''),reason=String(error?.closeReason||'');
+ const status=error?.httpStatus||Number(message.match(/\b(400|401|403|404|422|429|500|502|503|529)\b/)?.[1]);
+ const detail=[error?.apiStatus,message,reason].join(' ');
+ if(error?.cancelled||error?.code==='CANCELLED'||error?.name==='AbortError')return 'CANCELLED';
+ if(/invalidated/i.test(detail))return 'INVALIDATED_CONTEXT';
+ if(status===429||/quota|resource.exhausted|rate limit/i.test(detail))return 'QUOTA';
+ if([401,403].includes(status)||/unauthenticated|permission.denied|api[_ ]key[_ ]invalid|invalid api.?key|api.?key (?:is )?not valid|credentials? (?:missing|invalid)/i.test(detail))return 'AUTH';
+ if(status===404||/\bmodels?\b.*(?:not found|not supported|incompatible|unavailable for)/i.test(detail))return 'MODEL';
+ if([400,422].includes(status)||[1007,1008].includes(error?.closeCode)||/invalid.argument|invalid setup|payload/i.test(detail))return 'REQUEST';
+ if(status>=500||/timeout|goaway/i.test(message)||[1001,1006,1011,1012,1013].includes(error?.closeCode))return 'TRANSIENT';
+ return 'NETWORK';
+}
 class LiveSession{
  constructor(manager,options){this.manager=manager;this.options=options.mode==='dictation'?{...options,vad:config.dictationVad(options.modelId,options.vad)}:options;this.id='live-'+Date.now()+'-'+Math.random().toString(36).slice(2);this.ready=false;this.closed=false;this.busy=true;this.lastUsedAt=Date.now();this.resumeHandle=options.resumeHandle||null;this.handler=null;}
  trace(event,extra={}){if(this.options.mode==='dictation'||!config.caps(this.options.modelId).supportsNarration)return;this.protocolLog ||= [];const safeExtra={};for(const key of ['code','readyState'])if(Number.isFinite(extra[key]))safeExtra[key]=extra[key];if(typeof extra.local==='boolean')safeExtra.local=extra.local;if(['IDLE','IN_PROGRESS'].includes(extra.interactionStatus))safeExtra.interactionStatus=extra.interactionStatus;if(typeof extra.mimeType==='string'&&/^audio\/pcm(?:;rate=\d+)?$/.test(extra.mimeType))safeExtra.mimeType=extra.mimeType;const entry={event,at:new Date().toISOString(),elapsedMs:performance.now()-(this.connectStartedAt||performance.now()),phase:this.protocolPhase||'created',readyState:this.socket?.readyState??null,...safeExtra};this.protocolLog.push(entry);if(this.protocolLog.length>40)this.protocolLog.shift();if(globalThis.LiveTtsDiagnostics){try{rememberDiagnostic(this);globalThis.LiveTtsDiagnostics.captureProtocol(getTtsDiagnostics().find(s=>s.sessionId===this.id));}catch{/* Diagnóstico não interfere no protocolo. */}}}
@@ -23,8 +35,7 @@ class LiveSession{
  }
  async connect(){
   const route=this.options.mode==='dictation'?'stt':'tts';
-  const narration=this.options.mode==='narration';
-  config.assertRouteModel(this.options.modelId,route);
+   config.assertRouteModel(this.options.modelId,route);
   const builder=route==='stt'?config.buildLiveSttSessionConfig:config.buildLiveSessionConfig;
   // Payload estrutural é validado antes de abrir socket ou consumir outra chave.
   const setup=builder({...this.options,resumeHandle:this.resumeHandle});this.lastSetup=setup;
@@ -40,8 +51,8 @@ class LiveSession{
   socket.onopen=()=>{clearTimeout(openedTimer);this.socketOpenMs=performance.now()-started;this.protocolPhase='socket-open';this.trace('socket-open');openResolve();};
   let incoming=Promise.resolve();
   const receive=async(event,receivedMs,afterAudioEnd,afterNewSpeech)=>{
-   if(narration&&this.closed)return;
-   let msg;try{const data=await readMessageData(event.data);if(narration&&this.closed)return;msg=JSON.parse(data);}catch(error){if(this.options.mode==='dictation'){this.sttCounters||={sentChunks:0,sentBytes:0,activityStarts:0,activityEnds:0,streamEnds:0,inputEvents:0,interimEvents:0};this.sttCounters.parseErrors=(this.sttCounters.parseErrors||0)+1;this.sttDiagnostic('message-parse-error');}this.trace('message-parse-error',{error:config.redactSecrets(error.message,[this.options.apiKey])});return;}
+   if(this.closed)return;
+   let msg;try{const data=await readMessageData(event.data);if(this.closed)return;msg=JSON.parse(data);}catch(error){if(this.options.mode==='dictation'){this.sttCounters||={sentChunks:0,sentBytes:0,activityStarts:0,activityEnds:0,streamEnds:0,inputEvents:0,interimEvents:0};this.sttCounters.parseErrors=(this.sttCounters.parseErrors||0)+1;this.sttDiagnostic('message-parse-error');}this.trace('message-parse-error',{error:config.redactSecrets(error.message,[this.options.apiKey])});return;}
    this.lastReceivedEvent={fields:Object.keys(msg),serverContentFields:Object.keys(msg.serverContent||{})};this.trace('message-received',{fields:this.lastReceivedEvent.fields});
    if(this.options.mode==='dictation'){const m=this.sttCounters||={sentChunks:0,sentBytes:0,activityStarts:0,activityEnds:0,streamEnds:0,inputEvents:0,interimEvents:0};m.serverMessages=(m.serverMessages||0)+1;if(afterAudioEnd){m.messagesAfterEnd=(m.messagesAfterEnd||0)+1;m.firstServerAfterEndMs??=receivedMs;}if(msg.voiceActivity){m.voiceActivityEvents=(m.voiceActivityEvents||0)+1;if(msg.voiceActivity.type==='ACTIVITY_START')m.voiceStarts=(m.voiceStarts||0)+1;if(msg.voiceActivity.type==='ACTIVITY_END')m.voiceEnds=(m.voiceEnds||0)+1;}const sc=msg.serverContent;for(const [field,counter]of [['setupComplete','setupMessages'],['sessionResumptionUpdate','resumptionMessages'],['usageMetadata','usageMessages'],['goAway','goAwayMessages'],['toolCall','toolMessages'],['toolCallCancellation','toolMessages'],['serverContent','serverContentMessages'],['error','errorMessages']])if(msg[field])m[counter]=(m[counter]||0)+1;if(!['setupComplete','sessionResumptionUpdate','usageMetadata','goAway','toolCall','toolCallCancellation','serverContent','voiceActivity','error'].some(field=>msg[field]))m.unknownMessages=(m.unknownMessages||0)+1;if(sc?.modelTurn)m.modelTurnEvents=(m.modelTurnEvents||0)+1;if(sc?.outputTranscription)m.outputEvents=(m.outputEvents||0)+1;if(sc?.inputTranscription){m.inputLineBreaks=(m.inputLineBreaks||0)+(typeof sc.inputTranscription.text==='string'?(sc.inputTranscription.text.match(/\n/g)||[]).length:0);m.inputEvents=(m.inputEvents||0)+1;m.characters=(m.characters||0)+(sc.inputTranscription.text?.length||0);if(sc.inputTranscription.finished)m.inputFinished=true;}if(sc?.interimInputTranscription){m.interimEvents=(m.interimEvents||0)+1;m.interimLineBreaks=(m.interimLineBreaks||0)+(typeof sc.interimInputTranscription.text==='string'?(sc.interimInputTranscription.text.match(/\n/g)||[]).length:0);}
     const now=performance.now(),control=!sc||sc.turnComplete||sc.generationComplete||sc.interrupted||sc.waitingForInput||sc.interactionStatus||sc.inputTranscription||sc.interimInputTranscription;if(control||!this.lastSttDiagnosticAt||now-this.lastSttDiagnosticAt>=1000){this.lastSttDiagnosticAt=now;this.sttDiagnostic('server-message',{serverEventTypes:Object.keys(msg),serverContentTypes:Object.keys(sc||{}),elapsedMs:receivedMs,afterAudioEnd,afterNewSpeech,inputFinished:sc?.inputTranscription?.finished,setupComplete:this.setupCompleteMs!==undefined||!!msg.setupComplete,voiceActivity:msg.voiceActivity?.type,interactionStatus:sc?.interactionStatus,turnComplete:sc?.turnComplete,generationComplete:sc?.generationComplete,interrupted:sc?.interrupted,waitingForInput:sc?.waitingForInput});}
@@ -51,9 +62,9 @@ class LiveSession{
    if(msg.setupComplete){clearTimeout(setupTimer);this.setupCompleteMs=performance.now()-started;this.ready=true;this.protocolPhase='ready';this.trace('setup-complete');setupResolve();}
    if(msg.goAway){this.retiring=true;this.manager.onGoAway?.(this,msg.goAway.timeLeft);}
    if(this.options.mode==='dictation'){
-    if(msg.serverContent||msg.voiceActivity||msg.usageMetadata)this.handler?.(msg,{afterAudioEnd,afterNewSpeech});
+    if(msg.serverContent||msg.voiceActivity||msg.usageMetadata)this.handler?.(msg,{afterAudioEnd,afterNewSpeech,receivedAt:performance.timeOrigin+started+receivedMs});
    }else if(msg.serverContent)this.handler?.(msg);
-   if(msg.error){const error=new Error(String(msg.error.message||msg.error.status||'Erro Live.'));error.httpStatus=Number(msg.error.code)||undefined;if(this.options.mode==='dictation'){for(const detail of msg.error.details||[]){if(typeof detail.retryDelay==='string'&&/^\d+(?:\.\d+)?s$/.test(detail.retryDelay))error.retryAfterMs=Math.min(86400000,parseFloat(detail.retryDelay)*1000);}}this.trace('server-error',{code:error.httpStatus||null,error:config.redactSecrets(error.message,[this.options.apiKey])});setupReject(error);this.fail(error);}
+   if(msg.error){const error=new Error(String(msg.error.message||msg.error.status||'Erro Live.'));error.httpStatus=Number(msg.error.code)>=100?Number(msg.error.code):undefined;error.apiStatus=msg.error.status;if(this.options.mode==='dictation'){for(const detail of msg.error.details||[]){if(typeof detail.retryDelay==='string'&&/^\d+(?:\.\d+)?s$/.test(detail.retryDelay))error.retryAfterMs=Math.min(86400000,parseFloat(detail.retryDelay)*1000);}}this.trace('server-error',{code:error.httpStatus||null,error:config.redactSecrets(error.message,[this.options.apiKey])});setupReject(error);this.fail(error);}
   };
   socket.onmessage=event=>{const receivedMs=performance.now()-this.connectStartedAt,afterAudioEnd=this.sttCounters?.audioEndMs!==undefined,afterNewSpeech=this.sentNewSpeech;incoming=incoming.then(()=>receive(event,receivedMs,afterAudioEnd,afterNewSpeech)).catch(error=>this.fail(error));};
   socket.onerror=()=>{const error=new Error('Falha de rede no WebSocket Live.');this.trace('socket-error');openReject(error);setupReject(error);this.fail(error);};
@@ -68,7 +79,7 @@ class LiveSession{
    openReject(error);setupReject(error);this.fail(error);
   };
   socket.onclose=event=>{
-   if(narration&&!this.localClose){
+   if(!this.localClose){
     // The last turnComplete can still be queued behind an asynchronous Blob read.
     this.retiring=true;
     void incoming.then(()=>finishClose(event));

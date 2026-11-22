@@ -3,11 +3,11 @@ const test=require('node:test'),assert=require('node:assert/strict');
 const api=require('../stt-scheduler.js'),{classifyLiveError}=require('../live-session-manager.js');
 const flush=()=>new Promise(resolve=>setImmediate(resolve));
 const KEYS=Array.from({length:9},(_,i)=>'unit-only-account-'+(i+1));
-const [FIRST,SECOND]=api.MODELS;
+const FIRST='gemini-3.5-transcribe-live';
 function fixture(extra={}){
  let clock=1000,n=0;const timers=new Map(),retired=[],calls=[],saved=[];
  const scheduler=api.create({now:()=>clock,setTimer(fn,ms){const id=++n;timers.set(id,{fn,ms,at:clock+ms});return id;},clearTimer:id=>timers.delete(id),classify:classifyLiveError,retire:s=>{retired.push(s);s.closed=true;},...extra});
- const start=(jobId,options={})=>scheduler.admit({jobId,keys:KEYS,models:[FIRST,SECOND],open:async pair=>{calls.push(pair);return{id:jobId,sent:[]};},...options});
+ const start=(jobId,options={})=>scheduler.admit({jobId,keys:KEYS,models:[FIRST],open:async pair=>{calls.push(pair);return{id:jobId,sent:[]};},...options});
  const advance=async ms=>{clock+=ms;for(const[id,t]of [...timers])if(t.at<=clock){timers.delete(id);t.fn();}await flush();};
  const until=async predicate=>{for(let i=0;i<1000&&!predicate();i++)await flush();assert.ok(predicate(),'condição assíncrona não atingida');};
  return{scheduler,start,timers,retired,calls,saved,advance,until,clock:()=>clock};
@@ -26,34 +26,26 @@ test('limite global não é burlado por trocar conta/modelo; espera expira em 2s
 test('fila de admissão tem limite e cancelamento do aguardando não cancela ativo',async()=>{
  const e=fixture(),a=await e.start('a',{keys:KEYS.slice(0,1)}),c=new AbortController(),b=e.start('b',{keys:KEYS.slice(0,1),signal:c.signal,config:{maxWaiting:1}});await e.until(()=>[...e.timers.values()].some(t=>t.ms===2000));await assert.rejects(e.start('c',{config:{maxWaiting:1}}),{code:'BACKPRESSURE'});c.abort();await assert.rejects(b,/cancelado/);assert.equal(e.scheduler.snapshot().activeJobs,1);e.scheduler.release(a);
 });
-test('preferência e Zero-Retry: todas nove contas de um modelo antes do próximo',async()=>{
- const e=fixture(),calls=[];await assert.rejects(e.start('x',{models:[SECOND,FIRST],open:async p=>{calls.push([p.modelId,p.keyIndex]);throw Object.assign(Error('429 quota'),{httpStatus:429});}}));assert.deepEqual(calls, [SECOND,FIRST].flatMap(m=>KEYS.map((_,i)=>[m,i+1])));assert.equal(new Set(calls.map(x=>x.join('|'))).size,18);assert.equal(e.scheduler.snapshot().activeJobs,0);
+test('esgota nove contas do mesmo modelo quando há cota',async()=>{
+ const e=fixture(),calls=[];
+ await assert.rejects(e.start('x',{open:async p=>{calls.push([p.modelId,p.keyIndex]);throw Object.assign(Error('429 quota'),{httpStatus:429});}}));
+ assert.deepEqual(calls,KEYS.map((_,i)=>[FIRST,i+1]));assert.equal(e.scheduler.snapshot().activeJobs,0);
 });
-test('réplicas distribuídas mantêm contas distintas sem bloquear fallback após setup falhar',async()=>{
- const e=fixture(),blockAccounts=new Set(),calls=[];
- const open=async pair=>{
-  calls.push([pair.modelId,pair.keyIndex]);
-  if(pair.modelId===FIRST)throw Object.assign(Error('Model not found'),{httpStatus:404});
-  return {};
- };
- let first,second;
- try{
-  first=await e.start('block:1',{blockAccounts,open});
-  second=await e.start('block:2',{blockAccounts,open});
-  assert.equal(first.modelId,SECOND);assert.equal(second.modelId,SECOND);
-  assert.notEqual(first.keyIndex,second.keyIndex);
-  assert.deepEqual(calls.slice(0,9),KEYS.map((_,i)=>[FIRST,i+1]));
-  assert.equal(new Set(calls.map(c=>c.join('|'))).size,calls.length);
-  assert.equal(blockAccounts.size,2);
- }finally{e.scheduler.release(first);e.scheduler.release(second);}
- assert.equal(e.scheduler.snapshot().activeJobs,0);
+test('réplicas mantêm chaves distintas e 404 encerra a admissão na primeira tentativa',async()=>{
+ const e=fixture(),blockAccounts=new Set();
+ const first=await e.start('block:1',{blockAccounts}),second=await e.start('block:2',{blockAccounts});
+ assert.equal(first.modelId,second.modelId);assert.notEqual(first.keyIndex,second.keyIndex);assert.equal(blockAccounts.size,2);
+ e.scheduler.release(first);e.scheduler.release(second);
+ let attempts=0;
+ await assert.rejects(e.start('global-model',{open:async()=>{attempts++;throw Object.assign(Error('Model not found'),{httpStatus:404});}}),/not found/);
+ assert.equal(attempts,1);assert.equal(e.scheduler.snapshot().activeJobs,0);
 });
 test('429 observado persiste cooldown por conta/modelo; não repete par no job nem espera retry',async()=>{
  const e=fixture(),calls=[],a=await e.start('a',{keys:KEYS.slice(0,2),open:async p=>{calls.push(p.keyIndex);if(p.keyIndex===1)throw Object.assign(Error('quota'),{httpStatus:429,retryAfterMs:90000});return{};}});assert.deepEqual(calls,[1,2]);e.scheduler.release(a);
  const state=e.scheduler.exportState(),again=fixture({load:()=>state}),b=await again.start('b',{keys:KEYS.slice(0,2)});assert.equal(b.keyIndex,2);assert.equal(again.scheduler.snapshot().accounts.find(x=>x.account==='key#1').models[0].quota429,1);again.scheduler.release(b);await again.advance(90001);const c=await again.start('c',{keys:KEYS.slice(0,2)});assert.equal(c.keyIndex,1);again.scheduler.release(c);
 });
-test('AUTH 401 desabilita conta entre modelos, 403 é restrito ao modelo',async()=>{
- for(const status of [401,403]){const e=fixture(),seen=[];await assert.rejects(e.start('a',{keys:KEYS.slice(0,1),open:async p=>{seen.push(p.modelId);throw Object.assign(Error('denied'),{httpStatus:status});}}));assert.deepEqual(seen,status===401?[FIRST]:[FIRST,SECOND]);}
+test('AUTH 401 e 403 não disparam outro modelo',async()=>{
+ for(const status of [401,403]){const e=fixture(),seen=[];await assert.rejects(e.start('a',{keys:KEYS.slice(0,1),open:async p=>{seen.push(p.modelId);throw Object.assign(Error('denied'),{httpStatus:status});}}));assert.deepEqual(seen,[FIRST]);}
 });
 test('REQUEST e cancelamento não gastam outras contas/modelos',async()=>{
  const e=fixture();let calls=0;await assert.rejects(e.start('a',{open:async()=>{calls++;throw Object.assign(Error('invalid setup'),{httpStatus:400});}}));assert.equal(calls,1);assert.equal(e.scheduler.snapshot().activeJobs,0);

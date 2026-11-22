@@ -5,7 +5,7 @@ function environment(sampleRate=24000){
  // Run the real processor's message handler; only the AudioContext is simulated here.
  let Processor;vm.runInNewContext(fs.readFileSync(require.resolve('../pcm-player-worklet.js'),'utf8'),{sampleRate,Float32Array,AudioWorkletProcessor:class{constructor(){this.port={postMessage(){}};}},registerProcessor:(_name,type)=>Processor=type});
  class AudioWorkletNode{constructor(){this.sent=[];this.processor=new Processor();this.processor.port.postMessage=data=>queueMicrotask(()=>this.port.onmessage?.({data}));this.port={postMessage:(data,transfer)=>{const copy=structuredClone(data,{transfer});this.sent.push(copy);this.processor.port.onmessage({data:copy});}};nodes.push(this);}connect(target){return target;}}
- const context=vm.createContext({console,performance,AudioContext,AudioWorkletNode,structuredClone,DataView,Float32Array,Uint8Array,AbortController,setTimeout,clearTimeout,setInterval(){},clearInterval(){},chrome:{runtime:{getURL:x=>x,onMessage:{addListener(fn){listener=fn;}},sendMessage(msg){if(['LIVE_OFFSCREEN_EVENT','TTS_PLAYBACK_EVENT'].includes(msg.type))events.push(msg.payload);return Promise.resolve({success:true});}}},LiveSessions:{LiveSessionManager:class{}},SttScheduler:require('../stt-scheduler.js'),LiveConfig:require('../live-config.js')});
+ const context=vm.createContext({console,performance,AudioContext,AudioWorkletNode,structuredClone,DataView,Float32Array,Uint8Array,AbortController,setTimeout,clearTimeout,setInterval(){},clearInterval(){},chrome:{runtime:{getURL:x=>x,onMessage:{addListener(fn){listener=fn;}},sendMessage(msg){if(['LIVE_OFFSCREEN_EVENT','TTS_PLAYBACK_EVENT'].includes(msg.type))events.push(msg.payload);return Promise.resolve({success:true,jobId:msg.payload?.jobId??null,eventSeq:msg.payload?.eventSeq??null,result:'applied'});}}},LiveSessions:{LiveSessionManager:class{}},SttScheduler:require('../stt-scheduler.js'),SttRealtime:require('../stt-realtime.js'),LiveConfig:require('../live-config.js')});
  const source=fs.readFileSync(require.resolve('../offscreen.js'),'utf8');
  vm.runInContext(source.replace(/\}\)\(\);\s*$/,'globalThis.underTest={toFloat,pcmFormat,OrderedPlaybackBuffer};})();'),context);
  return{...context.underTest,events,contexts,nodes,context,command:payload=>new Promise(resolve=>listener({target:'offscreen',type:'LIVE_OFFSCREEN_COMMAND',payload},{},resolve))};
@@ -113,10 +113,10 @@ test('regressão STT offscreen mantém envio PCM, partial, final e encerramento'
  const e=environment(),audio=[],session={socketOpenMs:1,setupCompleteMs:2,sendAudio(bytes,rate){audio.push([bytes.length,rate]);},endAudio(){this.ended=true;}};
  e.context.LiveSessions.LiveSessionManager.prototype.acquire=async()=>session;e.context.LiveSessions.LiveSessionManager.prototype.retire=()=>{};
  e.context.LiveSessions.decodeBase64=x=>new Uint8Array(Buffer.from(x,'base64'));
- const payload={jobId:'stt',modelId:'gemini-3.8-live',apiKeys:['fake-only']};assert.equal((await e.command({...payload,operation:'STT_LIVE_START'})).success,true);
+ const payload={jobId:'stt',modelId:'gemini-3.5-transcribe-live',apiKeys:['fake-only']};assert.equal((await e.command({...payload,operation:'STT_LIVE_START'})).success,true);
  await e.command({...payload,operation:'STT_LIVE_AUDIO',audioBase64:'AAA=',sampleRate:16000});assert.deepEqual(audio,[[2,16000]]);
- session.handler({serverContent:{interimInputTranscription:{text:'Teste'},inputTranscription:{text:'Teste completo.'}}});await new Promise(r=>setImmediate(r));assert.equal(e.events.find(x=>x.event==='stt-partial').text,'Teste');
- await e.command({...payload,operation:'STT_LIVE_STOP'});assert.equal(session.ended,true);session.handler({serverContent:{turnComplete:true}});await new Promise(r=>setTimeout(r,1000));assert.equal(e.events.find(x=>x.event==='stt-final').text,'Teste completo.');
+ session.handler({serverContent:{interimInputTranscription:{text:'Teste'}}});await new Promise(r=>setImmediate(r));assert.equal(e.events.find(x=>x.event==='stt-partial').partialText,'Teste');
+ await e.command({...payload,operation:'STT_LIVE_STOP'});assert.equal(session.ended,true);session.handler({serverContent:{inputTranscription:{text:'Teste completo.'}}});await new Promise(r=>setTimeout(r,1000));assert.equal(e.events.find(x=>x.event==='stt-final').text,'Teste completo.');
 });
 test('Ouvir inicia seleção com agente ativo sem substituir tarefa em andamento/replay',()=>{
  const source=fs.readFileSync(require.resolve('../content.js'),'utf8'),start=source.indexOf('    hudController_1.hud.onPlayPauseClick ='),end=source.indexOf('    hudController_1.hud.onStopClick',start),calls=[];
@@ -126,9 +126,9 @@ test('Ouvir inicia seleção com agente ativo sem substituir tarefa em andamento
 });
 test('ditado simples não transforma; agente transforma antes de publicar final',async()=>{
  for(const transformInstruction of [undefined,'Formate o resultado.']){
-  const e=environment(),calls=[],stt={socketOpenMs:1,setupCompleteMs:2,endAudio(){}},transform={sendTurn:async(text,_callback,signal)=>{assert.equal(text,'fala original');assert.equal(signal.aborted,false);return{text:'resultado formatado'};}};
+  const e=environment(),calls=[],stt={socketOpenMs:1,setupCompleteMs:2,sendAudio(){},endAudio(){}},transform={sendTurn:async(text,_callback,signal)=>{assert.equal(text,'fala original');assert.equal(signal.aborted,false);return{text:'resultado formatado'};}};
   e.context.LiveSessions.LiveSessionManager.prototype.acquire=async options=>{calls.push(options);return calls.length===1?stt:transform;};e.context.LiveSessions.LiveSessionManager.prototype.retire=()=>{};e.context.LiveSessions.LiveSessionManager.prototype.release=()=>{};
-  const payload={jobId:'stt-transform',modelId:'gemini-3.8-live',apiKeys:['fake-only'],transformInstruction};await e.command({...payload,operation:'STT_LIVE_START'});stt.handler({serverContent:{inputTranscription:{text:'fala original'}}});await e.command({...payload,operation:'STT_LIVE_STOP'});stt.handler({serverContent:{turnComplete:true}});await new Promise(r=>setTimeout(r,1000));
+  const payload={jobId:'stt-transform',modelId:'gemini-3.5-transcribe-live',apiKeys:['fake-only'],transformInstruction};await e.command({...payload,operation:'STT_LIVE_START'});e.context.LiveSessions.decodeBase64=x=>new Uint8Array(Buffer.from(x,'base64'));await e.command({...payload,operation:'STT_LIVE_AUDIO',audioBase64:'AQA='});await e.command({...payload,operation:'STT_LIVE_STOP'});stt.handler({serverContent:{inputTranscription:{text:'fala original'}}});await new Promise(r=>setTimeout(r,1000));
   assert.equal(calls.length,transformInstruction?2:1);assert.equal(e.events.find(x=>x.event==='stt-final').text,transformInstruction?'resultado formatado':'fala original');
   if(transformInstruction){assert.equal(calls[1].modelId,'gemini-3.8-live');assert.equal(calls[1].systemInstruction,transformInstruction);assert.equal(calls[1].outputTranscription,true);}
  }

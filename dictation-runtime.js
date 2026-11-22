@@ -107,7 +107,7 @@ class Insertion{
    if(!isCurrent())return{inserted:false,reason:'SUPERSEDED'};
    if(editorTrace)editorTrace.before=this.editorSnapshot();
    try{return await this.perform(rawText,final,isCurrent);}
-   finally{if(editorTrace)editorTrace.after=this.editorSnapshot();}
+   finally{if(editorTrace){editorTrace.after=this.editorSnapshot();editorTrace.editorWriteAt=this.editorWriteAt;}}
   });
   this.serial=run.catch(()=>{});
   return run;
@@ -198,7 +198,7 @@ class Insertion{
     if(element.value!==actual)return{inserted:false,reason:'TARGET_CHANGED'};
     if(typeof element.setRangeText==='function')element.setRangeText(patch.text,start,end,'preserve');
     else element.value=value;
-    this.editorWrites=(this.editorWrites||0)+1;
+    this.editorWrites=(this.editorWrites||0)+1;this.editorWriteAt=Date.now();
     this.checkpoint();
     Object.assign(this,{expected:value,applied:owned,end:this.start+owned.length,hasOwned:true});
     element.dispatchEvent(inputEvent('input',patch.text));
@@ -279,7 +279,7 @@ class Insertion{
    }
    // O Range acompanha o intervalo quando o editor mescla nós de texto adjacentes.
    this.rangeCheckpoint={offset:rangeOffset(element,node,start),value:rangeText(element)};
-   this.editorWrites=(this.editorWrites||0)+1;
+   this.editorWrites=(this.editorWrites||0)+1;this.editorWriteAt=Date.now();
    this.hasOwned=true;
    this.applied=owned;
    this.currentText=text;

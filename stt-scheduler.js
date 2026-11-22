@@ -2,7 +2,10 @@
 (function(root,factory){const api=factory(root);if(typeof module==='object'&&module.exports)module.exports=api;else root.SttScheduler=api;})(globalThis,function(root){
 'use strict';
 const STORAGE_KEY='falamermo.sttScheduler.v1',WINDOW=60000,TTL=86400000;
-const MODELS=Object.freeze([...(root.LiveConfig||require('./live-config.js')).LIVE_MODEL_PRIORITY]);
+const config=root.LiveConfig||require('./live-config.js');
+const ACTIVE_MODEL=config.DEFAULTS.sttModelId;
+// IDs históricos continuam legíveis para os limites e diagnósticos armazenados.
+const MODELS=Object.freeze(Object.values(config.LIVE_MODEL_CAPABILITIES).filter(model=>model.supportsSTT).map(model=>model.modelId));
 // Approximate audio input rate, not a billing/quota guarantee. See docs/RELEASE-v1.0.3.md.
 const DEFAULTS=Object.freeze({maxSessions:9,maxPerAccount:1,maxWaiting:9,waitMs:2000,setupMs:25000,headroom:.8,tokensPerSecond:25,horizonSeconds:12,setupTokens:64});
 const REASONS=new Set(['AVAILABLE','LOWER_LOAD','COOLDOWN','AUTH','TPM','BUSY','ADMISSION_TIMEOUT','SETUP_TIMEOUT','QUOTA','TRANSIENT','MODEL','NETWORK','UNKNOWN','REQUEST','CANCELLED','INVALIDATED_CONTEXT','BACKPRESSURE','CHUNK_TIMEOUT','RELEASED']);
@@ -68,10 +71,10 @@ function create(services={}){
  function markFailure(j,e,kind){
   const a=j.account,m=j.metric;if(!a||!m)return;
   const status=e?.httpStatus||e?.cause?.httpStatus;
-  m.reason=REASONS.has(kind)?kind:'UNKNOWN';if(!['CANCELLED','REQUEST','INVALIDATED_CONTEXT'].includes(kind))m.failures++;
+  m.reason=REASONS.has(kind)?kind:'UNKNOWN';if(!['CANCELLED','REQUEST','MODEL','INVALIDATED_CONTEXT'].includes(kind))m.failures++;
   if(kind==='QUOTA'){m.quota429++;const delay=finite(e?.retryAfterMs)?e.retryAfterMs:finite(e?.retryDelayMs)?e.retryDelayMs:60000;m.cooldownUntil=now()+Math.min(TTL,delay);}
   else if(kind==='AUTH'){m.authErrors++;m.cooldownUntil=now()+3600000;if(status===401||e?.keyInvalid===true||/api[_ ]key[_ ]invalid|invalid api.?key|api.?key (?:is )?not valid/i.test(e?.message||''))a.authUntil=now()+3600000;}
-  else if(!['REQUEST','CANCELLED','INVALIDATED_CONTEXT','TPM'].includes(kind))m.cooldownUntil=now()+15000;
+  else if(!['REQUEST','MODEL','CANCELLED','INVALIDATED_CONTEXT','TPM'].includes(kind))m.cooldownUntil=now()+15000;
   a.at=now();changed();
  }
  function release(j,reason='RELEASED'){
@@ -103,44 +106,43 @@ function create(services={}){
    if(!Array.isArray(keys)||!keys.length||keys.length>9)throw error('Configure entre uma e nove chaves STT.','REQUEST');
    const refs=await Promise.all(keys.map(async(key,index)=>({id:await identity(key),keyIndex:index+1})));
    let last;
-   for(const id of models){
-    if(!MODELS.includes(id))throw error('Modelo STT inválido.','REQUEST');
-    const deadline=now()+j.cfg.waitMs;
-    while(true){
-     if(j.released||signal?.aborted)throw cancelled();
-     let busy=false;const eligible=[];
-     for(const ref of refs){
-      if(blockAccounts?.has(ref.id)||j.attempted.has(id+'|'+ref.id))continue;
-      let a=accounts.get(ref.id);if(!a){a={id:ref.id,at:now(),active:0,authUntil:0,models:new Map()};accounts.set(ref.id,a);}const m=modelFor(a,id);a.at=now();a.label='key#'+ref.keyIndex;
-      if(a.authUntil>now()){m.reason='AUTH';continue;}if(m.cooldownUntil>now()){m.reason='COOLDOWN';continue;}
-      const reservation=j.cfg.setupTokens+j.cfg.tokensPerSecond*j.cfg.horizonSeconds;
-      if(!room(a,m,j.cfg,reservation)){m.reason='TPM';continue;}
-      const active=[...jobs.values()].filter(x=>!x.released&&x.account).length;
-      if(a.active>=j.cfg.maxPerAccount||active>=j.cfg.maxSessions){m.reason='BUSY';busy=true;continue;}
-      eligible.push({a,m,ref,reservation,load:totals(m).effective+reservations(a,id)});
-     }
-     eligible.sort((x,y)=>x.a.active-y.a.active||x.load-y.load||(x.m.admitted||0)-(y.m.admitted||0)||x.m.lastUsedAt-y.m.lastUsedAt||x.ref.keyIndex-y.ref.keyIndex);
-     const pick=eligible[0];
-     if(!pick){changed();if(busy){if(now()>=deadline)throw error('Contas STT ocupadas; tente iniciar novamente.','ADMISSION_TIMEOUT');await pause(signal,deadline);continue;}break;}
-     // No await between selection and reservation: simultaneous jobs cannot steal this slot.
-     Object.assign(j,{account:pick.a,metric:pick.m,modelId:id,keyIndex:pick.ref.keyIndex,reserved:pick.reservation});pick.a.active++;pick.m.reason=eligible.length>1?'LOWER_LOAD':'AVAILABLE';j.selectionReason=pick.m.reason;pick.m.choiceReason=pick.m.reason;pick.m.lastUsedAt=now();j.attempted.add(id+'|'+pick.ref.id);changed();
-     blockAccounts?.add(pick.ref.id);
-     diagnosticQueue?.begin(diagnostic);const began=now();
-     try{
-      onAttempt({modelId:id,keyIndex:j.keyIndex});const session=await opening(j,open);
-      if(session.closed===true)throw error('WebSocket STT fechado durante admissão.','NETWORK');
-      if(j.released||signal?.aborted){services.retire?.(session);throw cancelled();}
-      j.session=session;j.admitted=true;pick.m.admitted++;pick.m.latencyMs=pick.m.latencySamples?pick.m.latencyMs*.8+(now()-began)*.2:now()-began;pick.m.latencySamples++;changed();return j;
-     }catch(e){
-      const kind=e.code==='SETUP_TIMEOUT'?'TRANSIENT':services.classify(e);markFailure(j,e,kind);onAttemptError({modelId:id,keyIndex:j.keyIndex,error:e});
-      // Setup sem admissão não ocupa uma réplica; o próximo modelo pode usar a conta.
-      blockAccounts?.delete(pick.ref.id);
-      if(j.account&&!j.released)j.account.active=Math.max(0,j.account.active-1);j.account=null;j.metric=null;j.reserved=0;wake();
-      if(j.released||signal?.aborted||['REQUEST','CANCELLED','INVALIDATED_CONTEXT'].includes(kind))throw e;last=e;
-     }
+   if(models?.length!==1||models[0]!==ACTIVE_MODEL)throw error('Modelo STT inválido.','REQUEST');
+   const id=ACTIVE_MODEL;
+   const deadline=now()+j.cfg.waitMs;
+   while(true){
+    if(j.released||signal?.aborted)throw cancelled();
+    let busy=false;const eligible=[];
+    for(const ref of refs){
+     if(blockAccounts?.has(ref.id)||j.attempted.has(id+'|'+ref.id))continue;
+     let a=accounts.get(ref.id);if(!a){a={id:ref.id,at:now(),active:0,authUntil:0,models:new Map()};accounts.set(ref.id,a);}const m=modelFor(a,id);a.at=now();a.label='key#'+ref.keyIndex;
+     if(a.authUntil>now()){m.reason='AUTH';continue;}if(m.cooldownUntil>now()){m.reason='COOLDOWN';continue;}
+     const reservation=j.cfg.setupTokens+j.cfg.tokensPerSecond*j.cfg.horizonSeconds;
+     if(!room(a,m,j.cfg,reservation)){m.reason='TPM';continue;}
+     const active=[...jobs.values()].filter(x=>!x.released&&x.account).length;
+     if(a.active>=j.cfg.maxPerAccount||active>=j.cfg.maxSessions){m.reason='BUSY';busy=true;continue;}
+     eligible.push({a,m,ref,reservation,load:totals(m).effective+reservations(a,id)});
+    }
+    eligible.sort((x,y)=>x.a.active-y.a.active||x.load-y.load||(x.m.admitted||0)-(y.m.admitted||0)||x.m.lastUsedAt-y.m.lastUsedAt||x.ref.keyIndex-y.ref.keyIndex);
+    const pick=eligible[0];
+    if(!pick){changed();if(busy){if(now()>=deadline)throw error('Contas STT ocupadas; tente iniciar novamente.','ADMISSION_TIMEOUT');await pause(signal,deadline);continue;}break;}
+    // No await between selection and reservation: simultaneous jobs cannot steal this slot.
+    Object.assign(j,{account:pick.a,metric:pick.m,modelId:id,keyIndex:pick.ref.keyIndex,reserved:pick.reservation});pick.a.active++;pick.m.reason=eligible.length>1?'LOWER_LOAD':'AVAILABLE';j.selectionReason=pick.m.reason;pick.m.choiceReason=pick.m.reason;pick.m.lastUsedAt=now();j.attempted.add(id+'|'+pick.ref.id);changed();
+    blockAccounts?.add(pick.ref.id);
+    diagnosticQueue?.begin(diagnostic);const began=now();
+    try{
+     onAttempt({modelId:id,keyIndex:j.keyIndex});const session=await opening(j,open);
+     if(session.closed===true)throw error('WebSocket STT fechado durante admissão.','NETWORK');
+     if(j.released||signal?.aborted){services.retire?.(session);throw cancelled();}
+     j.session=session;j.admitted=true;pick.m.admitted++;pick.m.latencyMs=pick.m.latencySamples?pick.m.latencyMs*.8+(now()-began)*.2:now()-began;pick.m.latencySamples++;changed();return j;
+    }catch(e){
+     const kind=e.code==='SETUP_TIMEOUT'?'TRANSIENT':services.classify(e);markFailure(j,e,kind);onAttemptError({modelId:id,keyIndex:j.keyIndex,error:e});
+     // Setup sem admissão não ocupa uma réplica; a conta pode voltar a ser avaliada em outro bloco.
+     blockAccounts?.delete(pick.ref.id);
+     if(j.account&&!j.released)j.account.active=Math.max(0,j.account.active-1);j.account=null;j.metric=null;j.reserved=0;wake();
+     if(j.released||signal?.aborted||['REQUEST','MODEL','CANCELLED','INVALIDATED_CONTEXT'].includes(kind))throw e;last=e;
     }
    }
-   throw last||error('Nenhuma conta/modelo STT elegível; confira cooldown e orçamento.','STT_UNAVAILABLE');
+   throw last||error('Nenhuma conta elegível para o STT Live; confira cooldown e orçamento.','STT_UNAVAILABLE');
   }catch(e){diagnosticCode=e.code||'UNKNOWN';release(j,e.code||'UNKNOWN');throw e;}finally{diagnosticQueue?.leave(diagnostic,diagnosticCode);waiting--;}
  }
  function assertLease(j){if(!j||j.released||!j.admitted||jobs.get(j.jobId)!==j||j.signal?.aborted)throw cancelled();}

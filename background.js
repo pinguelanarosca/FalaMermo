@@ -55,6 +55,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 "extension/src/services/backgroundPlayback.ts":function(module,exports,__require){
 Object.defineProperty(exports, '__esModule', { value: true });
 let creating = null;
+let stopInProgress = null;
 let pendingStarts = 0;
 const preferences = new Map();
 const keyFor = route => `${route.tabId}:${route.frameId || 0}:${route.playerId}`;
@@ -68,6 +69,7 @@ async function hasDocument() {
     return pages.some(page => page.url === chrome.runtime.getURL('offscreen.html'));
 }
 async function ensureDocument() {
+    if(stopInProgress)throw Error('Documento de áudio em encerramento.');
     if (creating) return creating;
     creating = (async () => {
         if (!await hasDocument()) await chrome.offscreen.createDocument({
@@ -145,19 +147,36 @@ exports.reserveIntent=async(playbackIntent,tabId=0)=>{if(await hasDocument())awa
 exports.hasDocument=hasDocument;
 exports.send=send;
 exports.isStarting=()=>pendingStarts>0||creating!==null;
-exports.stopAll=async()=>{
+exports.stopAll=(preserve)=>{
+    if(stopInProgress)return stopInProgress;
     preferences.clear();
-    await creating?.catch(()=>{});
-    if(!await hasDocument())return true;
-    let timer;
-    try{
-        await Promise.race([send({operation:'STOP_ALL_OPERATIONS'}),new Promise((_,reject)=>{
-            timer=setTimeout(()=>reject(new Error('Documento sem confirmação de encerramento.')),15000);
-        })]);
-    }catch(error){if(await hasDocument())console.warn('[Parar tudo] Encerrando documento sem confirmação.',error?.name);}
-    finally{clearTimeout(timer);}
-    if(await hasDocument())await chrome.offscreen.closeDocument();
-    return !await hasDocument();
+    const bounded=(work,ms)=>{let timer;return Promise.race([work,new Promise((_,reject)=>{
+        timer=setTimeout(()=>reject(Error('Documento sem confirmação de encerramento.')),ms);
+    })]).finally(()=>clearTimeout(timer));};
+    const work=(async()=>{
+        // Parar o documento existente independe de consultas ou de uma criação antiga.
+        const opening=creating;
+        const stop=async()=>{
+            if(!await bounded(hasDocument(),1500))return;
+            let reply;
+            try{reply=await bounded(send({operation:'STOP_ALL_OPERATIONS'}),4000);}
+            catch{/* Um documento travado será fechado. O PCM confirmado já está no IndexedDB. */}
+            if(!reply?.snapshot){
+                try{reply={snapshot:await bounded(send({operation:'GLOBAL_JOBS_SNAPSHOT'}),750)};}catch{}
+            }
+            if(reply?.snapshot?.success&&preserve)await bounded(preserve(reply.snapshot),1500);
+            if(await bounded(hasDocument(),1500))await bounded(chrome.offscreen.closeDocument(),1500);
+        };
+        await stop();
+        if(opening){
+            await bounded(opening.catch(()=>{}),1500);
+            await stop();
+        }
+        return !await bounded(hasDocument(),1500);
+    })();
+    stopInProgress=work;
+    void work.finally(()=>{if(stopInProgress===work)stopInProgress=null;}).catch(()=>{});
+    return work;
 };
 exports.playGeneratedAudio = playGeneratedAudio;
 exports.handlePlaybackCommand = handlePlaybackCommand;
@@ -194,6 +213,7 @@ exports.handleExtensionMessage = async (message,sender,guiJob)=>{
  try{
   if(controller&&globalPanic)await globalPanic.catch(()=>{});
   controller?.signal.throwIfAborted();
+  if(controller&&panicNeedsRemote)return{success:false,error:'A parada do documento de áudio ainda está pendente.'};
   if(['STT_CAPTURE_RESERVE','TTS_REQUEST'].includes(message.type)&&message.payload?.startedAt<lastPanicAt)
    return {success:false,cancelled:true,error:'Operação interrompida por Parar tudo.'};
   reply=await handleExtensionMessage(message,sender,guiJob,controller?.signal);
@@ -297,20 +317,66 @@ const globalJobs=globalThis.GlobalJobs.create({storage:chrome.storage?.session,
  }
 });
 let globalRecovery=null;
-async function recoverGlobalJobs(){if(globalRecovery)return globalRecovery;globalRecovery=(async()=>{await migrateHudSize();const saved=await chrome.storage.session?.get(viewerStorageKey);for(const viewer of saved?.[viewerStorageKey]||[])if(Number.isInteger(viewer.tabId)&&viewer.tabId>0&&Number.isInteger(viewer.frameId)){const safe={tabId:viewer.tabId,frameId:viewer.frameId,...(typeof viewer.documentId==='string'?{documentId:viewer.documentId}: {}),...(['options.html','popup.html','task.html'].includes(viewer.page)?{page:viewer.page}:{})};globalViewers.set(`${safe.tabId}:${safe.frameId}:${safe.documentId||''}`,safe);}await globalJobs.get();if(backgroundPlayback_1.hasDocument){const present=await backgroundPlayback_1.hasDocument();const response=present?await backgroundPlayback_1.send({operation:'GLOBAL_JOBS_SNAPSHOT'}):{success:true,jobs:[]};if(response?.success&&Array.isArray(response.jobs)){const persisted=await globalJobs.reconcile(response.jobs);if(present)await backgroundPlayback_1.send({operation:'GLOBAL_JOBS_ACK',sequences:Object.fromEntries(persisted.jobs.map(job=>[job.jobId,job.narration?.eventSeq??job.eventSeq]))});}}await globalJobs.restoreProtections();
- for(const job of (await globalJobs.get()).jobs.filter(globalThis.GlobalJobs.holdsMicrophone))await recoverSttCapture(job);
- if(globalPanic)return;
- for(const job of (await globalJobs.get()).jobs.filter(job=>job.editorDelivery))scheduleEditorDelivery(job);
- for(const job of (await globalJobs.get()).jobs.filter(job=>job.type==='STT'&&job.originAvailable&&['inserting','error'].includes(job.status))){
-  if(job.editorDelivery&&job.status==='inserting')continue;
-  let status;try{status=await deliveryDeadline(sendToOrigin(job,{type:'STT_GLOBAL_STATUS',payload:{jobId:job.jobId}}));}catch{}
+async function recoverGlobalJobs(){
+ if(globalRecovery)return globalRecovery;
+ const work=(async()=>{
+  await migrateHudSize();
+  const saved=await chrome.storage.session?.get(viewerStorageKey);
+  for(const viewer of saved?.[viewerStorageKey]||[]){
+   if(!Number.isInteger(viewer.tabId)||viewer.tabId<=0||!Number.isInteger(viewer.frameId))continue;
+   const safe={tabId:viewer.tabId,frameId:viewer.frameId,...(typeof viewer.documentId==='string'?{documentId:viewer.documentId}:{}),
+    ...(['options.html','popup.html','task.html'].includes(viewer.page)?{page:viewer.page}:{})};
+   globalViewers.set(`${safe.tabId}:${safe.frameId}:${safe.documentId||''}`,safe);
+  }
+  const initial=await globalJobs.get();
+  if(!globalPanic&&initial.jobs.some(panicTarget)){
+   panicNeedsRemote ||= initial.jobs.some(job=>panicTarget(job)&&!job.panicRemoteStopped);
+   schedulePanicRecovery();
+  }
+  if(backgroundPlayback_1.hasDocument&&!globalPanic){
+   let present,response;
+   try{
+    present=await deliveryDeadline(backgroundPlayback_1.hasDocument());
+    response=present?await deliveryDeadline(backgroundPlayback_1.send({operation:'GLOBAL_JOBS_SNAPSHOT'})):{success:true,jobs:[]};
+   }catch{/* Uma retomada tardia pode enviar seu snapshot por conta própria. */}
+   if(!globalPanic&&response?.success&&Array.isArray(response.jobs)){
+    const persisted=await globalJobs.reconcile(response.jobs);
+    if(present){
+     const sequences={};
+     for(const raw of response.jobs){
+      const job=persisted.jobs.find(item=>item.jobId===raw.jobId);
+      const target=raw.narration?job?.narration:job;
+      if(target?.requestId===(raw.requestId??raw.jobId)&&target.eventSeq>=raw.eventSeq)
+       sequences[raw.jobId]={requestId:raw.requestId,eventSeq:target.eventSeq};
+     }
+     await deliveryDeadline(backgroundPlayback_1.send({operation:'GLOBAL_JOBS_ACK',sequences})).catch(()=>{});
+    }
+   }
+  }
+  await globalJobs.restoreProtections();
   if(globalPanic)return;
-  if(status?.found&&['completed','insertion-failed'].includes(status.status)){await globalJobs.insertion({jobId:job.jobId,inserted:status.inserted===true,reason:status.reason||'RECOVERED_RESULT'},job.origin);continue;}
-  if(status?.found&&status.status==='cancelled'){await globalJobs.event({jobId:job.jobId,event:'stt-cancelled'});continue;}
-  if(status?.found){await sendToOrigin(job,{type:job.origin.tabId?'STT_LIVE_EVENT':'LIVE_OPTIONS_EVENT',payload:{jobId:job.jobId,eventSeq:job.eventSeq,event:job.status==='inserting'?'stt-final':'stt-error',text:job.text,error:job.error,incomplete:job.incomplete}}).catch(()=>{});}
-  else if(job.status==='inserting')await globalJobs.originLost({...job.origin,jobId:job.jobId});
- }
-})();try{await globalRecovery;}catch(error){globalRecovery=null;throw error;}}
+  const jobs=(await globalJobs.get()).jobs;
+  await Promise.all(jobs.filter(job=>globalThis.GlobalJobs.holdsMicrophone(job)&&!panicTarget(job)).map(recoverSttCapture));
+  if(globalPanic)return;
+  for(const job of jobs.filter(job=>job.editorDelivery))scheduleEditorDelivery(job);
+  await Promise.all(jobs.filter(job=>job.type==='STT'&&job.originAvailable&&['inserting','error'].includes(job.status)).map(async job=>{
+   if(job.editorDelivery&&job.status==='inserting')return;
+   let status;
+   try{status=await deliveryDeadline(sendToOrigin(job,{type:'STT_GLOBAL_STATUS',payload:{jobId:job.jobId}}));}
+   catch{return;}
+   if(globalPanic)return;
+   if(status?.found&&['completed','insertion-failed'].includes(status.status)){
+    await globalJobs.insertion({jobId:job.jobId,inserted:status.inserted===true,reason:status.reason||'RECOVERED_RESULT'},job.origin);
+   }else if(status?.found&&status.status==='cancelled'){
+    await globalJobs.event({jobId:job.jobId,event:'stt-cancelled'});
+   }else if(status?.found){
+    await deliveryDeadline(sendToOrigin(job,{type:job.origin.tabId?'STT_LIVE_EVENT':'LIVE_OPTIONS_EVENT',payload:{jobId:job.jobId,eventSeq:job.eventSeq,event:job.status==='inserting'?'stt-final':'stt-error',text:job.text,error:job.error,incomplete:job.incomplete}})).catch(()=>{});
+   }else if(job.status==='inserting')await globalJobs.originLost({...job.origin,jobId:job.jobId});
+  }));
+ })();
+ globalRecovery=work;
+ try{await work;}catch(error){if(globalRecovery===work)globalRecovery=null;throw error;}
+}
 async function sendToOrigin(job,message){if(job.origin.tabId&&job.origin.page!=='options.html')return chrome.tabs.sendMessage(job.origin.tabId,message,job.origin.documentId?{documentId:job.origin.documentId}:{frameId:job.origin.frameId});return chrome.runtime.sendMessage({...message,target:'stt-origin',origin:job.origin});}
 const editorDeliveries=new Map();
 function scheduleEditorDelivery(job){
@@ -383,12 +449,60 @@ async function recoverSttCapture(job){
 }
 async function cancelCaptureAtOrigin(job){
  try{
-  const result=await sendToOrigin(job,{type:'STT_GLOBAL_CANCEL',payload:{jobId:job.jobId}});
-  return result?.success===true&&result.microphoneReleased===true;
+  const result=await deliveryDeadline(sendToOrigin(job,{type:'STT_GLOBAL_CANCEL',payload:{jobId:job.jobId}}));
+  if(result?.success===true&&result.jobId===job.jobId&&result.microphoneReleased===true)return true;
  }catch(error){
-  // Chrome confirms that this document no longer exists.
-  return /Receiving end does not exist|No (?:frame|document) with id|No tab with id/i.test(error.message);
+  if(/No (?:frame|document) with id|No tab with id/i.test(error.message)&&job.origin.tabId)return true;
  }
+ if(job.origin.page==='options.html'&&job.origin.documentId&&chrome.runtime.getContexts){
+  try{
+   const contexts=await deliveryDeadline(chrome.runtime.getContexts({documentIds:[job.origin.documentId]}));
+   return contexts.length===0;
+  }catch{}
+ }
+ return false;
+}
+const panicTarget=job=>job.status==='cancelling'||job.narration?.status==='cancelling'||job.panicPending===true;
+let panicRecoveryTimer,panicRecoveryDelay=1000,panicNeedsRemote=false;
+function schedulePanicRecovery(){
+ if(panicRecoveryTimer)return;
+ panicRecoveryTimer=setTimeout(()=>{
+  panicRecoveryTimer=null;
+  if(globalPanic){schedulePanicRecovery();return;}
+  void finishPanicRecovery().catch(schedulePanicRecovery);
+ },panicRecoveryDelay);
+}
+async function stopRemote(){
+ try{
+  const stopped=await backgroundPlayback_1.stopAll?.(snapshot=>globalJobs.reconcile(snapshot.jobs,{partial:true,preserveCancelled:true}));
+  panicNeedsRemote=stopped!==true;
+  return stopped===true;
+ }catch{panicNeedsRemote=true;return false;}
+}
+async function settlePanicJobs(affected,remote){
+ await Promise.all(affected.map(async job=>{
+  const capture=job.type==='STT'&&(globalThis.GlobalJobs.holdsMicrophone(job)||job.editorDelivery&&job.status==='cancelling')
+   ?cancelCaptureAtOrigin(job):Promise.resolve(false);
+  const [remoteStopped,captureReleased]=await Promise.all([job.panicRemoteStopped?true:remote,capture]);
+  return globalJobs.finishPanic(job,{remoteStopped,captureReleased});
+ }));
+}
+async function finishPanicRecovery(){
+ if(globalPanic)return;
+ const work=(async()=>{
+  const affected=(await globalJobs.get()).jobs.filter(panicTarget);
+  const remote=panicNeedsRemote||affected.some(job=>!job.panicRemoteStopped)?stopRemote():Promise.resolve(true);
+  await settlePanicJobs(affected,remote);
+  await remote;
+  const state=await globalJobs.get(),pending=panicNeedsRemote||state.jobs.some(panicTarget);
+  if(pending){
+   panicRecoveryDelay=Math.min(panicRecoveryDelay*2,5000);
+   schedulePanicRecovery();
+  }else panicRecoveryDelay=1000;
+  return{success:true,remoteStopped:!panicNeedsRemote,pending,state};
+ })();
+ globalPanic=work;
+ try{await work;}finally{if(globalPanic===work)globalPanic=null;}
 }
 function stopAllOperations(){
  if(globalPanic)return globalPanic;
@@ -399,34 +513,22 @@ function stopAllOperations(){
  diagnosticTtsController?.abort(reason);
  for(const controller of playbackControllers.values())controller.abort(reason);
  const work=(async()=>{
-  try{await recoverGlobalJobs();}
-  catch(error){console.warn('[Parar tudo] Falha ao reconciliar o registro.',error?.name);}
-  const affected=await globalJobs.beginPanic().catch(error=>{
-   console.warn('[Parar tudo] Registro de tarefas indisponível.',error?.name);
-   return null;
-  });
-  for(const job of affected||[]){
+  const affectedPromise=globalJobs.beginPanic();
+  const remote=stopRemote();
+  const affected=await affectedPromise;
+  for(const job of affected){
    clearTimeout(editorDeliveries.get(job.jobId)?.timer);
    editorDeliveries.delete(job.jobId);
   }
-  const remote=backgroundPlayback_1.stopAll().catch(()=>false);
-  const closing=(affected||[]).map(async job=>{
-   const local=job.type==='STT'&&(job.status==='cancelling'||globalThis.GlobalJobs.holdsMicrophone(job))
-    ?cancelCaptureAtOrigin(job):Promise.resolve(false);
-   // A late microphone permission result still owns the old capture and can confirm later.
-   const settled=Promise.all([remote,local]).then(([remoteStopped,captureReleased])=>
-    globalJobs.finishPanic(job,{remoteStopped,captureReleased}));
-   await deliveryDeadline(settled).catch(()=>{});
-  });
-  await Promise.all(closing);
+  await settlePanicJobs(affected,remote);
   const remoteStopped=await remote;
-  if(!affected)return{success:false,error:'Não foi possível confirmar a parada das capturas.'};
   const state=await globalJobs.get();
-  return {success:true,remoteStopped,pending:!remoteStopped||state.jobs.some(job=>
-   job.status==='cancelling'||job.narration?.status==='cancelling'||affected.some(old=>old.jobId===job.jobId&&globalThis.GlobalJobs.holdsMicrophone(job))),state};
+  const pending=!remoteStopped||state.jobs.some(panicTarget);
+  if(pending)schedulePanicRecovery();
+  return{success:true,remoteStopped,pending,state};
  })();
  globalPanic=work;
- void work.finally(()=>{if(globalPanic===work)globalPanic=null;}).catch(()=>{});
+ void work.finally(()=>{if(globalPanic===work)globalPanic=null;}).catch(()=>schedulePanicRecovery());
  return work;
 }
 async function handleOriginLost(query){await recoverGlobalJobs();for(const[key,viewer]of globalViewers)if(viewer.tabId===query.tabId&&(query.frameId===undefined||viewer.frameId===query.frameId)&&(!query.documentId||viewer.documentId===query.documentId)){stopViewerRecovery(key);globalViewers.delete(key);}await persistViewers();const affected=await globalJobs.originLost(query);for(const job of affected){
@@ -672,9 +774,21 @@ async function handleExtensionMessage(message, sender, guiJob, signal) {
                 if(globalPanic||!chrome.offscreen?.closeDocument||backgroundPlayback_1.isStarting?.())return{success:true};
                 const state=await globalJobs.get();
                 if(state.jobs.some(job=>!globalThis.GlobalJobs.TERMINAL.has(audioJob(job).status)||!globalThis.GlobalJobs.TERMINAL.has(job.status)&&job.status!=='inserting'))return{success:true};
-                const latest=await backgroundPlayback_1.send({operation:'GLOBAL_JOBS_SNAPSHOT'});
-                if(!globalPanic&&latest?.success&&(latest.activeJobIds||latest.jobs?.filter(job=>!globalThis.GlobalJobs.TERMINAL.has(job.status))||[]).length===0&&!backgroundPlayback_1.isStarting?.())await chrome.offscreen.closeDocument();
+                const latest=await deliveryDeadline(backgroundPlayback_1.send({operation:'GLOBAL_JOBS_SNAPSHOT'})).catch(()=>null);
+                if(!globalPanic&&latest?.success&&!latest.pendingEvents&&(latest.activeJobIds||latest.jobs?.filter(job=>!globalThis.GlobalJobs.TERMINAL.has(job.status))||[]).length===0&&!backgroundPlayback_1.isStarting?.())await deliveryDeadline(chrome.offscreen.closeDocument()).catch(()=>{});
                 return{success:true};
+            }
+            case 'LIVE_OFFSCREEN_RECONCILE': {
+                if(sender.url!==chrome.runtime.getURL('offscreen.html')||globalPanic)return{success:false};
+                const raw=message.payload;
+                if(!raw?.jobId||!Number.isSafeInteger(raw.eventSeq)||raw.eventSeq<1)return{success:false};
+                const state=await globalJobs.reconcile([raw],{partial:true});
+                const job=state.jobs.find(item=>item.jobId===raw.jobId);
+                const target=raw.narration?job?.narration:job;
+                const discarded=!target||target.requestId!==(raw.requestId??raw.jobId)||['cancelling','cancelled'].includes(target.status);
+                if(!discarded&&target.eventSeq<raw.eventSeq)return{success:false};
+                if(!discarded&&job.editorDelivery)scheduleEditorDelivery(job);
+                return{success:true,jobId:raw.jobId,eventSeq:raw.eventSeq,result:discarded?'discarded':'applied'};
             }
             case 'LIVE_STT_DIAGNOSTIC': {
                 if(!sender.tab&&![chrome.runtime.getURL('options.html'),chrome.runtime.getURL('offscreen.html')].includes(sender.url?.split(/[?#]/)[0]))return{success:false};
@@ -694,36 +808,46 @@ async function handleExtensionMessage(message, sender, guiJob, signal) {
             }
             case 'LIVE_OFFSCREEN_EVENT': {
                 if (sender.url !== chrome.runtime.getURL('offscreen.html')) return { success: false };
-                if(globalPanic)return{success:true,ignored:true};
-                await recoverGlobalJobs();
-                if(globalPanic)return{success:true,ignored:true};
                 const {apiKeys,apiKey,systemInstruction,advancedJson,...event} = message.payload || {};
-                const registered=event.jobId?await globalJobs.find({jobId:event.jobId}):null;
-                if(globalPanic||event.jobId&&!registered)return{success:true,ignored:true};
-                const eventJob=event.narration?registered?.narration:registered;
-                if(['cancelling','cancelled'].includes(eventJob?.status))return{success:true,ignored:true};
+                if(event.jobId&&(!Number.isSafeInteger(event.eventSeq)||event.eventSeq<1))return{success:false};
+                const ack=(result='applied')=>({success:true,jobId:event.jobId??null,eventSeq:event.eventSeq??null,result,
+                    ...(result==='duplicate'?{duplicate:true}:{}),...(result==='discarded'?{ignored:true}:{})});
+                if(globalPanic)return{success:false};
+                await recoverGlobalJobs();
+                if(globalPanic)return{success:false};
+                if(globalPanic)return{success:false};
+                let registered;
                 if(event.jobId){
                     const applied=await globalJobs.event(event);
-                    if(registered.editorDelivery&&['stt-partial','stt-segment','stt-final'].includes(event.event)){
-                        scheduleEditorDelivery(await globalJobs.find({jobId:event.jobId}));
-                        return{success:true};
+                    registered=applied.job;
+                    if(applied.result==='discarded')return ack('discarded');
+                    if(applied.changed&&registered.type==='STT'&&event.timing){
+                        for(const stage of ['setup','send','received','published']){
+                            const details=event.timing[stage];
+                            if(Number.isFinite(details?.timelineAt))globalThis.LiveSttDiagnostics?.mark?.(event.jobId,'stt-first-'+stage,details);
+                        }
                     }
-                    if(!applied.changed)return{success:true,duplicate:true};
+                    if(registered.editorDelivery&&['stt-partial','stt-segment','stt-final'].includes(event.event)){
+                        if(!event.previewOnly&&applied.result!=='discarded')scheduleEditorDelivery(applied.job);
+                        return ack(applied.result);
+                    }
+                    if(!applied.changed)return ack(applied.result);
                 }
-                if (event.event === 'ranking' && !['REQUEST','CANCELLED','INVALIDATED_CONTEXT','UNKNOWN'].includes(event.result)) {
+                if (event.event === 'ranking' && !['REQUEST','MODEL','CANCELLED','INVALIDATED_CONTEXT','UNKNOWN','NETWORK'].includes(event.result)) {
                     const adaptive=globalThis.TtsAdaptive,config=globalThis.LiveConfig;
                     const api=await chromeStorageAdapter_1.chromeStorage.get('api');
                     const keys=(0,defaultSettings_1.getTtsApiKeys)(api),models=config.LIVE_TTS_MODELS,pairs=adaptive.catalog(models,keys);
                     const pair=pairs.find(item=>item.model===event.modelId&&item.keyIndex===event.keyIndex);
                     if(pair){const data=await adaptive.getStore().snapshot(pairs);const type=['SUCCESS','TRANSIENT','QUOTA','AUTH','MODEL','REQUEST','CANCELLED'].includes(event.result)?event.result:'TRANSIENT';await adaptive.getStore().record(pairs,pair,{type,durationMs:event.durationMs||0,label:type},data.epoch).catch(()=>{});}
                 }
-                if(event.narration)return{success:true};
+                if(event.narration)return ack();
                 const destination=registered?.origin||event;
-                if(registered?.originAvailable===false)return{success:true};
+                if(registered?.originAvailable===false)return ack();
+                if(event.previewOnly)return ack();
                 if(destination.page==='options.html')void chrome.runtime.sendMessage({type:'LIVE_OPTIONS_EVENT',payload:event}).catch(()=>{});
-                else if(destination.tabId)await chrome.tabs.sendMessage(destination.tabId,{type:event.operation==='STT_LIVE_START'||event.event?.startsWith('stt-')?'STT_LIVE_EVENT':'TTS_PLAYBACK_EVENT',payload:event},destination.documentId?{documentId:destination.documentId}:{frameId:destination.frameId||0}).catch(()=>{});
+                else if(destination.tabId)await deliveryDeadline(chrome.tabs.sendMessage(destination.tabId,{type:event.operation==='STT_LIVE_START'||event.event?.startsWith('stt-')?'STT_LIVE_EVENT':'TTS_PLAYBACK_EVENT',payload:event},destination.documentId?{documentId:destination.documentId}:{frameId:destination.frameId||0})).catch(()=>{});
                 else if(event.tabId===0)void chrome.runtime.sendMessage({type:'LIVE_OPTIONS_EVENT',payload:event}).catch(()=>{});
-                return { success: true };
+                return ack();
             }
             case 'TTS_RANKING_GET':
             case 'TTS_RANKING_RECORD':
@@ -967,11 +1091,11 @@ async function handleExtensionMessage(message, sender, guiJob, signal) {
                 const migrated=globalThis.LiveConfig.migrateAgent(agent,settings.models),stt=migrated.live.stt||{};
                 const instruction=agent.instructions?.sttFormattingInstruction||'';
                 const transform=message.payload.realtime!==true&&(stt.transform===true||(stt.transform!==false&&agent.metadata?.id!=='narrator'&&Boolean(instruction.trim())));
-                const modelId=globalThis.LiveConfig.LIVE_STT_MODELS.includes(stt.preferredModel)?stt.preferredModel:globalThis.LiveConfig.DEFAULTS.sttModelId;
-                const models=globalThis.LiveConfig.modelChain('stt',modelId);
+                const modelId=globalThis.LiveConfig.DEFAULTS.sttModelId;
+                const models=globalThis.LiveConfig.modelChain('stt');
                 await recoverGlobalJobs();
                 const sttRecognition=globalThis.LiveConfig.normalizeSttRecognition(settings.sttRecognition);
-                const payload={...message.payload,schedulerPolicy:globalThis.SttScheduler.policy(settings.api?.sttScheduler),agentId:agent.metadata.id,operation:'STT_LIVE_START',apiKeys:keys,modelId,models,sttRecognition,thinkingLevel:stt.thinkingLevel,thinkingBudget:stt.thinkingBudget,vad:stt.vad,transformInstruction:transform?instruction:null,transformModels:globalThis.LiveConfig.modelChain('tts',migrated.live.preferredModel),voiceName:migrated.live.voiceName,playerId:message.payload.playerId||message.payload.jobId};
+                const payload={...message.payload,schedulerPolicy:globalThis.SttScheduler.policy(settings.api?.sttScheduler),agentId:agent.metadata.id,operation:'STT_LIVE_START',apiKeys:keys,modelId,models,sttRecognition,transformInstruction:transform?instruction:null,transformModels:globalThis.LiveConfig.modelChain('tts',migrated.live.preferredModel),voiceName:migrated.live.voiceName,playerId:message.payload.playerId||message.payload.jobId};
                 await globalJobs.start({...payload,type:'STT',origin:senderOrigin(sender),agentId:agent.metadata.id,agentSnapshot:agent},'start-stt',signal);
                 try{const result=await backgroundPlayback_1.handlePlaybackCommand(payload,sender,async()=>{
                     const job=await globalJobs.find({jobId:payload.jobId});
@@ -1600,7 +1724,7 @@ exports.DEFAULT_AUDIO_SETTINGS = {
 };
 exports.DEFAULT_MODELS_SETTINGS = {
     ttsModelId: (0, modelsCatalog_1.getFallbackModelForTask)('tts'), // gemini-3.8-flash-lite-tts
-    sttModelId: (0, modelsCatalog_1.getFallbackModelForTask)('stt'), // gemini-3.5-flash-lite
+    sttModelId: 'gemini-3.5-transcribe-live',
     visionModelId: (0, modelsCatalog_1.getFallbackModelForTask)('vision'), // gemini-3.5-flash-lite
     generalModelId: (0, modelsCatalog_1.getFallbackModelForTask)('general'), // gemini-3.5-flash-lite
     discoveredModels: [],

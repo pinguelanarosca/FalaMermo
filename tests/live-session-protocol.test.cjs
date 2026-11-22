@@ -4,7 +4,7 @@ const flush=()=>new Promise(resolve=>setImmediate(resolve));
 test('diagnóstico STT identifica réplica e origem da quebra de linha sem expor transcrição',async t=>{
  const original=globalThis.LiveSttDiagnostics,events=[];
  globalThis.LiveSttDiagnostics={emit:e=>events.push(e)};t.after(()=>{globalThis.LiveSttDiagnostics=original;});
- const {session,instances}=transport(t,{mode:'dictation',jobId:'00000000-0000-4000-8000-000000000000',blockId:3,keyIndex:6});
+ const {session,instances}=transport(t,{mode:'dictation',modelId:config.DEFAULTS.sttModelId,jobId:'00000000-0000-4000-8000-000000000000',blockId:3,keyIndex:6});
  const opening=session.open();instances[0].open();await flush();instances[0].message(JSON.stringify({setupComplete:{}}));await opening;
  session.sendAudio(new Uint8Array([0,0]),16000,true);session.endAudio();
  instances[0].message(JSON.stringify({serverContent:{inputTranscription:{text:'Fala.\n¿Sí?',finished:true}}}));await flush();
@@ -38,10 +38,10 @@ test('runtime rejeita modelo convencional/Translate/Transcribe e JSON antes do s
 });
 test('cancelar acquire STT fecha socket pendente sem interferir no acquire TTS',async t=>{
  const {instances,options}=transport(t),manager=new sessions.LiveSessionManager(),controller=new AbortController();t.after(()=>manager.closeAll());
- const a=manager.acquire({...options,jobId:'stt-abort',mode:'dictation',signal:controller.signal}),rejected=assert.rejects(a);const b=manager.acquire({...options,jobId:'tts-survives'});assert.equal(instances.length,2);controller.abort();await rejected;assert.equal(instances[0].readyState,3);assert.equal(instances[1].readyState,0);instances[1].open();await flush();instances[1].message(JSON.stringify({setupComplete:{}}));const tts=await b;assert.equal(tts.ready,true);manager.release(tts);
+ const a=manager.acquire({...options,jobId:'stt-abort',mode:'dictation',modelId:config.DEFAULTS.sttModelId,signal:controller.signal}),rejected=assert.rejects(a);const b=manager.acquire({...options,jobId:'tts-survives'});assert.equal(instances.length,2);controller.abort();await rejected;assert.equal(instances[0].readyState,3);assert.equal(instances[1].readyState,0);instances[1].open();await flush();instances[1].message(JSON.stringify({setupComplete:{}}));const tts=await b;assert.equal(tts.ready,true);manager.release(tts);
 });
 test('RetryInfo do erro Live é exposto somente como atraso numérico no STT',async t=>{
- const {session,instances}=transport(t,{mode:'dictation'}),open=session.open();instances[0].open();await flush();instances[0].message(JSON.stringify({error:{code:429,message:'quota',details:[{'@type':'type.googleapis.com/google.rpc.RetryInfo',retryDelay:'2.5s'}]}}));await assert.rejects(open,e=>e.httpStatus===429&&e.retryAfterMs===2500);
+ const {session,instances}=transport(t,{mode:'dictation',modelId:config.DEFAULTS.sttModelId}),open=session.open();instances[0].open();await flush();instances[0].message(JSON.stringify({error:{code:429,message:'quota',details:[{'@type':'type.googleapis.com/google.rpc.RetryInfo',retryDelay:'2.5s'}]}}));await assert.rejects(open,e=>e.httpStatus===429&&e.retryAfterMs===2500);
 });
 test('trocar credencial no mesmo slot nunca reutiliza socket ou handle de outra chave',async t=>{
  const {instances,options}=transport(t),manager=new sessions.LiveSessionManager();t.after(()=>manager.closeAll());
@@ -53,15 +53,15 @@ test('trocar credencial no mesmo slot nunca reutiliza socket ou handle de outra 
  assert.ok([...manager.pool.keys()].every(key=>!key.includes(options.apiKey)&&!key.includes(nextOptions.apiKey)));manager.closeAll();assert.equal(manager.resumeHandles.size,0);assert.equal(manager.credentials.size,0);
 });
 test('ditado novo tem sessão independente, sem retomar conversa de job concluído/cancelado',async t=>{
- const {instances,options}=transport(t),manager=new sessions.LiveSessionManager();t.after(()=>manager.closeAll());const dictation={...options,mode:'dictation'};
+ const {instances,options}=transport(t),manager=new sessions.LiveSessionManager();t.after(()=>manager.closeAll());const dictation={...options,mode:'dictation',modelId:config.DEFAULTS.sttModelId};
  const opening=manager.acquire(dictation);instances[0].open();await flush();instances[0].message(JSON.stringify({setupComplete:{}}));const first=await opening;first.resumeHandle='previous-dictation-handle';manager.retire(first);assert.equal(manager.resumeHandles.size,0);
  const next=manager.acquire({...dictation,jobId:'next-dictation'});instances[1].open();await flush();assert.equal(JSON.parse(instances[1].sent[0]).setup.sessionResumption?.handle,undefined);instances[1].message(JSON.stringify({setupComplete:{}}));assert.notEqual(await next,first);
 });
-test('os quatro modelos gerais usam exatamente o setup central no socket',async t=>{
- const {instances,options}=transport(t);for(const modelId of config.LIVE_MODEL_PRIORITY){const session=new sessions.LiveSession({retire(s){s.close();}},{...options,modelId,thinkingLevel:'low'}),open=session.open(),socket=instances.at(-1);socket.open();await flush();assert.deepEqual(JSON.parse(socket.sent[0]),config.buildLiveSessionConfig(session.options));socket.message(JSON.stringify({setupComplete:{}}));await open;session.close();}
+test('modelos TTS elegíveis usam exatamente o setup central no socket',async t=>{
+ const {instances,options}=transport(t);for(const modelId of config.eligibleModels('tts')){const session=new sessions.LiveSession({retire(s){s.close();}},{...options,modelId,thinkingLevel:'low'}),open=session.open(),socket=instances.at(-1);socket.open();await flush();assert.deepEqual(JSON.parse(socket.sent[0]),config.buildLiveSessionConfig(session.options));socket.message(JSON.stringify({setupComplete:{}}));await open;session.close();}
 });
-test('ditado Extended aplica VAD validado ao setup e lifecycle de áudio sem alterar TTS',async t=>{
- const {instances,options}=transport(t),session=new sessions.LiveSession({retire(s){s.close();}},{...options,modelId:'gemini-3.8-live-extended-thinking',mode:'dictation'}),open=session.open(),socket=instances[0];socket.open();await flush();assert.equal(JSON.parse(socket.sent[0]).setup.realtimeInputConfig.automaticActivityDetection.disabled,true);socket.message(JSON.stringify({setupComplete:{}}));await open;
+test('Transcribe Live aplica VAD validado ao setup e lifecycle de áudio sem alterar TTS',async t=>{
+ const {instances,options}=transport(t),session=new sessions.LiveSession({retire(s){s.close();}},{...options,mode:'dictation',modelId:config.DEFAULTS.sttModelId}),open=session.open(),socket=instances[0];socket.open();await flush();assert.equal(JSON.parse(socket.sent[0]).setup.realtimeInputConfig.automaticActivityDetection.disabled,true);socket.message(JSON.stringify({setupComplete:{}}));await open;
  session.sendAudio(new Uint8Array([0,0]));session.endAudio();assert.ok(socket.sent.some(wire=>JSON.parse(wire).realtimeInput?.activityStart));assert.ok(socket.sent.some(wire=>JSON.parse(wire).realtimeInput?.activityEnd));assert.equal(socket.sent.some(wire=>JSON.parse(wire).realtimeInput?.audioStreamEnd),false);session.close();
 });
 test('setup → confirmação binária → turno; captura exatamente os corpos enviados',async t=>{
@@ -156,7 +156,7 @@ test('1007 depois de setupComplete não perde close.reason dentro de sendTurn',a
  const turn=session.sendTurn('Teste de áudio.');await flush();socket.serverClose(1007,'Unknown field in clientContent.');
  await assert.rejects(turn,error=>{assert.equal(error.closeReason,'Unknown field in clientContent.');assert.equal(error.protocol.setupCompleteReceived,true);assert.equal(error.lastSentType,'turn');assert.equal(error.protocolPhase,'awaiting-first-pcm');assert.equal(sessions.classifyLiveError(error),'REQUEST');return true;});
 });
-test('1007 sem motivo conclusivo não é automaticamente REQUEST',()=>{assert.equal(sessions.classifyLiveError(Object.assign(new Error('WebSocket Live fechado (1007).'),{closeCode:1007,closeReason:'',protocolPhase:'awaiting-setup-complete',lastSentType:'setup'})),'UNKNOWN');});
+test('1007 sem motivo conclusivo interrompe rotação',()=>{assert.equal(sessions.classifyLiveError(Object.assign(new Error('WebSocket Live fechado (1007).'),{closeCode:1007,closeReason:'',protocolPhase:'awaiting-setup-complete',lastSentType:'setup'})),'REQUEST');});
 test('sessão warm atualiza job/bloco sem reconstruir setup',async t=>{
  const {session,options,instances}=transport(t),manager=new sessions.LiveSessionManager();t.after(()=>manager.closeAll());
  const opening=session.open();instances[0].open();await flush();instances[0].message(JSON.stringify({setupComplete:{}}));await opening;
@@ -164,46 +164,46 @@ test('sessão warm atualiza job/bloco sem reconstruir setup',async t=>{
  const reused=await manager.acquire({...options,jobId:'job-2',blockId:2});assert.equal(reused,session);assert.equal(reused.diagnosticSnapshot().jobId,'job-2');assert.equal(reused.diagnosticSnapshot().blockId,2);assert.equal(instances[0].sent.length,1);
 });
 test('STT aceita setupComplete Blob e transcrições ArrayBuffer sem timeout',async t=>{
- const {session,instances}=transport(t,{mode:'dictation'});const opening=session.open(),socket=instances[0];void opening.catch(()=>{});t.after(()=>session.close());socket.open();await flush();socket.message(new Blob([JSON.stringify({setupComplete:{}})]));await flush();assert.equal(session.ready,true);await opening;
+ const {session,instances}=transport(t,{mode:'dictation',modelId:config.DEFAULTS.sttModelId});const opening=session.open(),socket=instances[0];void opening.catch(()=>{});t.after(()=>session.close());socket.open();await flush();socket.message(new Blob([JSON.stringify({setupComplete:{}})]));await flush();assert.equal(session.ready,true);await opening;
  const received=[];session.handler=msg=>received.push(msg.serverContent);socket.message(new TextEncoder().encode(JSON.stringify({serverContent:{interimInputTranscription:{text:'Teste'}}})).buffer);socket.message(new Blob([JSON.stringify({serverContent:{inputTranscription:{text:'Teste final'},turnComplete:true}})]));await flush();assert.equal(received[0].interimInputTranscription.text,'Teste');assert.equal(received[1].inputTranscription.text,'Teste final');
 });
-test('roteamento dictation real envia setup STT geral, PCM e fim sem turno TTS',async t=>{
+test('roteamento dictation envia setup Transcribe, PCM e fim sem turno TTS',async t=>{
  const sttRecognition={instructions:'Preserve os nomes técnicos.',language:'pt-BR',customVocabulary:['FalaMermo','Kubernetes']};
- const {session,instances}=transport(t,{mode:'dictation',vad:{disabled:false},sttRecognition,outputTranscription:true,systemInstruction:'instrução TTS privada'});t.after(()=>session.close());
- const opening=session.open(),socket=instances[0];socket.open();await flush();const setup=JSON.parse(socket.sent[0]).setup;assert.deepEqual(setup.generationConfig,{responseModalities:['AUDIO']});assert.deepEqual(setup.inputAudioTranscription,{languageCodes:['pt-BR'],customVocabulary:['FalaMermo','Kubernetes']});assert.equal(setup.outputAudioTranscription,undefined);assert.ok(setup.systemInstruction.parts[0].text.startsWith(sttRecognition.instructions));assert.ok(!JSON.stringify(setup).includes('privada'));
- socket.message(JSON.stringify({setupComplete:{}}));await opening;session.sendAudio(new Uint8Array([0,0]),16000);session.endAudio();assert.deepEqual(JSON.parse(socket.sent[1]),{realtimeInput:{audio:{data:'AAA=',mimeType:'audio/pcm;rate=16000'}}});assert.deepEqual(JSON.parse(socket.sent[2]),{realtimeInput:{audioStreamEnd:true}});assert.equal(sessions.getTtsDiagnostics().some(s=>s.sessionId===session.id),false);
+ const {session,instances}=transport(t,{mode:'dictation',modelId:config.DEFAULTS.sttModelId,vad:{disabled:false},sttRecognition,outputTranscription:true,systemInstruction:'instrução TTS privada'});t.after(()=>session.close());
+ const opening=session.open(),socket=instances[0];socket.open();await flush();const setup=JSON.parse(socket.sent[0]).setup;assert.deepEqual(setup.generationConfig,{responseModalities:['TEXT']});assert.deepEqual(setup.inputAudioTranscription,{languageCodes:['pt-BR'],mode:'VERBATIM',customVocabulary:['FalaMermo','Kubernetes']});assert.equal(setup.outputAudioTranscription,undefined);assert.equal(setup.systemInstruction,undefined);assert.ok(!JSON.stringify(setup).includes('privada'));
+ socket.message(JSON.stringify({setupComplete:{}}));await opening;session.sendAudio(new Uint8Array([0,0]),16000);session.endAudio();assert.deepEqual(JSON.parse(socket.sent[2]),{realtimeInput:{audio:{data:'AAA=',mimeType:'audio/pcm;rate=16000'}}});assert.deepEqual(JSON.parse(socket.sent[3]),{realtimeInput:{activityEnd:{}}});assert.equal(sessions.getTtsDiagnostics().some(s=>s.sessionId===session.id),false);
 });
 test('VAD manual delimita áudio com activityStart/activityEnd, sem audioStreamEnd',async t=>{
- const {session,instances}=transport(t);session.options={...session.options,mode:'dictation',vad:{disabled:true}};t.after(()=>session.close());const opening=session.open(),socket=instances[0];socket.open();await flush();socket.message(JSON.stringify({setupComplete:{}}));await opening;
+ const {session,instances}=transport(t);session.options={...session.options,mode:'dictation',modelId:config.DEFAULTS.sttModelId,vad:{disabled:true}};t.after(()=>session.close());const opening=session.open(),socket=instances[0];socket.open();await flush();socket.message(JSON.stringify({setupComplete:{}}));await opening;
  session.sendAudio(new Uint8Array([0,0]));session.sendAudio(new Uint8Array([0,0]));session.endAudio();assert.deepEqual(socket.sent.slice(1).map(w=>Object.keys(JSON.parse(w).realtimeInput)[0]),['activityStart','audio','audio','activityEnd']);assert.equal(socket.sent.some(w=>w.includes('audioStreamEnd')),false);
 });
-test('quatro modelos STT respeitam setupComplete e VAD efetivo sem misturar finais',async t=>{
+test('Transcribe Live respeita setupComplete e VAD efetivo sem misturar finais',async t=>{
  const {instances,options}=transport(t);
- for(const modelId of config.LIVE_MODEL_PRIORITY)for(const vad of [undefined,{disabled:true},{disabled:false}]){
-  const session=new sessions.LiveSession({retire(s){s.close();}},{...options,modelId,mode:'dictation',vad}),opening=session.open(),socket=instances.at(-1);assert.throws(()=>session.sendAudio(new Uint8Array([0,0])),/não está pronta/);socket.open();await flush();const setup=JSON.parse(socket.sent[0]).setup;assert.deepEqual(setup.inputAudioTranscription,modelId==='gemini-3.8-live'?{languageCodes:['pt-BR']}:{});assert.deepEqual(setup.generationConfig.responseModalities,['AUDIO']);socket.message(JSON.stringify({setupComplete:{}}));await opening;
+ for(const modelId of config.LIVE_STT_MODELS)for(const vad of [undefined,{disabled:true},{disabled:false}]){
+  const session=new sessions.LiveSession({retire(s){s.close();}},{...options,modelId,mode:'dictation',vad}),opening=session.open(),socket=instances.at(-1);assert.throws(()=>session.sendAudio(new Uint8Array([0,0])),/não está pronta/);socket.open();await flush();const setup=JSON.parse(socket.sent[0]).setup;assert.deepEqual(setup.inputAudioTranscription,{languageCodes:['pt-BR'],mode:'VERBATIM'});assert.deepEqual(setup.generationConfig.responseModalities,['TEXT']);socket.message(JSON.stringify({setupComplete:{}}));await opening;
   assert.throws(()=>session.sendAudio(new Uint8Array([0])),/Int16/);assert.throws(()=>session.sendAudio(new Uint8Array([0,0]),48000),/16000/);session.sendAudio(new Uint8Array([0,64]));session.endAudio();const manual=session.options.vad.disabled===true;assert.deepEqual(socket.sent.slice(1).map(w=>Object.keys(JSON.parse(w).realtimeInput)[0]),manual?['activityStart','audio','activityEnd']:['audio','audioStreamEnd']);const snapshot=session.sttSnapshot();assert.equal(snapshot.inputTranscriptionConfigured,true);assert.equal(snapshot.sentBytes,2);assert.equal(snapshot.activityEnds,manual?1:0);assert.equal(snapshot.streamEnds,manual?0:1);session.close();
  }
 });
 test('diagnóstico STT conta mensagens/VAD/geração sem confundir output com input nem guardar texto',async t=>{
- const {session,instances}=transport(t,{mode:'dictation'});const opening=session.open(),socket=instances[0];socket.open();await flush();socket.message(JSON.stringify({setupComplete:{}}));await opening;
+ const {session,instances}=transport(t,{mode:'dictation',modelId:config.DEFAULTS.sttModelId});const opening=session.open(),socket=instances[0];socket.open();await flush();socket.message(JSON.stringify({setupComplete:{}}));await opening;
  const received=[];session.handler=msg=>received.push(msg);socket.message('invalid JSON fixture');socket.message(JSON.stringify({voiceActivity:{type:'ACTIVITY_START'}}));socket.message(JSON.stringify({serverContent:{outputTranscription:{text:'fixture-private-output'},modelTurn:{parts:[{text:'fixture-private-output'}]}}}));socket.message(JSON.stringify({serverContent:{interimInputTranscription:{text:'fixture-private-interim'}}}));socket.message(JSON.stringify({serverContent:{inputTranscription:{text:'fixture-private-input',finished:true},turnComplete:true}}));await flush();session.sendAudio(new Uint8Array([0,64]));
  const snapshot=session.sttSnapshot();assert.equal(snapshot.serverMessages,5);assert.equal(snapshot.voiceActivityEvents,1);assert.equal(snapshot.modelTurnEvents,1);assert.equal(snapshot.outputEvents,1);assert.equal(snapshot.inputEvents,1);assert.equal(snapshot.interimEvents,1);assert.equal(snapshot.inputFinished,true);assert.equal(snapshot.parseErrors,1);assert.equal(snapshot.sentChunks,1);assert.equal(received[0].voiceActivity.type,'ACTIVITY_START');assert.ok(!JSON.stringify(snapshot).includes('private'));session.close();
 });
-test('STT 3.8 padrão delimita PCM sem silêncio e persiste tipos/tempos após fim sem dados privados',async t=>{
+test('Transcribe Live delimita PCM sem silêncio e persiste tipos/tempos após fim sem dados privados',async t=>{
  const diag=require('../live-stt-diagnostics.js'),original=globalThis.LiveSttDiagnostics,packets=[];globalThis.LiveSttDiagnostics={emit:p=>{const safe=diag.sanitize(p);if(safe)packets.push(safe);}};t.after(()=>globalThis.LiveSttDiagnostics=original);
- const {session,instances}=transport(t,{mode:'dictation',jobId:'00000000-0000-4000-8000-000000000000'}),opening=session.open(),socket=instances[0];socket.open();await flush();assert.equal(JSON.parse(socket.sent[0]).setup.realtimeInputConfig.automaticActivityDetection.disabled,true);socket.message(JSON.stringify({setupComplete:{}}));socket.message(JSON.stringify({sessionResumptionUpdate:{resumable:true,newHandle:'fixture-private-handle'}}));await opening;
+ const {session,instances}=transport(t,{mode:'dictation',modelId:config.DEFAULTS.sttModelId,jobId:'00000000-0000-4000-8000-000000000000'}),opening=session.open(),socket=instances[0];socket.open();await flush();assert.equal(JSON.parse(socket.sent[0]).setup.realtimeInputConfig.automaticActivityDetection.disabled,true);socket.message(JSON.stringify({setupComplete:{}}));socket.message(JSON.stringify({sessionResumptionUpdate:{resumable:true,newHandle:'fixture-private-handle'}}));await opening;
  socket.message(JSON.stringify({voiceActivity:{type:'ACTIVITY_START'}}));await flush();session.sendAudio(new Uint8Array([0,64]));session.sendAudio(new Uint8Array([0,192]));session.endAudio();assert.deepEqual(socket.sent.slice(1).map(w=>Object.keys(JSON.parse(w).realtimeInput)[0]),['activityStart','audio','audio','activityEnd']);
  socket.message(JSON.stringify({voiceActivity:{type:'ACTIVITY_END'}}));socket.message(JSON.stringify({serverContent:{inputTranscription:{text:'fixture-private-transcript'},turnComplete:true,waitingForInput:false},usageMetadata:{private:'fixture-private'},private:'fixture-private'}));await flush();const state=session.sttSnapshot();assert.equal(state.voiceStarts,1);assert.equal(state.voiceEnds,1);assert.equal(state.messagesAfterEnd,2);assert.equal(state.setupMessages,1);assert.equal(state.resumptionMessages,1);assert.equal(state.serverContentMessages,1);assert.equal(state.usageMessages,1);assert.equal(state.pcmDurationMs,.125);assert.ok(state.audioEndMs>=state.lastAudioMs);assert.ok(state.firstServerAfterEndMs>=state.audioEndMs);assert.ok(state.sendIntervalMaxMs>=state.sendIntervalMinMs);
  const event=packets.filter(p=>p.stage==='server-message').at(-1);assert.deepEqual(event.serverEventTypes,['serverContent','usageMetadata']);assert.equal(event.afterAudioEnd,true);assert.equal(event.turnComplete,true);assert.ok(!JSON.stringify(packets).includes('private'));session.close();assert.equal(packets.at(-1).stage,'socket-close');assert.equal(packets.at(-1).localClose,true);
 });
 test('mensagem recebida antes de endAudio, mas parseada depois, não conta como resposta ao fim',async t=>{
- const {session,instances}=transport(t,{mode:'dictation'}),opening=session.open(),socket=instances[0];socket.open();await flush();socket.message(JSON.stringify({setupComplete:{}}));await opening;session.sendAudio(new Uint8Array([0,64]));socket.message(new Blob([JSON.stringify({voiceActivity:{type:'ACTIVITY_START'}})]));session.endAudio();await flush();assert.equal(session.sttSnapshot().messagesAfterEnd,0);socket.message(JSON.stringify({voiceActivity:{type:'ACTIVITY_END'}}));await flush();assert.equal(session.sttSnapshot().messagesAfterEnd,1);session.close();
+ const {session,instances}=transport(t,{mode:'dictation',modelId:config.DEFAULTS.sttModelId}),opening=session.open(),socket=instances[0];socket.open();await flush();socket.message(JSON.stringify({setupComplete:{}}));await opening;session.sendAudio(new Uint8Array([0,64]));socket.message(new Blob([JSON.stringify({voiceActivity:{type:'ACTIVITY_START'}})]));session.endAudio();await flush();assert.equal(session.sttSnapshot().messagesAfterEnd,0);socket.message(JSON.stringify({voiceActivity:{type:'ACTIVITY_END'}}));await flush();assert.equal(session.sttSnapshot().messagesAfterEnd,1);session.close();
 });
 test('pool separa modelo, voz, instrução e JSON; retire remove sessão',async t=>{
  const {options,instances}=transport(t),manager=new sessions.LiveSessionManager();t.after(()=>manager.closeAll());
  async function acquire(override={}){const pending=manager.acquire({...options,...override}),socket=instances.at(-1);socket.open();await flush();socket.message(JSON.stringify({setupComplete:{}}));const session=await pending;manager.release(session);return session;}
  const original=await acquire();
- for(const override of [{voiceName:'Puck'},{systemInstruction:'Outra instrução.'},{modelId:'gemini-3.8-live-extended-thinking',thinkingLevel:'low'},{jsonMode:'override',advancedJson:{setup:{outputAudioTranscription:{}}}}]){const changed=await acquire(override);assert.notEqual(changed,original);assert.deepEqual(JSON.parse(changed.socket.sent[0]),config.buildLiveSessionConfig({...options,...override}));}
+ for(const override of [{voiceName:'Puck'},{systemInstruction:'Outra instrução.'},{jsonMode:'override',advancedJson:{setup:{outputAudioTranscription:{}}}}]){const changed=await acquire(override);assert.notEqual(changed,original);assert.deepEqual(JSON.parse(changed.socket.sent[0]),config.buildLiveSessionConfig({...options,...override}));}
  const reused=await manager.acquire({...options,jobId:'pool-next'});assert.equal(reused,original);assert.equal(reused.handler,null);manager.retire(reused);assert.equal(reused.closed,true);assert.equal([...manager.pool.values()].flat().includes(reused),false);
 });
 test('Extended não conclui utterance IN_PROGRESS antes de IDLE',async t=>{
@@ -231,7 +231,7 @@ test('offscreen encerra payload rejeitado sem repetir em nove chaves/modelos',as
   async resume(){this.state='running';}async close(){this.state='closed';}
  }
  class AudioWorkletNode{constructor(){this.port={postMessage(){}};}connect(node){return node;}}
- const context=vm.createContext({console,performance,structuredClone,WebSocket:Socket,AudioContext,AudioWorkletNode,AbortController,TextDecoder,Blob,atob,btoa,setTimeout,clearTimeout,setInterval(){return 0;},clearInterval(){},chrome:{runtime:{getURL:file=>'chrome-extension://test/'+file,onMessage:{addListener(fn){listener=fn;}},sendMessage(message){messages.push(message);return Promise.resolve();}}}});
+ const context=vm.createContext({console,performance,structuredClone,WebSocket:Socket,AudioContext,AudioWorkletNode,AbortController,TextDecoder,Blob,atob,btoa,setTimeout,clearTimeout,setInterval(){return 0;},clearInterval(){},chrome:{runtime:{getURL:file=>'chrome-extension://test/'+file,onMessage:{addListener(fn){listener=fn;}},sendMessage(message){messages.push(message);return Promise.resolve({success:true,jobId:message.payload?.jobId??null,eventSeq:message.payload?.eventSeq??null,result:'applied'});}}}});
  for(const file of ['live-config.js','live-session-manager.js','offscreen.js'])vm.runInContext(fs.readFileSync(path.join(__dirname,'..',file),'utf8'),context);
  const payload={operation:'TTS_LIVE_START',tabId:0,playerId:'p',requestId:'r',jobId:'j',modelId:'gemini-3.8-live',models:['gemini-3.8-live','gemini-3.8-live-extended-thinking'],apiKeys:Array.from({length:9},(_,i)=>'secret-'+i),text:'Teste de áudio.'};
  const started=await new Promise(resolve=>listener({type:'TTS_OFFSCREEN_COMMAND',target:'offscreen',payload},{},resolve));assert.equal(started.success,true);await flush();await flush();
@@ -239,7 +239,7 @@ test('offscreen encerra payload rejeitado sem repetir em nove chaves/modelos',as
 });
 
 test('marca no recebimento do WebSocket se a primeira fala do bloco já saiu, antes do parse assíncrono',async t=>{
- const {session,instances}=transport(t,{mode:'dictation'}),ready=session.open(),wire=[];
+ const {session,instances}=transport(t,{mode:'dictation',modelId:config.DEFAULTS.sttModelId}),ready=session.open(),wire=[];
  const socket=instances[0];socket.open();await flush();socket.message(JSON.stringify({setupComplete:{}}));await ready;
  try{
   session.handler=(message,phase)=>{if(message.serverContent)wire.push(phase.afterNewSpeech);};

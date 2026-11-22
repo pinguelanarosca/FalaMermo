@@ -59,7 +59,7 @@ class TranscriptionMerger{
 }
 // Um transporte sequencial na mesma sessão Live. Nenhuma chave/modelo pertence a esta interface.
 class LiveChunkTransport{
- constructor({jobId,sendAudio,endAudio,onPartial=()=>{},onChunk=()=>{},onFailure=()=>{},onDiagnostic=()=>{},requiresIdle=false,timeoutMs=15000,config={},now=Date.now,setTimer=setTimeout,clearTimer=clearTimeout}){Object.assign(this,{jobId,sendAudio,endAudio,onPartial,onChunk,onFailure,onDiagnostic,requiresIdle,timeoutMs,now});
+ constructor({jobId,sendAudio,endAudio,onPartial=()=>{},onChunk=()=>{},onFailure=()=>{},onDiagnostic=()=>{},verbatim=false,requiresIdle=false,timeoutMs=15000,config={},now=Date.now,setTimer=setTimeout,clearTimer=clearTimeout}){Object.assign(this,{jobId,sendAudio,endAudio,onPartial,onChunk,onFailure,onDiagnostic,verbatim,requiresIdle,timeoutMs,now});
   // Timers WebIDL exigem Window: this.setTimer() não pode receber o transporte como receptor.
   this.setTimer=setTimer.bind(globalThis);this.clearTimer=clearTimer.bind(globalThis);this.config={...CONFIG,...config};this.chunks=new Map();this.merger=new TranscriptionMerger();this.pendingBytes=0;this.packetSequence=0;this.next=1;this.cancelled=false;this.stopping=false;this.active=null;this.latencies=[];}
  diagnostic(stage,chunk=this.active,extra={}){this.onDiagnostic({stage,sequence:chunk?.sequence,chunkId:chunk?.chunkId,overlapMs:chunk?.overlapMs,startMs:chunk?.startMs,endMs:chunk?.endMs,durationMs:chunk?chunk.endMs-chunk.startMs:undefined,pendingChunks:this.chunks.size,pendingBytes:this.pendingBytes,...extra});}
@@ -133,7 +133,7 @@ class RecoveryStore{
 // Entrada é um fluxo da sessão. Não há ID obrigatório de bloco na transcrição Gemini.
 // Nunca se aguarda texto para encaminhar áudio, nem se atribui resposta tardia ao próximo bloco.
 class DictationTransport{
- constructor({jobId,sendAudio,endAudio,retain=async()=>{},onPartial=()=>{},onChunk=()=>{},onWarning=()=>{},onFailure=()=>{},onDiagnostic=()=>{},requiresIdle=false,timeoutMs=15000,config={},now=Date.now,setTimer=setTimeout,clearTimer=clearTimeout}){Object.assign(this,{jobId,sendAudio,endAudio,retain,onPartial,onChunk,onWarning,onFailure,onDiagnostic,requiresIdle,timeoutMs,now});this.config={...CONFIG,...config};this.setTimer=setTimer.bind(globalThis);this.clearTimer=clearTimer.bind(globalThis);this.blocks=new Map();this.timeline=[];this.offsetKeys=new Set();this.unfinishedActivities=new Set();this.pendingBytes=0;this.pendingPackets=0;this.packetSequence=0;this.next=1;this.work=Promise.resolve();this.cancelled=false;this.stopping=false;this.revision=0;this.ambiguous=false;}
+ constructor({jobId,sendAudio,endAudio,retain=async()=>{},onPartial=()=>{},onChunk=()=>{},onWarning=()=>{},onFailure=()=>{},onDiagnostic=()=>{},verbatim=false,requiresIdle=false,timeoutMs=15000,config={},now=Date.now,setTimer=setTimeout,clearTimer=clearTimeout}){Object.assign(this,{jobId,sendAudio,endAudio,retain,onPartial,onChunk,onWarning,onFailure,onDiagnostic,verbatim,requiresIdle,timeoutMs,now});this.config={...CONFIG,...config};this.setTimer=setTimer.bind(globalThis);this.clearTimer=clearTimer.bind(globalThis);this.blocks=new Map();this.timeline=[];this.offsetKeys=new Set();this.unfinishedActivities=new Set();this.pendingBytes=0;this.pendingPackets=0;this.packetSequence=0;this.next=1;this.work=Promise.resolve();this.cancelled=false;this.stopping=false;this.revision=0;this.ambiguous=false;}
  diagnostic(stage,c,extra={}){this.onDiagnostic({stage,sequence:c?.sequence,chunkId:c?.chunkId,startMs:c?.startMs,endMs:c?.endMs,durationMs:c?c.endMs-c.startMs:undefined,overlapMs:c?.overlapMs,pendingBytes:this.pendingBytes,pendingChunks:this.pendingPackets,...extra});}
  snapshot(){
   // Offsets podem reiniciar entre atividades. Só ordena dentro de um trecho correlacionável.
@@ -175,10 +175,24 @@ class DictationTransport{
  receive(sc){
   if(this.cancelled||this.finished)return;
   if(sc.interactionStatus)this.interactionStatus=sc.interactionStatus;
+  const received=sc.inputTranscription;
+  if(this.verbatim){
+   const candidates=[...this.unfinishedActivities];
+   const eligible=received?candidates[0]:this.openBlock?.activity;
+   if(eligible===undefined)return;
+   if(received){
+    // A single WebSocket preserves wire order. Optional offsets disambiguate retransmissions.
+    const start=transcriptOffset(received.startOffset),end=transcriptOffset(received.endOffset);
+    const key=start!==null&&end!==null?JSON.stringify([start,end,received.text]):null;
+    if(key&&this.offsetKeys.has(key))return;
+    if(key)this.offsetKeys.add(key);
+    sc={inputTranscription:{...received,text:typeof received.text==='string'?received.text.trim():'',finished:true}};
+   }
+  }
   const input=sc.inputTranscription;
   if(sc.interimInputTranscription?.text){this.interim=sc.interimInputTranscription.text;this.onPartial(this.snapshot());}
   if(input&&typeof input.text==='string'){
-   const candidates=[...this.blocks.values()].filter(c=>c.sentAt!==undefined&&(c.state==='pending'||c.state==='unresolved')),activities=new Set(candidates.map(c=>c.activity)),group=activities.size===1?candidates:[],c=group[0];
+   const candidates=[...this.blocks.values()].filter(c=>c.sentAt!==undefined&&(c.state==='pending'||c.state==='unresolved')),activities=new Set(candidates.map(c=>c.activity)),group=this.verbatim?candidates.filter(c=>c.activity===[...this.unfinishedActivities][0]):activities.size===1?candidates:[],c=group[0];
    if(input.text){
     const offset=value=>typeof value==='string'&&/^\d+(?:\.\d+)?s$/.test(value)?parseFloat(value)*1000:null,start=offset(input.startOffset),end=offset(input.endOffset),epoch=this.connectionEpoch||0,activity=this.unfinishedActivities.size===1?[...this.unfinishedActivities][0]:this.unfinishedActivities.size===0?this.lastFinishedActivity:null,scope=activity!=null&&start!==null&&end!==null?epoch+':'+activity:null,key=scope?JSON.stringify([scope,start,end,input.text]):null;
     if(key&&this.offsetKeys.has(key))return;
@@ -191,7 +205,8 @@ class DictationTransport{
     this.unresolved(c);
    }
   }
-  if(input?.finished===true&&this.unfinishedActivities.size===1){this.lastFinishedActivity=[...this.unfinishedActivities][0];this.unfinishedActivities.clear();}
+  if(this.verbatim&&input){this.unfinishedActivities.delete([...this.unfinishedActivities][0]);}
+  else if(input?.finished===true&&this.unfinishedActivities.size===1){this.lastFinishedActivity=[...this.unfinishedActivities][0];this.unfinishedActivities.clear();}
   // turnComplete/generationComplete/voiceActivity não comprovam transcrição nem silêncio.
   if(this.stopping&&(input?.text||sc.interimInputTranscription?.text)){this.clearTimer(this.finalSettle);this.finalSettle=this.setTimer(()=>{this.finalSettle=null;this.maybeFinish();},this.config.settleMs);}
   this.maybeFinish();
@@ -203,6 +218,46 @@ class DictationTransport{
  cancel(error=failure('Ditado cancelado.','CANCELLED')){if(this.cancelled)return;this.cancelled=true;for(const c of this.blocks.values()){this.clearTimer(c.deadline);this.clearTimer(c.settle);}this.clearTimer(this.stopDeadline);this.clearTimer(this.finalSettle);this.reject?.(error);}
 }
 // One Live session carries one local block. Its responses need no remote block ID.
+// As confirmações do Transcribe são segmentos; interims são revisões da hipótese.
+function transcriptOffset(value){
+ return typeof value==='string'&&/^\d+(?:\.\d+)?s$/.test(value)?Number(value.slice(0,-1)):null;
+}
+class VerbatimTranscription{
+ constructor(){this.segments=[];this.offsets=new Set();this.interim='';this.interimEnd=null;this.finalEnd=null;this.length=0;}
+ update(content){
+  const final=content.inputTranscription;
+  const value=typeof final?.text==='string'?final.text.trim():'';
+  if(final){
+   const start=transcriptOffset(final.startOffset),end=transcriptOffset(final.endOffset);
+   const key=start!==null&&end!==null?JSON.stringify([start,end]):null;
+   const previous=this.segments.at(-1);
+   if(key?this.offsets.has(key):!!value&&previous?.text===value)return false;
+   if(value){
+    if(key)this.offsets.add(key);
+    this.segments.push({start,end,text:value});
+    this.length+=value.length+1;
+   }
+   if(end!==null)this.finalEnd=Math.max(this.finalEnd??0,end);
+   if(end===null||this.interimEnd===null||this.interimEnd<=end){
+    this.interim='';this.interimEnd=null;
+   }
+   return true;
+  }
+  const interim=content.interimInputTranscription;
+  if(typeof interim?.text!=='string')return false;
+  const start=transcriptOffset(interim.startOffset),end=transcriptOffset(interim.endOffset);
+  if(start!==null&&this.finalEnd!==null&&start<this.finalEnd&&end!==null&&end<=this.finalEnd)return false;
+  if(end!==null&&this.interimEnd!==null&&end<this.interimEnd)return false;
+  if(interim.text===this.interim&&end===this.interimEnd)return false;
+  this.interim=interim.text.slice(0,100000);this.interimEnd=end;
+  return true;
+ }
+ get text(){
+  const segments=this.segments;
+  const ordered=segments.every(segment=>segment.start!==null)?[...segments].sort((a,b)=>a.start-b.start||a.end-b.end):segments;
+  return ordered.map(segment=>segment.text).join(' ');
+ }
+}
 class DistributedDictation {
  constructor({jobId,retain,openLane,budget={take:()=>true,release:()=>{}},copies=2,
    onPartial=()=>{},onChunk=()=>{},onWarning=()=>{},onFailure=()=>{},config={},
@@ -222,7 +277,9 @@ class DistributedDictation {
   this.queuedBytes=0;
   this.bufferedBytes=0;
   this.pendingBlocks=0;
+  this.revision=0;
   this.text='';
+  this.partial='';
   this.tail=new Uint8Array();
  }
  get stats(){return {...this.counts,unresolvedSequences:[...this.gaps].sort((a,b)=>a-b)};}
@@ -277,9 +334,10 @@ class DistributedDictation {
    this.close(previous,chunk.cutReason);
    return;
   }
+  // Setup can run while the journal commits. No lane receives audio before that commit.
+  const block=previous||this.createBlock(chunk);
   await this.retain(packet);
   if(this.cancelled)return;
-  const block=previous||this.createBlock(chunk);
   block.endMs=chunk.endMs;
   // O primeiro pacote pode ser só pre-roll; a fala nova chega nos seguintes.
   if(chunk.speechAfterOverlap===true)block.speechAfterOverlap=true;
@@ -370,6 +428,7 @@ class DistributedDictation {
   lane.ended=true;
   lane.deadline=this.setTimer(()=>this.endLane(block,lane,failure('Prazo de resposta STT esgotado.','CHUNK_TIMEOUT')),lane.session.timeoutMs);
   try{lane.session.end();}catch(error){this.endLane(block,lane,error);}
+  if(lane.transcription&&lane.text&&!lane.interim)this.settleVerbatim(block,lane);
  }
  trim(block){
   if(!block.processing)return;
@@ -384,6 +443,27 @@ class DistributedDictation {
  receive(block,lane,content,afterAudioEnd,afterNewSpeech){
   // Setup, pre-roll e overlap não contêm a primeira fala nova desta réplica.
   if(lane.done||!lane.session||!lane.sentNewSpeech||afterNewSpeech===false)return;
+  if(lane.session.verbatim){
+   // Após a primeira confirmação pós-atividade, só um offset novo distingue outra hipótese.
+   if(lane.finalAfterEnd&&!content.inputTranscription){
+    const start=transcriptOffset(content.interimInputTranscription?.startOffset);
+    if(start===null||lane.transcription.finalEnd===null||start<lane.transcription.finalEnd)return;
+   }
+   lane.transcription??=new VerbatimTranscription();
+   if(!lane.transcription.update(content))return;
+   if(lane.transcription.length>100000){
+    this.endLane(block,lane,failure('Limite de texto do bloco STT.','BACKPRESSURE'));
+    return;
+   }
+   lane.text=lane.transcription.text;
+   lane.interim=lane.transcription.interim;
+   this.publishPartial(block,lane);
+   if(lane.ended&&afterAudioEnd!==false&&typeof content.inputTranscription?.text==='string'&&content.inputTranscription.text.trim()){
+    lane.finalAfterEnd=true;
+    this.settleVerbatim(block,lane);
+   }
+   return;
+  }
   const input=content.inputTranscription;
   if(typeof input?.text==='string'&&input.text){
    if(lane.text.length+input.text.length>100000){
@@ -394,8 +474,8 @@ class DistributedDictation {
    lane.interim='';
   }
   if(typeof content.interimInputTranscription?.text==='string')lane.interim=content.interimInputTranscription.text.slice(0,100000);
-  if(block.sequence===this.nextPublish&&(input?.text||content.interimInputTranscription)){
-   this.publishPartial(block);
+  if(input?.text||content.interimInputTranscription){
+   this.publishPartial(block,lane);
   }
   if(!lane.ended)return;
   if(afterAudioEnd!==false){
@@ -415,18 +495,63 @@ class DistributedDictation {
    lane.settle=this.setTimer(()=>this.complete(block,lane),this.config.settleMs);
   }
  }
- publishPartial(block){
-  if(!block||block.settled||this.cancelled)return;
-  const source=block.lanes.find(lane=>!lane.done&&(lane.text||lane.interim));
-  let partial=source?[source.text.trim(),source.interim.trim()].filter(Boolean).join(' '):'';
-  if(partial&&block.overlapMs&&this.previousResolved){
-   const prior=this.text.slice(-240).trimStart();
-   const merged=mergeTranscriptionChunks([{sequence:1,text:prior},{...block,sequence:2,text:partial}]);
-   const suffix=merged.slice(prior.length).trimStart();
-   // Só remove a correspondência literal; ausência de repetição não invalida a prévia.
-   partial=suffix;
+ settleVerbatim(block,lane){
+  this.clearTimer(lane.settle);
+  lane.settle=this.setTimer(()=>{
+   lane.settle=null;
+   if(!lane.done&&!lane.interim)this.complete(block,lane);
+  },this.config.settleMs);
+ }
+ publishPartial(block,lane){
+  if(block.settled||this.cancelled)return;
+  if(lane){
+   const text=[lane.text.trim(),lane.interim.trim()].filter(Boolean).join(' ');
+   const end=lane.transcription?.interimEnd??lane.transcription?.finalEnd;
+   if(text!==lane.preview||end!=null&&(lane.previewEnd==null||end>lane.previewEnd)){
+    lane.preview=text;
+    lane.previewEnd=end;
+    lane.revision=++this.revision;
+    lane.updatedAt=this.now();
+   }
   }
-  if(partial!==this.partial){this.partial=partial;this.onPartial({...this.snapshot(partial),sequence:block.sequence});}
+  const leader=block.leader;
+  const candidates=block.lanes.filter(copy=>!copy.done&&copy.preview&&
+   (!leader?.text||copy.text===leader.text||copy.text.startsWith(leader.text+' ')));
+  const latest=candidates.reduce((best,copy)=>!best||copy.revision>best.revision?copy:best,null);
+  if(!leader?.preview||leader.done)block.leader=latest||leader;
+  else if(latest&&latest!==leader&&latest.revision>leader.revision){
+   const leaderEnd=leader.transcription?.interimEnd??leader.transcription?.finalEnd;
+   const latestEnd=latest.transcription?.interimEnd??latest.transcription?.finalEnd;
+   const extendsConfirmed=Boolean(latest.text&&latest.text.length>leader.text.length&&
+    (!leader.text||latest.text.startsWith(leader.text+' ')));
+   const progressed=latestEnd!=null&&leaderEnd!=null?latestEnd>leaderEnd:latest.preview.length>leader.preview.length;
+   if(extendsConfirmed||progressed&&latest.updatedAt-leader.updatedAt>=this.config.settleMs)block.leader=latest;
+  }
+  block.preview=block.leader?.preview||'';
+  this.publishPreviews();
+ }
+ previews(){
+  const head=this.blocks.get(this.nextPublish);
+  let partial=head?.preview||'',prior=this.previousResolved!==false?this.text.slice(-240).trimStart():'';
+  const fragments=[];
+  for(const block of this.blocks.values()){
+   const value=block.settled?block.text:block.preview;
+   if(!value){prior='';continue;}
+   const suffix=prior&&block.overlapMs?
+    mergeTranscriptionChunks([{sequence:1,text:prior},{...block,sequence:2,text:value}]).slice(prior.length).trimStart():value;
+   if(block===head)partial=suffix;
+   if(suffix)fragments.push(suffix);
+   prior=value.slice(-240).trimStart();
+  }
+  const visual=fragments.join('\n').slice(0,100000);
+  return {partial,visual:fragments.length>1||visual!==partial?visual:undefined};
+ }
+ publishPreviews(){
+  const {partial,visual}=this.previews();
+  if(partial===this.partial&&visual===this.visual)return;
+  const headChanged=partial!==this.partial;
+  this.partial=partial;this.visual=visual;
+  this.onPartial({...this.snapshot(partial),sequence:this.nextPublish,previewText:visual??null,previewOnly:!headChanged});
  }
  close(block,reason){
   block.closed=true;
@@ -439,6 +564,10 @@ class DistributedDictation {
  }
  endLane(block,lane,error){
   if(lane.done)return;
+  if(error&&lane.finalAfterEnd&&lane.text&&!block.settled&&!this.cancelled){
+   this.complete(block,lane,error);
+   return;
+  }
   lane.done=true;
   this.clearTimer(lane.deadline);
   this.clearTimer(lane.settle);
@@ -446,23 +575,32 @@ class DistributedDictation {
   lane.controller.abort();
   this.trim(block);
   if(block.closed&&block.lanes.every(copy=>copy.done))this.complete(block);
-  else if(block.sequence===this.nextPublish)this.publishPartial(block);
+  else this.publishPartial(block);
  }
- complete(block,winner){
+ complete(block,winner,error){
   if(block.settled||this.cancelled)return;
   this.diagnosticBlocks?.leave(block.diagnostic,winner?undefined:'NO_TRANSCRIPTION');
   block.settled=true;
-  block.text=winner?.text.trim()||'';
+  // A confirmação de uma réplica é utilizável mesmo se faltar o fim do turno.
+  const confirmed=winner||[block.leader,...block.lanes].find(lane=>lane?.transcription&&lane.text);
+  block.text=confirmed?.text.trim()||'';
+  if(winner?.transcription&&block.text){
+   for(const lane of block.lanes){
+    if(lane.transcription&&lane.text.startsWith(block.text+' '))block.text=lane.text.trim();
+   }
+  }
   if(block.processing)this.pendingBlocks--;
   if(winner){
    this.counts.transcribed++;
    winner.session.confirm(this.now()-block.closedAt);
-  }else{
+  }
+  const gap=!winner||Boolean(winner.interim);
+  if(gap){
    this.counts.unresolved++;
    this.gaps.push(block.sequence);
   }
-  for(const lane of block.lanes)this.endLane(block,lane);
-  if(!winner||block.admitted<2)this.onWarning({sequence:block.sequence,gap:!winner});
+  for(const lane of block.lanes)this.endLane(block,lane,lane===winner?error:undefined);
+  if(gap||block.admitted<2)this.onWarning({sequence:block.sequence,gap});
   this.publish();
   this.admitWaiting();
  }
@@ -487,10 +625,12 @@ class DistributedDictation {
    advanced=true;
   }
   if(advanced){
+   const {partial,visual}=this.previews();
    this.partial='';
-   this.onChunk({...this.snapshot(),sequence:this.nextPublish-1});
-   this.publishPartial(this.blocks.get(this.nextPublish));
+   this.visual=visual??(partial||undefined);
+   this.onChunk({...this.snapshot(),sequence:this.nextPublish-1,previewText:this.visual??null});
   }
+  this.publishPreviews();
   if(this.inputClosed&&!this.blocks.size)this.resolve?.(this.snapshot());
  }
  finish(){
@@ -522,5 +662,5 @@ class DistributedDictation {
   this.reject?.(error);
  }
 }
-return{CONFIG,pcmRms,CapturePipeline,mergeTranscriptionChunks,TranscriptionMerger,LiveChunkTransport,DictationTransport,DistributedDictation,RecoveryStore,recovery:new RecoveryStore()};
+return{CONFIG,VerbatimTranscription,pcmRms,CapturePipeline,mergeTranscriptionChunks,TranscriptionMerger,LiveChunkTransport,DictationTransport,DistributedDictation,RecoveryStore,recovery:new RecoveryStore()};
 });
